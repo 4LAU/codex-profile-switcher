@@ -350,6 +350,159 @@ enum AuthRefresher {
     }
 }
 
+// MARK: - Usage API (adapted from codexbar)
+
+struct UsageResponse: Decodable {
+    let planType: String?
+    let rateLimit: RateLimitInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case planType = "plan_type"
+        case rateLimit = "rate_limit"
+    }
+
+    struct RateLimitInfo: Decodable {
+        let primaryWindow: WindowInfo?
+        let secondaryWindow: WindowInfo?
+
+        enum CodingKeys: String, CodingKey {
+            case primaryWindow = "primary_window"
+            case secondaryWindow = "secondary_window"
+        }
+    }
+
+    struct WindowInfo: Decodable {
+        let usedPercent: Int
+        let resetAt: Int
+        let limitWindowSeconds: Int
+
+        enum CodingKeys: String, CodingKey {
+            case usedPercent = "used_percent"
+            case resetAt = "reset_at"
+            case limitWindowSeconds = "limit_window_seconds"
+        }
+    }
+}
+
+enum UsageFetcher {
+    private static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+
+    static func fetch(accessToken: String, accountId: String?) async throws -> UsageResponse {
+        var request = URLRequest(url: Self.usageURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let accountId, !accountId.isEmpty {
+            request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UsageFetchError.invalidResponse
+        }
+
+        switch http.statusCode {
+        case 200...299:
+            return try JSONDecoder().decode(UsageResponse.self, from: data)
+        case 401, 403:
+            throw UsageFetchError.unauthorized
+        default:
+            throw UsageFetchError.serverError(http.statusCode)
+        }
+    }
+}
+
+enum UsageFetchError: LocalizedError, Equatable {
+    case unauthorized, invalidResponse, serverError(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized: return "Token expired or invalid"
+        case .invalidResponse: return "Invalid API response"
+        case .serverError(let c): return "Server error: \(c)"
+        }
+    }
+}
+
+// MARK: - UsageProvider
+
+final class UsageProvider {
+    private let store: ProfileStore
+    private var activeRefreshTask: Task<Void, Never>?
+
+    init(store: ProfileStore) {
+        self.store = store
+    }
+
+    func refreshAll() {
+        self.activeRefreshTask?.cancel()
+        self.activeRefreshTask = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for profile in self.store.config.profiles {
+                    group.addTask { await self.refreshProfile(profile.id) }
+                }
+            }
+        }
+    }
+
+    func refreshActive() {
+        let id = self.store.config.activeProfile
+        Task { await self.refreshProfile(id) }
+    }
+
+    private func refreshProfile(_ id: String) async {
+        let authURL = self.store.authFilePath(for: id)
+        guard FileManager.default.fileExists(atPath: authURL.path) else {
+            self.store.updateStatus(id, .notSetUp)
+            return
+        }
+
+        do {
+            let creds = try await AuthRefresher.refreshIfNeeded(
+                profileId: id,
+                activeProfileId: self.store.config.activeProfile,
+                authFileURL: authURL)
+
+            let response = try await UsageFetcher.fetch(
+                accessToken: creds.accessToken,
+                accountId: creds.accountId)
+
+            let snapshot = UsageSnapshot(
+                planType: response.planType,
+                primaryUsedPercent: response.rateLimit?.primaryWindow?.usedPercent ?? 0,
+                primaryResetAt: response.rateLimit?.primaryWindow.map {
+                    Date(timeIntervalSince1970: TimeInterval($0.resetAt))
+                },
+                secondaryUsedPercent: response.rateLimit?.secondaryWindow?.usedPercent ?? 0,
+                secondaryResetAt: response.rateLimit?.secondaryWindow.map {
+                    Date(timeIntervalSince1970: TimeInterval($0.resetAt))
+                },
+                fetchedAt: Date())
+
+            self.store.updateStatus(id, .available(snapshot))
+        } catch is CancellationError {
+            return
+        } catch let error as UsageFetchError where error == .unauthorized {
+            let cached = self.store.cache.snapshots[id]
+            self.store.updateStatus(id, .reloginNeeded(cached))
+        } catch let error as AuthError {
+            let cached = self.store.cache.snapshots[id]
+            switch error {
+            case .refreshExpired, .refreshReused, .refreshRevoked:
+                self.store.updateStatus(id, .reloginNeeded(cached))
+            case .notFound:
+                self.store.updateStatus(id, .notSetUp)
+            default:
+                self.store.updateStatus(id, .stale(cached))
+            }
+        } catch {
+            let cached = self.store.cache.snapshots[id]
+            self.store.updateStatus(id, .stale(cached))
+        }
+    }
+}
+
 // MARK: - App Entry Point (placeholder — will be completed in Task 8)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
