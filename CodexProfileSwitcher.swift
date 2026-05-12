@@ -685,7 +685,7 @@ struct ProfileCardView: View {
                 .foregroundStyle(.red)
                 .padding(.leading, 19)
         case .notSetUp:
-            Text("Not set up — click to log in")
+            Text("Not set up — click to set up")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 19)
@@ -770,12 +770,9 @@ enum IconRenderer {
 
 // MARK: - CodexBridge (shells out to codex-profile wrapper)
 
-struct DeviceAuthInfo {
-    let url: String
-    let code: String
-}
-
 enum CodexBridge {
+    private static var loginProcesses: [String: Process] = [:]
+
     private static func codexProfilePath() -> String? {
         let candidates: [String?] = [
             Bundle.main.executableURL?
@@ -788,15 +785,6 @@ enum CodexBridge {
         return candidates.compactMap { $0 }.first {
             FileManager.default.isExecutableFile(atPath: $0)
         }
-    }
-
-    private static func codexCLIPath() -> String? {
-        let candidates = [
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-            "/Applications/Codex.app/Contents/Resources/codex",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     static func switchToProfile(_ profileId: String) async -> Bool {
@@ -816,65 +804,32 @@ enum CodexBridge {
         }
     }
 
-    static func startDeviceAuth(profileId: String, profileLabel: String? = nil, store: ProfileStore, completion: @escaping (Bool) -> Void) {
-        guard let cli = Self.codexCLIPath() else {
+    static func startLogin(profileId: String, completion: @escaping (Bool) -> Void) {
+        guard let path = Self.codexProfilePath() else {
             completion(false)
             return
         }
 
-        let codexHome = store.codexHome(for: profileId).path
-        try? FileManager.default.createDirectory(atPath: codexHome, withIntermediateDirectories: true)
-
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: cli)
-        proc.arguments = ["login", "--device-auth"]
-        proc.environment = ProcessInfo.processInfo.environment.merging(
-            ["CODEX_HOME": codexHome]) { _, new in new }
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-
-        var accumulated = ""
-        var authShown = false
-
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            accumulated += chunk
-
-            if !authShown, let info = Self.parseDeviceAuth(from: accumulated) {
-                authShown = true
-                DispatchQueue.main.async {
-                    DeviceAuthWindow.show(info: info, profileId: profileId, profileLabel: profileLabel)
-                }
-            }
-        }
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = ["login", profileId]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
 
         proc.terminationHandler = { p in
-            pipe.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
-                DeviceAuthWindow.dismiss()
+                Self.loginProcesses[profileId] = nil
                 completion(p.terminationStatus == 0)
             }
         }
 
-        try? proc.run()
-    }
-
-    private static func parseDeviceAuth(from output: String) -> DeviceAuthInfo? {
-        let stripped = output.replacingOccurrences(
-            of: "\\x1b\\[[0-9;]*m", with: "", options: .regularExpression)
-
-        guard let urlMatch = stripped.range(of: "https://[^\\s]+",
-                                            options: .regularExpression),
-              let codeMatch = stripped.range(of: "[A-Z0-9]{4}-[A-Z0-9]{4,5}",
-                                             options: .regularExpression)
-        else { return nil }
-
-        return DeviceAuthInfo(
-            url: String(stripped[urlMatch]),
-            code: String(stripped[codeMatch]))
+        do {
+            Self.loginProcesses[profileId] = proc
+            try proc.run()
+        } catch {
+            Self.loginProcesses[profileId] = nil
+            completion(false)
+        }
     }
 }
 
@@ -1001,8 +956,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         switch status {
         case .notSetUp, .reloginNeeded:
-            let label = self.store.config.profiles.first { $0.id == id }?.label
-            CodexBridge.startDeviceAuth(profileId: id, profileLabel: label, store: self.store) { [weak self] success in
+            CodexBridge.startLogin(profileId: id) { [weak self] success in
                 if success {
                     self?.usageProvider.refreshAll(force: true)
                 }
@@ -1109,133 +1063,6 @@ struct EditLabelsView: View {
         Binding(
             get: { self.labels[id] ?? defaultValue },
             set: { self.labels[id] = $0 })
-    }
-}
-
-// MARK: - Device Auth Window
-
-enum DeviceAuthWindow {
-    private static var windowController: NSWindowController?
-
-    static func show(info: DeviceAuthInfo, profileId: String, profileLabel: String? = nil) {
-        Self.dismiss()
-
-        let title = profileLabel.map { "Log In — \($0)" } ?? "Log In — Profile \(profileId)"
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 290),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false)
-        window.title = title
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.level = .floating
-
-        let view = DeviceAuthView(info: info)
-        window.contentView = NSHostingView(rootView: view)
-
-        let wc = NSWindowController(window: window)
-        Self.windowController = wc
-        wc.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    static func dismiss() {
-        Self.windowController?.window?.close()
-        Self.windowController = nil
-    }
-}
-
-struct DeviceAuthView: View {
-    let info: DeviceAuthInfo
-    @State private var codeCopied = false
-    @State private var linkCopied = false
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Sign in to OpenAI")
-                .font(.system(size: 16, weight: .semibold))
-
-            VStack(spacing: 6) {
-                Text("1. Open this link in an incognito/private window:")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack(spacing: 8) {
-                    Button(action: { self.openURL() }) {
-                        Text(self.info.url)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.blue)
-                            .underline()
-                    }
-                    .buttonStyle(.plain)
-
-                    Button(self.linkCopied ? "Copied" : "Copy Link") {
-                        self.copyWithFeedback(self.info.url, flag: self.$linkCopied)
-                    }
-                    .font(.system(size: 11))
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text("Use incognito so you can sign in with a different account.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            VStack(spacing: 6) {
-                Text("2. Enter this one-time code:")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack(spacing: 12) {
-                    Text(self.info.code)
-                        .font(.system(size: 28, weight: .bold, design: .monospaced))
-                        .textSelection(.enabled)
-                        .onTapGesture {
-                            self.copyWithFeedback(self.info.code, flag: self.$codeCopied)
-                        }
-
-                    Button(self.codeCopied ? "Copied" : "Copy") {
-                        self.copyWithFeedback(self.info.code, flag: self.$codeCopied)
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Waiting for sign-in...")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Expires in 15 minutes. Never share this code.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(24)
-    }
-
-    private func copyWithFeedback(_ text: String, flag: Binding<Bool>) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        flag.wrappedValue = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            flag.wrappedValue = false
-        }
-    }
-
-    private func openURL() {
-        if let url = URL(string: self.info.url) {
-            NSWorkspace.shared.open(url)
-        }
     }
 }
 

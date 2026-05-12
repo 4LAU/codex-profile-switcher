@@ -39,7 +39,8 @@ The binary is installed to `~/.local/bin/codex-profile-switcher`.
 
 ## Setting Up Profiles
 
-Each profile needs a one-time login. Use the included `codex-profile` CLI helper:
+Each profile needs a one-time setup before it can be switched from the menu bar.
+Use the included `codex-profile` CLI helper:
 
 ```bash
 codex-profile login 1
@@ -47,7 +48,14 @@ codex-profile login 2
 # ... through 8
 ```
 
-Each login opens an isolated browser session (via a temporary Chrome/Firefox profile) so you can authenticate with a different OpenAI account without cookie conflicts.
+This uses Codex's normal supported browser login flow with an isolated `CODEX_HOME`
+for each profile. After a profile is set up, switching profiles does not require
+logging in or out of accounts; the app relaunches Codex with that profile's saved
+credentials.
+
+If your workspace enables Codex device code authentication, you can still pass
+device-auth options through the helper manually. The app uses the normal CLI login
+flow because it works across workspaces without admin changes.
 
 ## How It Works
 

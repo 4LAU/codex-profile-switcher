@@ -153,40 +153,6 @@ command_cli() {
   exec env CODEX_HOME="$codex_home" "$codex_cli" "$@"
 }
 
-default_browser_bundle_id() {
-  defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null \
-    | grep -B1 'https' | grep 'LSHandlerRoleAll' | head -1 \
-    | sed 's/.*= "//;s/";//' 2>/dev/null || echo ""
-}
-
-open_isolated_browser() {
-  local url="$1"
-  local tmpdir
-  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/codex-login-XXXXXX")"
-
-  local browser app_name
-  browser="$(default_browser_bundle_id)"
-
-  case "$browser" in
-    com.google.chrome|com.google.chrome.canary) app_name="Google Chrome" ;;
-    com.brave.browser*)                         app_name="Brave Browser" ;;
-    company.thebrowser.browser)                 app_name="Arc" ;;
-    com.microsoft.edgemac)                      app_name="Microsoft Edge" ;;
-  esac
-
-  if [[ -n "${app_name:-}" ]]; then
-    note "Opening isolated $app_name session..."
-    open -na "$app_name" --args --user-data-dir="$tmpdir" "$url"
-  elif [[ "$browser" == org.mozilla.firefox ]]; then
-    note "Opening isolated Firefox session..."
-    /Applications/Firefox.app/Contents/MacOS/firefox -profile "$tmpdir" -no-remote "$url" &
-  else
-    note "Your browser does not support isolated sessions."
-    note "Please log out of any existing OpenAI account before proceeding."
-    open "$url"
-  fi
-}
-
 command_login() {
   local profile="${1:-}"
   [[ -n "$profile" ]] || die "Usage: $PROGRAM login <profile> [codex-login-args...]"
@@ -197,33 +163,8 @@ command_login() {
   ensure_home "$codex_home"
   codex_cli="$(find_codex_cli)"
 
-  local tmpout
-  tmpout="$(mktemp "${TMPDIR:-/tmp}/codex-login-out-XXXXXX")"
-
   note "Starting login for profile '$profile'..."
-
-  env CODEX_HOME="$codex_home" "$codex_cli" login "$@" > >(tee "$tmpout") 2>&1 &
-  local pid=$!
-
-  local url="" i
-  for i in $(seq 1 30); do
-    url="$(grep -oE 'https://[^ ]+' "$tmpout" 2>/dev/null | head -1 || true)"
-    if [[ -n "$url" ]]; then
-      break
-    fi
-    sleep 0.5
-  done
-
-  if [[ -n "$url" ]]; then
-    open_isolated_browser "$url"
-  else
-    note "Could not extract login URL. Complete login in the browser that opened."
-  fi
-
-  wait "$pid"
-  local exit_code=$?
-  rm -f "$tmpout"
-  return "$exit_code"
+  exec env CODEX_HOME="$codex_home" "$codex_cli" login "$@"
 }
 
 command_status_one() {
