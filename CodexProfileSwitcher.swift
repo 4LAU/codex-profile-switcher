@@ -503,6 +503,198 @@ final class UsageProvider {
     }
 }
 
+// MARK: - Helpers
+
+func resetCountdown(from date: Date?) -> String {
+    guard let date, date > Date() else { return "" }
+    let diff = Int(date.timeIntervalSinceNow)
+    let days = diff / 86400
+    let hours = (diff % 86400) / 3600
+    let mins = (diff % 3600) / 60
+    if days > 0 { return "\(days)d\(hours)h" }
+    if hours > 0 { return "\(hours)h\(mins)m" }
+    return "\(mins)m"
+}
+
+func progressColor(for percent: Int) -> Color {
+    if percent >= 80 { return .red }
+    if percent >= 50 { return .orange }
+    return .green
+}
+
+func planDisplayName(_ raw: String?) -> String {
+    guard let raw, !raw.isEmpty else { return "" }
+    switch raw {
+    case "pro": return "Pro"
+    case "plus": return "Plus"
+    case "team": return "Team"
+    case "business": return "Business"
+    case "enterprise": return "Enterprise"
+    case "free": return "Free"
+    case "edu", "education": return "Edu"
+    default: return raw.capitalized
+    }
+}
+
+// MARK: - SwiftUI Views (progress bar adapted from codexbar)
+
+struct UsageBar: View {
+    let percent: Double
+    let tint: Color
+
+    var body: some View {
+        Canvas { context, size in
+            let fillWidth = size.width * min(100, max(0, self.percent)) / 100
+            let cornerRadius = size.height / 2
+            let cornerSize = CGSize(width: cornerRadius, height: cornerRadius)
+            let rect = CGRect(origin: .zero, size: size)
+
+            let trackPath = Path { p in p.addRoundedRect(in: rect, cornerSize: cornerSize) }
+            context.fill(trackPath, with: .color(.gray.opacity(0.25)))
+
+            if fillWidth > 0 {
+                let fillRect = CGRect(x: 0, y: 0, width: min(fillWidth, size.width), height: size.height)
+                let fillPath = Path { p in p.addRoundedRect(in: fillRect, cornerSize: cornerSize) }
+                context.fill(fillPath, with: .color(self.tint))
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+struct UsageRow: View {
+    let label: String
+    let percent: Int
+    let resetAt: Date?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(self.label)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, alignment: .leading)
+
+            UsageBar(percent: Double(self.percent), tint: progressColor(for: self.percent))
+                .frame(width: 160)
+
+            Text("\(self.percent)%")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .trailing)
+
+            Text(resetCountdown(from: self.resetAt))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+}
+
+struct ProfileCardView: View {
+    let profile: ProfileConfig
+    let status: ProfileStatus
+    let isActive: Bool
+    let onSwitch: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            self.headerRow
+            self.statusContent
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(width: 310, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { if !self.isActive { self.onSwitch() } }
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 6) {
+            if self.isActive {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.primary)
+            } else {
+                Spacer().frame(width: 13)
+            }
+
+            Text("\(self.profile.id)")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            Text(self.profile.label)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+
+            Spacer()
+
+            if let planName = self.planType {
+                Text(planName)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.gray.opacity(0.15))
+                    .cornerRadius(4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusContent: some View {
+        switch self.status {
+        case .available(let snap):
+            self.usageBars(snap)
+        case .loading:
+            Text("Refreshing...")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 19)
+        case .stale(let snap):
+            if let snap {
+                self.usageBars(snap)
+                Text("Data may be stale")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 19)
+            } else {
+                Text("No data yet")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 19)
+            }
+        case .reloginNeeded(let snap):
+            if let snap { self.usageBars(snap) }
+            Text("Re-login needed")
+                .font(.system(size: 10))
+                .foregroundStyle(.red)
+                .padding(.leading, 19)
+        case .notSetUp:
+            Text("Not set up — click to log in")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 19)
+        }
+    }
+
+    private func usageBars(_ snap: UsageSnapshot) -> some View {
+        VStack(spacing: 2) {
+            UsageRow(label: "5h", percent: snap.primaryUsedPercent, resetAt: snap.primaryResetAt)
+            UsageRow(label: "Wk", percent: snap.secondaryUsedPercent, resetAt: snap.secondaryResetAt)
+        }
+        .padding(.leading, 19)
+    }
+
+    private var planType: String? {
+        switch self.status {
+        case .available(let s): return planDisplayName(s.planType)
+        case .stale(let s): return s.flatMap { planDisplayName($0.planType) }
+        case .reloginNeeded(let s): return s.flatMap { planDisplayName($0.planType) }
+        default: return nil
+        }
+    }
+}
+
 // MARK: - App Entry Point (placeholder — will be completed in Task 8)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
