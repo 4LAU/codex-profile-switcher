@@ -164,36 +164,27 @@ open_isolated_browser() {
   local tmpdir
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/codex-login-XXXXXX")"
 
-  local browser
+  local browser app_name
   browser="$(default_browser_bundle_id)"
 
   case "$browser" in
-    com.google.chrome|com.google.chrome.canary)
-      note "Opening isolated Chrome session..."
-      open -na "Google Chrome" --args --user-data-dir="$tmpdir" "$url"
-      ;;
-    com.brave.browser*)
-      note "Opening isolated Brave session..."
-      open -na "Brave Browser" --args --user-data-dir="$tmpdir" "$url"
-      ;;
-    company.thebrowser.browser)
-      note "Opening isolated Arc session..."
-      open -na "Arc" --args --user-data-dir="$tmpdir" "$url"
-      ;;
-    com.microsoft.edgemac)
-      note "Opening isolated Edge session..."
-      open -na "Microsoft Edge" --args --user-data-dir="$tmpdir" "$url"
-      ;;
-    org.mozilla.firefox)
-      note "Opening isolated Firefox session..."
-      /Applications/Firefox.app/Contents/MacOS/firefox -profile "$tmpdir" -no-remote "$url" &
-      ;;
-    *)
-      note "Your browser does not support isolated sessions."
-      note "Please log out of any existing OpenAI account before proceeding."
-      open "$url"
-      ;;
+    com.google.chrome|com.google.chrome.canary) app_name="Google Chrome" ;;
+    com.brave.browser*)                         app_name="Brave Browser" ;;
+    company.thebrowser.browser)                 app_name="Arc" ;;
+    com.microsoft.edgemac)                      app_name="Microsoft Edge" ;;
   esac
+
+  if [[ -n "${app_name:-}" ]]; then
+    note "Opening isolated $app_name session..."
+    open -na "$app_name" --args --user-data-dir="$tmpdir" "$url"
+  elif [[ "$browser" == org.mozilla.firefox ]]; then
+    note "Opening isolated Firefox session..."
+    /Applications/Firefox.app/Contents/MacOS/firefox -profile "$tmpdir" -no-remote "$url" &
+  else
+    note "Your browser does not support isolated sessions."
+    note "Please log out of any existing OpenAI account before proceeding."
+    open "$url"
+  fi
 }
 
 command_login() {

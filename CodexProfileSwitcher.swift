@@ -32,6 +32,14 @@ enum ProfileStatus {
     case stale(UsageSnapshot?)
     case reloginNeeded(UsageSnapshot?)
     case notSetUp
+
+    var snapshot: UsageSnapshot? {
+        switch self {
+        case .available(let s): return s
+        case .stale(let s), .reloginNeeded(let s): return s
+        default: return nil
+        }
+    }
 }
 
 // MARK: - ProfileStore
@@ -43,7 +51,7 @@ final class ProfileStore {
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
-    var statuses: [String: ProfileStatus] = [:]
+    private(set) var statuses: [String: ProfileStatus] = [:]
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -430,12 +438,16 @@ enum UsageFetchError: LocalizedError, Equatable {
 final class UsageProvider {
     private let store: ProfileStore
     private var activeRefreshTask: Task<Void, Never>?
+    private var lastRefreshAll: Date = .distantPast
+    var onRefreshComplete: (() -> Void)?
 
     init(store: ProfileStore) {
         self.store = store
     }
 
-    func refreshAll() {
+    func refreshAll(force: Bool = false) {
+        guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
+        self.lastRefreshAll = Date()
         self.activeRefreshTask?.cancel()
         self.activeRefreshTask = Task {
             await withTaskGroup(of: Void.self) { group in
@@ -443,12 +455,16 @@ final class UsageProvider {
                     group.addTask { await self.refreshProfile(profile.id) }
                 }
             }
+            await MainActor.run { self.onRefreshComplete?() }
         }
     }
 
     func refreshActive() {
         let id = self.store.config.activeProfile
-        Task { await self.refreshProfile(id) }
+        Task {
+            await self.refreshProfile(id)
+            await MainActor.run { self.onRefreshComplete?() }
+        }
     }
 
     private func refreshProfile(_ id: String) async {
@@ -457,6 +473,8 @@ final class UsageProvider {
             self.store.updateStatus(id, .notSetUp)
             return
         }
+
+        let cached = self.store.cache.snapshots[id]
 
         do {
             let creds = try await AuthRefresher.refreshIfNeeded(
@@ -484,10 +502,8 @@ final class UsageProvider {
         } catch is CancellationError {
             return
         } catch let error as UsageFetchError where error == .unauthorized {
-            let cached = self.store.cache.snapshots[id]
             self.store.updateStatus(id, .reloginNeeded(cached))
         } catch let error as AuthError {
-            let cached = self.store.cache.snapshots[id]
             switch error {
             case .refreshExpired, .refreshReused, .refreshRevoked:
                 self.store.updateStatus(id, .reloginNeeded(cached))
@@ -497,7 +513,6 @@ final class UsageProvider {
                 self.store.updateStatus(id, .stale(cached))
             }
         } catch {
-            let cached = self.store.cache.snapshots[id]
             self.store.updateStatus(id, .stale(cached))
         }
     }
@@ -686,12 +701,8 @@ struct ProfileCardView: View {
     }
 
     private var planType: String? {
-        switch self.status {
-        case .available(let s): return planDisplayName(s.planType)
-        case .stale(let s): return s.flatMap { planDisplayName($0.planType) }
-        case .reloginNeeded(let s): return s.flatMap { planDisplayName($0.planType) }
-        default: return nil
-        }
+        guard let snap = self.status.snapshot else { return nil }
+        return planDisplayName(snap.planType)
     }
 }
 
@@ -823,6 +834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menu.delegate = self
         self.statusItem.menu = self.menu
 
+        self.usageProvider.onRefreshComplete = { [weak self] in self?.updateIcon() }
         self.usageProvider.refreshAll()
         self.startActiveProfileTimer()
     }
@@ -848,12 +860,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func updateIcon() {
         let activeId = self.store.config.activeProfile
-        switch self.store.statuses[activeId] {
-        case .available(let snap):
+        if let snap = self.store.statuses[activeId]?.snapshot {
             self.statusItem.button?.image = IconRenderer.render(
                 primaryPercent: snap.primaryUsedPercent,
                 secondaryPercent: snap.secondaryUsedPercent)
-        default:
+        } else {
             self.statusItem.button?.image = IconRenderer.renderEmpty()
         }
     }
@@ -942,7 +953,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refreshAll() {
-        self.usageProvider.refreshAll()
+        self.usageProvider.refreshAll(force: true)
     }
 
     @objc private func editLabels() {
@@ -1053,28 +1064,16 @@ enum LaunchAtLogin {
 
     private static func enable() {
         let binaryPath = ProcessInfo.processInfo.arguments.first ?? ""
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
-        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>com.codex-profile-switcher</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(binaryPath)</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <false/>
-        </dict>
-        </plist>
-        """
+        let plistDict: [String: Any] = [
+            "Label": "com.codex-profile-switcher",
+            "ProgramArguments": [binaryPath],
+            "RunAtLoad": true,
+            "KeepAlive": false,
+        ]
         let dir = Self.plistURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? plist.write(to: Self.plistURL, atomically: true, encoding: .utf8)
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0) else { return }
+        try? data.write(to: Self.plistURL, options: .atomic)
     }
 }
 
