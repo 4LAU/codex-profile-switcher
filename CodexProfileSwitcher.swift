@@ -757,16 +757,326 @@ enum IconRenderer {
     }
 }
 
-// MARK: - App Entry Point (placeholder — will be completed in Task 8)
+// MARK: - CodexBridge (shells out to codex-profile wrapper)
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem!
+enum CodexBridge {
+    private static func codexProfilePath() -> String? {
+        let candidates: [String?] = [
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("bin/codex-profile").path,
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/codex-profile").path,
+        ]
+        return candidates.compactMap { $0 }.first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+    }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        self.statusItem.button?.title = "CPS"
+    static func switchToProfile(_ profileId: String) async -> Bool {
+        guard let path = Self.codexProfilePath() else { return false }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = ["app", profileId]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    static func openLogin(profileId: String) {
+        guard let path = Self.codexProfilePath() else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = ["login", profileId]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
     }
 }
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusItem: NSStatusItem!
+    private var store: ProfileStore!
+    private var usageProvider: UsageProvider!
+    private var activeRefreshTimer: Timer?
+    private var menu: NSMenu!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        self.store = ProfileStore()
+        self.usageProvider = UsageProvider(store: self.store)
+
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem.button?.image = IconRenderer.renderEmpty()
+        self.statusItem.button?.imageScaling = .scaleNone
+
+        self.menu = NSMenu()
+        self.menu.delegate = self
+        self.statusItem.menu = self.menu
+
+        self.usageProvider.refreshAll()
+        self.startActiveProfileTimer()
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        self.rebuildMenu()
+        self.usageProvider.refreshAll()
+    }
+
+    // MARK: - Timer
+
+    private func startActiveProfileTimer() {
+        self.activeRefreshTimer?.invalidate()
+        self.activeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            self?.usageProvider.refreshActive()
+            self?.updateIcon()
+        }
+    }
+
+    // MARK: - Icon
+
+    func updateIcon() {
+        let activeId = self.store.config.activeProfile
+        switch self.store.statuses[activeId] {
+        case .available(let snap):
+            self.statusItem.button?.image = IconRenderer.render(
+                primaryPercent: snap.primaryUsedPercent,
+                secondaryPercent: snap.secondaryUsedPercent)
+        default:
+            self.statusItem.button?.image = IconRenderer.renderEmpty()
+        }
+    }
+
+    // MARK: - Menu Construction
+
+    private func rebuildMenu() {
+        self.menu.removeAllItems()
+
+        for profile in self.store.config.profiles {
+            let isActive = profile.id == self.store.config.activeProfile
+            let status = self.store.statuses[profile.id] ?? .notSetUp
+
+            let cardView = ProfileCardView(
+                profile: profile,
+                status: status,
+                isActive: isActive,
+                onSwitch: { [weak self] in self?.switchToProfile(profile.id) })
+
+            let hostView = NSHostingView(rootView: cardView)
+            hostView.frame = NSRect(x: 0, y: 0, width: 310, height: self.cardHeight(for: status))
+
+            let menuItem = NSMenuItem()
+            menuItem.view = hostView
+            self.menu.addItem(menuItem)
+
+            if profile.id != self.store.config.profiles.last?.id {
+                self.menu.addItem(.separator())
+            }
+        }
+
+        self.menu.addItem(.separator())
+
+        let refreshItem = NSMenuItem(title: "Refresh All", action: #selector(self.refreshAll), keyEquivalent: "r")
+        refreshItem.target = self
+        self.menu.addItem(refreshItem)
+
+        let editItem = NSMenuItem(title: "Edit Labels...", action: #selector(self.editLabels), keyEquivalent: "")
+        editItem.target = self
+        self.menu.addItem(editItem)
+
+        self.menu.addItem(.separator())
+
+        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(self.toggleLaunchAtLogin), keyEquivalent: "")
+        launchItem.target = self
+        launchItem.state = LaunchAtLogin.isEnabled ? .on : .off
+        self.menu.addItem(launchItem)
+
+        let quitItem = NSMenuItem(title: "Quit CodexProfileSwitcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        self.menu.addItem(quitItem)
+    }
+
+    private func cardHeight(for status: ProfileStatus) -> CGFloat {
+        switch status {
+        case .available: return 58
+        case .stale(let s) where s != nil: return 68
+        case .reloginNeeded(let s) where s != nil: return 68
+        default: return 42
+        }
+    }
+
+    // MARK: - Actions
+
+    private func switchToProfile(_ id: String) {
+        self.menu.cancelTracking()
+
+        let status = self.store.statuses[id]
+        switch status {
+        case .notSetUp, .reloginNeeded:
+            CodexBridge.openLogin(profileId: id)
+            return
+        default:
+            break
+        }
+
+        Task {
+            let success = await CodexBridge.switchToProfile(id)
+            if success {
+                self.store.setActiveProfile(id)
+                self.usageProvider.refreshActive()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.updateIcon() }
+            }
+        }
+    }
+
+    @objc private func refreshAll() {
+        self.usageProvider.refreshAll()
+    }
+
+    @objc private func editLabels() {
+        EditLabelsWindow.show(store: self.store)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        LaunchAtLogin.toggle()
+    }
+}
+
+// MARK: - Edit Labels Window
+
+enum EditLabelsWindow {
+    private static var windowController: NSWindowController?
+
+    static func show(store: ProfileStore) {
+        if let wc = Self.windowController {
+            wc.showWindow(nil)
+            wc.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 340),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false)
+        window.title = "Edit Profile Labels"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let view = EditLabelsView(store: store, onSave: { window.close() })
+        window.contentView = NSHostingView(rootView: view)
+
+        let wc = NSWindowController(window: window)
+        Self.windowController = wc
+        wc.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+struct EditLabelsView: View {
+    let store: ProfileStore
+    let onSave: () -> Void
+    @State private var labels: [String: String] = [:]
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ForEach(self.store.config.profiles) { profile in
+                HStack {
+                    Text(profile.id)
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .frame(width: 24)
+
+                    TextField("Label", text: self.binding(for: profile.id, default: profile.label))
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Save") {
+                    for (id, label) in self.labels {
+                        self.store.updateLabel(for: id, label: label)
+                    }
+                    self.onSave()
+                }
+                .keyboardShortcut(.return)
+            }
+        }
+        .padding()
+        .onAppear {
+            for profile in self.store.config.profiles {
+                self.labels[profile.id] = profile.label
+            }
+        }
+    }
+
+    private func binding(for id: String, default defaultValue: String) -> Binding<String> {
+        Binding(
+            get: { self.labels[id] ?? defaultValue },
+            set: { self.labels[id] = $0 })
+    }
+}
+
+// MARK: - Launch at Login
+
+enum LaunchAtLogin {
+    private static let plistURL: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("Library/LaunchAgents/com.codex-profile-switcher.plist")
+    }()
+
+    static var isEnabled: Bool {
+        FileManager.default.fileExists(atPath: Self.plistURL.path)
+    }
+
+    static func toggle() {
+        if Self.isEnabled {
+            try? FileManager.default.removeItem(at: Self.plistURL)
+        } else {
+            Self.enable()
+        }
+    }
+
+    private static func enable() {
+        let binaryPath = ProcessInfo.processInfo.arguments.first ?? ""
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>com.codex-profile-switcher</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(binaryPath)</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <false/>
+        </dict>
+        </plist>
+        """
+        let dir = Self.plistURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? plist.write(to: Self.plistURL, atomically: true, encoding: .utf8)
+    }
+}
+
+// MARK: - Entry Point
 
 @main
 enum Main {
