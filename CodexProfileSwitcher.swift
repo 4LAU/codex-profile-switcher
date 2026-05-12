@@ -68,9 +68,10 @@ final class ProfileStore {
             self.config = AppConfig(profiles: [], activeProfile: "1")
         }
 
-        if let data = try? Data(contentsOf: self.cacheURL),
-           let loaded = try? JSONDecoder().decode(UsageCache.self, from: data) {
-            self.cache = loaded
+        if let data = try? Data(contentsOf: self.cacheURL) {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            self.cache = (try? decoder.decode(UsageCache.self, from: data)) ?? UsageCache(snapshots: [:])
         } else {
             self.cache = UsageCache(snapshots: [:])
         }
@@ -470,7 +471,7 @@ final class UsageProvider {
     private func refreshProfile(_ id: String) async {
         let authURL = self.store.authFilePath(for: id)
         guard FileManager.default.fileExists(atPath: authURL.path) else {
-            self.store.updateStatus(id, .notSetUp)
+            await MainActor.run { self.store.updateStatus(id, .notSetUp) }
             return
         }
 
@@ -498,22 +499,22 @@ final class UsageProvider {
                 },
                 fetchedAt: Date())
 
-            self.store.updateStatus(id, .available(snapshot))
+            await MainActor.run { self.store.updateStatus(id, .available(snapshot)) }
         } catch is CancellationError {
             return
         } catch let error as UsageFetchError where error == .unauthorized {
-            self.store.updateStatus(id, .reloginNeeded(cached))
+            await MainActor.run { self.store.updateStatus(id, .reloginNeeded(cached)) }
         } catch let error as AuthError {
             switch error {
             case .refreshExpired, .refreshReused, .refreshRevoked:
-                self.store.updateStatus(id, .reloginNeeded(cached))
+                await MainActor.run { self.store.updateStatus(id, .reloginNeeded(cached)) }
             case .notFound:
-                self.store.updateStatus(id, .notSetUp)
+                await MainActor.run { self.store.updateStatus(id, .notSetUp) }
             default:
-                self.store.updateStatus(id, .stale(cached))
+                await MainActor.run { self.store.updateStatus(id, .stale(cached)) }
             }
         } catch {
-            self.store.updateStatus(id, .stale(cached))
+            await MainActor.run { self.store.updateStatus(id, .stale(cached)) }
         }
     }
 }
@@ -771,7 +772,7 @@ enum IconRenderer {
 // MARK: - CodexBridge (shells out to codex-profile wrapper)
 
 enum CodexBridge {
-    private static var loginProcesses: [String: Process] = [:]
+    private static var activeLogins: Set<String> = []
 
     private static func codexProfilePath() -> String? {
         let candidates: [String?] = [
@@ -788,27 +789,35 @@ enum CodexBridge {
     }
 
     static func switchToProfile(_ profileId: String) async -> Bool {
-        guard let path = Self.codexProfilePath() else { return false }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: path)
-        proc.arguments = ["app", profileId]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            return proc.terminationStatus == 0
-        } catch {
-            return false
+        await withCheckedContinuation { continuation in
+            guard let path = Self.codexProfilePath() else {
+                continuation.resume(returning: false)
+                return
+            }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: path)
+            proc.arguments = ["app", profileId]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            proc.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus == 0)
+            }
+            do {
+                try proc.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
         }
     }
 
     static func startLogin(profileId: String, completion: @escaping (Bool) -> Void) {
+        guard !Self.activeLogins.contains(profileId) else { return }
         guard let path = Self.codexProfilePath() else {
             completion(false)
             return
         }
+
+        Self.activeLogins.insert(profileId)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: path)
@@ -818,16 +827,15 @@ enum CodexBridge {
 
         proc.terminationHandler = { p in
             DispatchQueue.main.async {
-                Self.loginProcesses[profileId] = nil
+                Self.activeLogins.remove(profileId)
                 completion(p.terminationStatus == 0)
             }
         }
 
         do {
-            Self.loginProcesses[profileId] = proc
             try proc.run()
         } catch {
-            Self.loginProcesses[profileId] = nil
+            Self.activeLogins.remove(profileId)
             completion(false)
         }
     }
@@ -1087,7 +1095,8 @@ enum LaunchAtLogin {
     }
 
     private static func enable() {
-        let binaryPath = ProcessInfo.processInfo.arguments.first ?? ""
+        let arg0 = ProcessInfo.processInfo.arguments.first ?? ""
+        let binaryPath = URL(fileURLWithPath: arg0).resolvingSymlinksInPath().path
         let plistDict: [String: Any] = [
             "Label": "com.codex-profile-switcher",
             "ProgramArguments": [binaryPath],
