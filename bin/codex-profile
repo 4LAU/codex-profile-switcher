@@ -153,30 +153,45 @@ command_cli() {
   exec env CODEX_HOME="$codex_home" "$codex_cli" "$@"
 }
 
-detect_incognito_browser() {
-  local browser
-  browser="$(defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null \
+default_browser_bundle_id() {
+  defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null \
     | grep -B1 'https' | grep 'LSHandlerRoleAll' | head -1 \
-    | sed 's/.*= "//;s/";//' 2>/dev/null || true)"
+    | sed 's/.*= "//;s/";//' 2>/dev/null || echo ""
+}
+
+open_isolated_browser() {
+  local url="$1"
+  local tmpdir
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/codex-login-XXXXXX")"
+
+  local browser
+  browser="$(default_browser_bundle_id)"
 
   case "$browser" in
     com.google.chrome|com.google.chrome.canary)
-      printf 'open -na "Google Chrome" --args --incognito'
+      note "Opening isolated Chrome session..."
+      open -na "Google Chrome" --args --user-data-dir="$tmpdir" "$url"
       ;;
     com.brave.browser*)
-      printf 'open -na "Brave Browser" --args --incognito'
+      note "Opening isolated Brave session..."
+      open -na "Brave Browser" --args --user-data-dir="$tmpdir" "$url"
       ;;
     company.thebrowser.browser)
-      printf 'open -na "Arc" --args --incognito'
+      note "Opening isolated Arc session..."
+      open -na "Arc" --args --user-data-dir="$tmpdir" "$url"
       ;;
     com.microsoft.edgemac)
-      printf 'open -na "Microsoft Edge" --args --inPrivate'
+      note "Opening isolated Edge session..."
+      open -na "Microsoft Edge" --args --user-data-dir="$tmpdir" "$url"
       ;;
     org.mozilla.firefox)
-      printf 'open -na "Firefox" --args --private-window'
+      note "Opening isolated Firefox session..."
+      /Applications/Firefox.app/Contents/MacOS/firefox -profile "$tmpdir" -no-remote "$url" &
       ;;
     *)
-      printf ''
+      note "Your browser does not support isolated sessions."
+      note "Please log out of any existing OpenAI account before proceeding."
+      open "$url"
       ;;
   esac
 }
@@ -186,20 +201,38 @@ command_login() {
   [[ -n "$profile" ]] || die "Usage: $PROGRAM login <profile> [codex-login-args...]"
   shift || true
 
-  local codex_home codex_cli incognito_cmd
+  local codex_home codex_cli
   codex_home="$(codex_home_for_profile "$profile")"
   ensure_home "$codex_home"
   codex_cli="$(find_codex_cli)"
 
-  incognito_cmd="$(detect_incognito_browser)"
-  if [[ -n "$incognito_cmd" ]]; then
-    note "Opening incognito browser for login..."
-    BROWSER="$incognito_cmd" exec env CODEX_HOME="$codex_home" "$codex_cli" login "$@"
+  local tmpout
+  tmpout="$(mktemp "${TMPDIR:-/tmp}/codex-login-out-XXXXXX")"
+
+  note "Starting login for profile '$profile'..."
+
+  env CODEX_HOME="$codex_home" "$codex_cli" login "$@" > >(tee "$tmpout") 2>&1 &
+  local pid=$!
+
+  local url="" i
+  for i in $(seq 1 30); do
+    url="$(grep -oE 'https://[^ ]+' "$tmpout" 2>/dev/null | head -1 || true)"
+    if [[ -n "$url" ]]; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  if [[ -n "$url" ]]; then
+    open_isolated_browser "$url"
   else
-    note "Could not detect incognito support for your browser."
-    note "Tip: open a private/incognito window manually before proceeding."
-    exec env CODEX_HOME="$codex_home" "$codex_cli" login "$@"
+    note "Could not extract login URL. Complete login in the browser that opened."
   fi
+
+  wait "$pid"
+  local exit_code=$?
+  rm -f "$tmpout"
+  return "$exit_code"
 }
 
 command_status_one() {

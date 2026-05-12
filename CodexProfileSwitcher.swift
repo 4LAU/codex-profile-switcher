@@ -605,7 +605,7 @@ struct ProfileCardView: View {
         .padding(.vertical, 8)
         .frame(width: 310, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture { if !self.isActive { self.onSwitch() } }
+        .onTapGesture { self.onSwitch() }
     }
 
     private var headerRow: some View {
@@ -920,13 +920,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func switchToProfile(_ id: String) {
         self.menu.cancelTracking()
 
+        let isActive = id == self.store.config.activeProfile
         let status = self.store.statuses[id]
+
         switch status {
         case .notSetUp, .reloginNeeded:
             CodexBridge.openLogin(profileId: id)
             return
         default:
-            break
+            if isActive { return }
         }
 
         Task {
