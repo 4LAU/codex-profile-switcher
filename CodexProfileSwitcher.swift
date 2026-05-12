@@ -1173,8 +1173,7 @@ struct DeviceAuthView: View {
                     .buttonStyle(.plain)
 
                     Button(self.linkCopied ? "Copied" : "Copy Link") {
-                        self.copyToClipboard(self.info.url)
-                        self.linkCopied = true
+                        self.copyWithFeedback(self.info.url, flag: self.$linkCopied)
                     }
                     .font(.system(size: 11))
                     .buttonStyle(.bordered)
@@ -1199,13 +1198,11 @@ struct DeviceAuthView: View {
                         .font(.system(size: 28, weight: .bold, design: .monospaced))
                         .textSelection(.enabled)
                         .onTapGesture {
-                            self.copyToClipboard(self.info.code)
-                            self.codeCopied = true
+                            self.copyWithFeedback(self.info.code, flag: self.$codeCopied)
                         }
 
                     Button(self.codeCopied ? "Copied" : "Copy") {
-                        self.copyToClipboard(self.info.code)
-                        self.codeCopied = true
+                        self.copyWithFeedback(self.info.code, flag: self.$codeCopied)
                     }
                     .buttonStyle(.bordered)
                 }
@@ -1224,15 +1221,15 @@ struct DeviceAuthView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(24)
-        .onAppear {
-            self.copyToClipboard(self.info.code)
-            self.codeCopied = true
-        }
     }
 
-    private func copyToClipboard(_ text: String) {
+    private func copyWithFeedback(_ text: String, flag: Binding<Bool>) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        flag.wrappedValue = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            flag.wrappedValue = false
+        }
     }
 
     private func openURL() {
