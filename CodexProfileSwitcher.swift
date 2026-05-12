@@ -695,6 +695,68 @@ struct ProfileCardView: View {
     }
 }
 
+// MARK: - Menu Bar Icon
+
+enum IconRenderer {
+    static let iconSize = CGSize(width: 18, height: 18)
+    private static let scale: CGFloat = 2
+
+    static func render(primaryPercent: Int, secondaryPercent: Int) -> NSImage {
+        let size = Self.iconSize
+
+        let image = NSImage(size: size, flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.scaleBy(x: Self.scale, y: Self.scale)
+
+            let barWidth: CGFloat = 12
+            let barHeight: CGFloat = 3
+            let barX: CGFloat = (size.width - barWidth) / 2
+            let gap: CGFloat = 2
+            let totalHeight = barHeight * 2 + gap
+            let startY = (size.height - totalHeight) / 2
+
+            Self.drawCapsule(ctx: ctx, x: barX, y: startY + barHeight + gap,
+                             width: barWidth, height: barHeight,
+                             fillPercent: max(0, 100 - primaryPercent))
+
+            Self.drawCapsule(ctx: ctx, x: barX, y: startY,
+                             width: barWidth, height: barHeight,
+                             fillPercent: max(0, 100 - secondaryPercent))
+
+            return true
+        }
+
+        image.isTemplate = true
+        return image
+    }
+
+    static func renderEmpty() -> NSImage {
+        Self.render(primaryPercent: 100, secondaryPercent: 100)
+    }
+
+    private static func drawCapsule(
+        ctx: CGContext, x: CGFloat, y: CGFloat,
+        width: CGFloat, height: CGFloat, fillPercent: Int
+    ) {
+        let radius = height / 2
+        let trackRect = CGRect(x: x, y: y, width: width, height: height)
+        let trackPath = CGPath(roundedRect: trackRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+
+        ctx.setFillColor(NSColor.gray.withAlphaComponent(0.4).cgColor)
+        ctx.addPath(trackPath)
+        ctx.fillPath()
+
+        let fillWidth = width * CGFloat(min(100, max(0, fillPercent))) / 100
+        if fillWidth > 0 {
+            let fillRect = CGRect(x: x, y: y, width: fillWidth, height: height)
+            let fillPath = CGPath(roundedRect: fillRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            ctx.setFillColor(NSColor.black.cgColor)
+            ctx.addPath(fillPath)
+            ctx.fillPath()
+        }
+    }
+}
+
 // MARK: - App Entry Point (placeholder — will be completed in Task 8)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
