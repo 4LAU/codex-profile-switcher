@@ -118,6 +118,7 @@ atomic_copy_file() {
   mv -f "$temp_file" "$destination" || { rm -f "$temp_file"; die "Failed to replace $destination"; }
 }
 
+# SYNC: find_matching_profiles() below and CodexProfileSwitcher.swift authIdentity() must produce identical fingerprints
 auth_fingerprint() {
   local auth_path="$1"
   [[ -f "$auth_path" ]] || return 1

@@ -320,20 +320,46 @@ final class ProfileStore {
     }
 
     private func replaceFile(at destination: URL, with data: Data) throws {
-        try self.fileManager.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        let dir = destination.deletingLastPathComponent()
+        try self.fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        let tempURL = destination.deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
-        try data.write(to: tempURL)
-        try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempURL.path)
+        let tempPath = dir.appendingPathComponent(
+            ".\(destination.lastPathComponent).tmp-\(UUID().uuidString)").path
+        let fd = open(tempPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { throw AuthError.writeFailed }
 
+        do {
+            let written = data.withUnsafeBytes { ptr -> Bool in
+                guard let base = ptr.baseAddress else { return data.isEmpty }
+                var remaining = data.count
+                var offset = 0
+                while remaining > 0 {
+                    let n = Darwin.write(fd, base + offset, remaining)
+                    guard n > 0 else { return false }
+                    offset += n
+                    remaining -= n
+                }
+                return true
+            }
+            guard written else { throw AuthError.writeFailed }
+            fsync(fd)
+            close(fd)
+        } catch {
+            close(fd)
+            unlink(tempPath)
+            throw error
+        }
+
+        let tempURL = URL(fileURLWithPath: tempPath)
         do {
             _ = try self.fileManager.replaceItemAt(destination, withItemAt: tempURL)
         } catch {
-            try self.fileManager.moveItem(at: tempURL, to: destination)
+            do {
+                try self.fileManager.moveItem(at: tempURL, to: destination)
+            } catch {
+                try? self.fileManager.removeItem(at: tempURL)
+                throw error
+            }
         }
     }
 
@@ -491,19 +517,34 @@ enum AuthCredentialLoader {
 
         let data = try JSONSerialization.data(withJSONObject: existingJSON, options: [.prettyPrinted, .sortedKeys])
 
-        ftruncate(fd, 0)
-        lseek(fd, 0, SEEK_SET)
-        try data.withUnsafeBytes { ptr in
-            var remaining = data.count
-            var offset = 0
-            while remaining > 0 {
-                let written = Darwin.write(fd, ptr.baseAddress! + offset, remaining)
-                guard written > 0 else { throw AuthError.writeFailed }
-                offset += written
-                remaining -= written
+        let dir = url.deletingLastPathComponent().path
+        let tmpPath = "\(dir)/.\(url.lastPathComponent).tmp-\(UUID().uuidString)"
+        let tmpFd = open(tmpPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard tmpFd >= 0 else { throw AuthError.writeFailed }
+
+        do {
+            try data.withUnsafeBytes { ptr in
+                var remaining = data.count
+                var offset = 0
+                while remaining > 0 {
+                    let written = Darwin.write(tmpFd, ptr.baseAddress! + offset, remaining)
+                    guard written > 0 else { throw AuthError.writeFailed }
+                    offset += written
+                    remaining -= written
+                }
             }
+            fsync(tmpFd)
+            close(tmpFd)
+        } catch {
+            close(tmpFd)
+            unlink(tmpPath)
+            throw error
         }
-        fsync(fd)
+
+        guard rename(tmpPath, url.path) == 0 else {
+            unlink(tmpPath)
+            throw AuthError.writeFailed
+        }
     }
 
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
@@ -700,10 +741,19 @@ final class UsageProvider {
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
         self.lastRefreshAll = Date()
         self.activeRefreshTask?.cancel()
+
+        let profiles = self.store.config.profiles
+        let liveId = self.store.liveProfileId ?? ""
+        let contexts: [(String, URL, UsageSnapshot?)] = profiles.map { p in
+            (p.id, self.store.authURL(for: p.id), self.store.cache.snapshots[p.id])
+        }
+
         self.activeRefreshTask = Task {
             await withTaskGroup(of: Void.self) { group in
-                for profile in self.store.config.profiles {
-                    group.addTask { await self.refreshProfile(profile.id) }
+                for (id, authURL, cached) in contexts {
+                    group.addTask {
+                        await self.refreshProfile(id, authURL: authURL, activeProfileId: liveId, cached: cached)
+                    }
                 }
             }
             await MainActor.run { self.onRefreshComplete?() }
@@ -712,17 +762,20 @@ final class UsageProvider {
 
     func refreshActive() {
         guard let id = self.store.liveProfileId else { return }
+        let authURL = self.store.authURL(for: id)
+        let cached = self.store.cache.snapshots[id]
+        let liveId = id
+
         Task {
-            await self.refreshProfile(id)
+            await self.refreshProfile(id, authURL: authURL, activeProfileId: liveId, cached: cached)
             await MainActor.run { self.onRefreshComplete?() }
         }
     }
 
-    private func refreshProfile(_ id: String) async {
+    private func refreshProfile(
+        _ id: String, authURL: URL, activeProfileId: String, cached: UsageSnapshot?
+    ) async {
         guard !self.store.isAuthMutationInProgress() else { return }
-
-        let authURL = self.store.authURL(for: id)
-        let cached = self.store.cache.snapshots[id]
 
         func setStatus(_ status: ProfileStatus) async {
             await MainActor.run { self.store.updateStatus(id, status) }
@@ -731,7 +784,7 @@ final class UsageProvider {
         do {
             let creds = try await AuthRefresher.refreshIfNeeded(
                 profileId: id,
-                activeProfileId: self.store.liveProfileId ?? "",
+                activeProfileId: activeProfileId,
                 authFileURL: authURL)
 
             let response = try await UsageFetcher.fetch(
@@ -1383,10 +1436,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         switch status {
         case .notSetUp, .reloginNeeded:
-            self.store.beginAuthMutation()
+            let store = self.store!
+            store.beginAuthMutation()
             CodexBridge.startLogin(profileId: id) { [weak self] result in
+                store.endAuthMutation()
                 guard let self else { return }
-                self.store.endAuthMutation()
                 switch result {
                 case .success:
                     self.syncActiveProfile(force: true)
@@ -1412,10 +1466,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        self.store.beginAuthMutation()
-        Task {
+        let storeRef = self.store!
+        storeRef.beginAuthMutation()
+        Task { [weak self] in
             let result = await CodexBridge.switchToProfile(id)
-            self.store.endAuthMutation()
+            storeRef.endAuthMutation()
+            guard let self else { return }
             switch result {
             case .success:
                 self.store.setActiveProfile(id)
