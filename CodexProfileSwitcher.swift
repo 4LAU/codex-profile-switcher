@@ -217,9 +217,6 @@ struct AuthIdentityDetails {
     var settingsDetails: String {
         var parts: [String] = []
 
-        if let accountId, !accountId.isEmpty {
-            parts.append("Account \(shortIdentifier(accountId))")
-        }
         if let userId, !userId.isEmpty {
             parts.append("User \(shortIdentifier(userId))")
         }
@@ -3409,7 +3406,9 @@ struct ProfilesTab: View {
                     Button {
                         self.reauthenticate(profile.id)
                     } label: {
-                        Label(hasSavedAuth ? "Re-auth" : "Set Up", systemImage: "arrow.triangle.2.circlepath")
+                        Label(
+                            hasSavedAuth ? "Re-auth" : "Set Up",
+                            systemImage: hasSavedAuth ? "arrow.triangle.2.circlepath" : "person.badge.plus")
                     }
                     .disabled(self.actionInFlight.contains(profile.id))
                 }
