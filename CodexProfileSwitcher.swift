@@ -2368,6 +2368,8 @@ enum IconRenderer {
 enum CodexBridgeError: LocalizedError {
     case cliNotFound
     case loginAlreadyRunning
+    case loginCancelled
+    case loginTimedOut
     case launchFailed(String)
     case commandFailed(Int32, String)
     case stateUpdateFailed(String)
@@ -2378,6 +2380,10 @@ enum CodexBridgeError: LocalizedError {
             return "codex-profile helper not found"
         case .loginAlreadyRunning:
             return "Login is already running for this profile"
+        case .loginCancelled:
+            return "Login was cancelled"
+        case .loginTimedOut:
+            return "Login timed out. Start setup again to retry."
         case .launchFailed(let message):
             return message
         case .commandFailed(_, let output):
@@ -2386,10 +2392,28 @@ enum CodexBridgeError: LocalizedError {
             return message
         }
     }
+
+    var isUserCancelled: Bool {
+        if case .loginCancelled = self { return true }
+        return false
+    }
 }
 
 enum CodexBridge {
-    private static var activeLogins: Set<String> = []
+    private final class ActiveLogin {
+        let process: Process
+        let startedAt = Date()
+        var cancelRequested = false
+        var timedOut = false
+        var timeoutWorkItem: DispatchWorkItem?
+
+        init(process: Process) {
+            self.process = process
+        }
+    }
+
+    private static var activeLogins: [String: ActiveLogin] = [:]
+    private static let staleLoginRetryInterval: TimeInterval = 5
 
     private static func codexProfilePath() -> String? {
         let candidates: [String?] = [
@@ -2407,6 +2431,22 @@ enum CodexBridge {
 
     static func helperPathForDebug() -> String {
         self.codexProfilePath() ?? "<not found>"
+    }
+
+    static func isLoginRunning(profileId: String) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return Self.activeLogins[profileId] != nil
+    }
+
+    @discardableResult
+    static func cancelLogin(profileId: String) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let active = Self.activeLogins[profileId] else { return false }
+        active.cancelRequested = true
+        active.timeoutWorkItem?.cancel()
+        AppLogger.warning("Cancelling login", metadata: ["profile": profileId])
+        active.process.terminate()
+        return true
     }
 
     private static func runCommand(
@@ -2477,10 +2517,20 @@ enum CodexBridge {
         completion: @escaping (Result<Void, CodexBridgeError>) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard !Self.activeLogins.contains(profileId) else {
-            AppLogger.warning("Login already running", metadata: ["profile": profileId])
-            completion(.failure(.loginAlreadyRunning))
-            return
+        if let active = Self.activeLogins[profileId] {
+            let age = Date().timeIntervalSince(active.startedAt)
+            guard age >= Self.staleLoginRetryInterval else {
+                AppLogger.warning("Login already running", metadata: ["profile": profileId])
+                completion(.failure(.loginAlreadyRunning))
+                return
+            }
+
+            AppLogger.warning("Replacing stale login",
+                              metadata: ["profile": profileId, "ageSeconds": "\(Int(age))"])
+            active.cancelRequested = true
+            active.timeoutWorkItem?.cancel()
+            active.process.terminate()
+            Self.activeLogins.removeValue(forKey: profileId)
         }
         guard let path = Self.codexProfilePath() else {
             AppLogger.error("codex-profile helper not found")
@@ -2488,13 +2538,99 @@ enum CodexBridge {
             return
         }
 
-        Self.activeLogins.insert(profileId)
-        Self.runCommand(path: path, arguments: ["login", profileId]) { result in
+        Self.runLoginCommand(path: path, profileId: profileId, completion: completion)
+    }
+
+    private static func runLoginCommand(
+        path: String,
+        profileId: String,
+        completion: @escaping (Result<Void, CodexBridgeError>) -> Void
+    ) {
+        let arguments = ["login", profileId]
+        AppLogger.info("Running helper command",
+                       metadata: ["path": path, "arguments": arguments.joined(separator: " ")])
+
+        let proc = Process()
+        let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = arguments
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+
+        let active = ActiveLogin(process: proc)
+        Self.activeLogins[profileId] = active
+
+        proc.terminationHandler = { p in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
             DispatchQueue.main.async {
-                Self.activeLogins.remove(profileId)
-                completion(result)
+                active.timeoutWorkItem?.cancel()
+                if Self.activeLogins[profileId] === active {
+                    Self.activeLogins.removeValue(forKey: profileId)
+                }
+
+                if active.timedOut {
+                    AppLogger.error("Helper login timed out",
+                                    metadata: ["arguments": arguments.joined(separator: " ")])
+                    completion(.failure(.loginTimedOut))
+                    return
+                }
+
+                if active.cancelRequested {
+                    AppLogger.warning("Helper login cancelled",
+                                      metadata: ["arguments": arguments.joined(separator: " ")])
+                    completion(.failure(.loginCancelled))
+                    return
+                }
+
+                if p.terminationStatus == 0 {
+                    AppLogger.info("Helper command succeeded",
+                                   metadata: ["arguments": arguments.joined(separator: " ")])
+                    completion(.success(()))
+                } else {
+                    AppLogger.error("Helper command failed",
+                                    metadata: [
+                                        "arguments": arguments.joined(separator: " "),
+                                        "status": "\(p.terminationStatus)",
+                                        "output": output,
+                                    ])
+                    completion(.failure(.commandFailed(p.terminationStatus, output)))
+                }
             }
         }
+
+        do {
+            try proc.run()
+            let timeout = Self.loginTimeoutSeconds()
+            let timeoutWorkItem = DispatchWorkItem {
+                DispatchQueue.main.async {
+                    guard Self.activeLogins[profileId] === active else { return }
+                    active.timedOut = true
+                    AppLogger.warning("Terminating timed-out login",
+                                      metadata: ["profile": profileId, "timeoutSeconds": "\(Int(timeout))"])
+                    active.process.terminate()
+                }
+            }
+            active.timeoutWorkItem = timeoutWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+        } catch {
+            Self.activeLogins.removeValue(forKey: profileId)
+            AppLogger.error("Failed to launch helper command",
+                            metadata: [
+                                "path": path,
+                                "arguments": arguments.joined(separator: " "),
+                                "error": error.localizedDescription,
+                            ])
+            completion(.failure(.launchFailed(error.localizedDescription)))
+        }
+    }
+
+    private static func loginTimeoutSeconds() -> TimeInterval {
+        let raw = ProcessInfo.processInfo.environment["CODEX_PROFILE_LOGIN_TIMEOUT_SECONDS"] ?? ""
+        guard let value = Double(raw), value > 0 else { return 15 * 60 }
+        return value
     }
 }
 
@@ -2919,6 +3055,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         completion(result.mapError { SettingsActionError(message: $0.localizedDescription) })
                     }
                 },
+                cancelLogin: { id in
+                    CodexBridge.cancelLogin(profileId: id)
+                },
                 clearSavedAuth: { [weak self] (id: String) in
                     guard let self else {
                         return .failure(SettingsActionError(message: "Settings window is unavailable."))
@@ -2979,7 +3118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 finalResult = .success(())
             case .failure(let error):
                 store.endAuthMutation()
-                if presentFailureAlert {
+                if presentFailureAlert && !error.isUserCancelled {
                     self.presentBridgeError(title: "Login failed", message: error.localizedDescription)
                 }
                 finalResult = .failure(error)
@@ -3007,6 +3146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 struct SettingsActions {
     let reauthenticateProfile: (String, @escaping (Result<Void, SettingsActionError>) -> Void) -> Void
+    let cancelLogin: (String) -> Bool
     let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
 }
 
@@ -3205,7 +3345,8 @@ struct ProfilesTab: View {
         let isActive = self.store.liveProfileId == profile.id
         let hasSavedAuth = self.store.authStoreExists(for: profile.id)
         let status = self.store.statuses[profile.id] ?? .notSetUp
-        let inFlight = self.actionInFlight.contains(profile.id)
+        let loginRunning = CodexBridge.isLoginRunning(profileId: profile.id)
+        let inFlight = self.actionInFlight.contains(profile.id) || loginRunning
 
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
@@ -3258,12 +3399,20 @@ struct ProfilesTab: View {
             Divider()
 
             HStack(spacing: 8) {
-                Button {
-                    self.reauthenticate(profile.id)
-                } label: {
-                    Label(hasSavedAuth ? "Re-auth" : "Set Up", systemImage: "arrow.triangle.2.circlepath")
+                if loginRunning {
+                    Button {
+                        self.cancelLogin(profile.id)
+                    } label: {
+                        Label("Cancel Login", systemImage: "xmark.circle")
+                    }
+                } else {
+                    Button {
+                        self.reauthenticate(profile.id)
+                    } label: {
+                        Label(hasSavedAuth ? "Re-auth" : "Set Up", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(self.actionInFlight.contains(profile.id))
                 }
-                .disabled(inFlight)
 
                 Spacer(minLength: 0)
 
@@ -3334,6 +3483,14 @@ struct ProfilesTab: View {
                     self.toast.show(error.localizedDescription, style: .error)
                 }
             })
+        }
+    }
+
+    private func cancelLogin(_ profileId: String) {
+        if self.actions.cancelLogin(profileId) {
+            self.actionInFlight.remove(profileId)
+            self.refreshTick += 1
+            self.toast.show("Cancelled login for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .info)
         }
     }
 

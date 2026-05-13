@@ -221,10 +221,61 @@ test_login_fails_when_codex_writes_no_auth() {
   fi
 }
 
+test_login_prefers_bundled_codex_over_path() {
+  reset_home
+  local fake_app_dir="$WORK_DIR/Fake Codex.app"
+  local bundled_codex="$fake_app_dir/Contents/Resources/codex"
+  local path_bin="$WORK_DIR/path-bin"
+  local path_codex="$path_bin/codex"
+  local path_auth="$WORK_DIR/path-login.json"
+  local bundled_auth="$WORK_DIR/bundled-login.json"
+  local exported="$WORK_DIR/exported-bundled-login.json"
+
+  mkdir -p "$(dirname "$bundled_codex")" "$path_bin"
+  make_api_auth "$path_auth" "sk-test-path-login-1111111111" "path"
+  make_api_auth "$bundled_auth" "sk-test-bundled-login-2222222222" "bundled"
+
+  cp "$FAKE_CODEX" "$path_codex"
+  chmod +x "$path_codex"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'case "${1:-}" in' \
+    '  --version)' \
+    '    printf "fake-bundled-codex 1.0\n"' \
+    '    ;;' \
+    '  login)' \
+    '    mkdir -p "$CODEX_HOME"' \
+    '    cp "${FAKE_BUNDLED_CODEX_LOGIN_AUTH:?}" "$CODEX_HOME/auth.json"' \
+    '    ;;' \
+    '  *)' \
+    '    printf "unexpected bundled codex command: %s\n" "$*" >&2' \
+    '    exit 2' \
+    '    ;;' \
+    'esac' \
+    > "$bundled_codex"
+  chmod +x "$bundled_codex"
+
+  CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
+    CODEX_APP="$fake_app_dir" \
+    CODEX_APP_BIN="$FAKE_APP" \
+    FAKE_CODEX_LOGIN_AUTH="$path_auth" \
+    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
+    FAKE_BUNDLED_CODEX_LOGIN_AUTH="$bundled_auth" \
+    PATH="$path_bin:$PATH" \
+    "$HELPER" login BundledProfile >/dev/null
+
+  export_auth "BundledProfile" "$exported"
+  assert_same_file "$exported" "$bundled_auth" "login did not prefer bundled Codex CLI over PATH"
+}
+
 test_switch_preserves_outgoing_auth
 test_switch_refuses_unmanaged_live_auth
 test_switch_refuses_ambiguous_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
 test_login_fails_when_codex_writes_no_auth
+test_login_prefers_bundled_codex_over_path
 
 printf 'Integration tests: all tests passed\n'

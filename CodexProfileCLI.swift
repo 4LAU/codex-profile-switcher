@@ -351,12 +351,12 @@ enum CodexProfileCLI {
             }
             return override
         }
-        if let path = self.which("codex") {
-            return path
-        }
         let bundled = self.codexBundledCLI()
         if self.fileManager.isExecutableFile(atPath: bundled) {
             return bundled
+        }
+        if let path = self.which("codex") {
+            return path
         }
         throw CLIError.message("Codex CLI not found. Install Codex or set CODEX_CLI=/path/to/codex.")
     }
