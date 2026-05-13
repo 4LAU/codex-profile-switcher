@@ -68,13 +68,11 @@ final class ProfileStore {
             self.config = AppConfig(profiles: [], activeProfile: "1")
         }
 
-        if let data = try? Data(contentsOf: self.cacheURL) {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            self.cache = (try? decoder.decode(UsageCache.self, from: data)) ?? UsageCache(snapshots: [:])
-        } else {
-            self.cache = UsageCache(snapshots: [:])
-        }
+        let cacheDecoder = JSONDecoder()
+        cacheDecoder.dateDecodingStrategy = .iso8601
+        let cacheData = try? Data(contentsOf: self.cacheURL)
+        self.cache = cacheData.flatMap { try? cacheDecoder.decode(UsageCache.self, from: $0) }
+            ?? UsageCache(snapshots: [:])
 
         if self.config.profiles.isEmpty {
             self.discoverProfiles()
@@ -470,12 +468,11 @@ final class UsageProvider {
 
     private func refreshProfile(_ id: String) async {
         let authURL = self.store.authFilePath(for: id)
-        guard FileManager.default.fileExists(atPath: authURL.path) else {
-            await MainActor.run { self.store.updateStatus(id, .notSetUp) }
-            return
-        }
-
         let cached = self.store.cache.snapshots[id]
+
+        func setStatus(_ status: ProfileStatus) async {
+            await MainActor.run { self.store.updateStatus(id, status) }
+        }
 
         do {
             let creds = try await AuthRefresher.refreshIfNeeded(
@@ -499,22 +496,22 @@ final class UsageProvider {
                 },
                 fetchedAt: Date())
 
-            await MainActor.run { self.store.updateStatus(id, .available(snapshot)) }
+            await setStatus(.available(snapshot))
         } catch is CancellationError {
             return
         } catch let error as UsageFetchError where error == .unauthorized {
-            await MainActor.run { self.store.updateStatus(id, .reloginNeeded(cached)) }
+            await setStatus(.reloginNeeded(cached))
         } catch let error as AuthError {
             switch error {
             case .refreshExpired, .refreshReused, .refreshRevoked:
-                await MainActor.run { self.store.updateStatus(id, .reloginNeeded(cached)) }
+                await setStatus(.reloginNeeded(cached))
             case .notFound:
-                await MainActor.run { self.store.updateStatus(id, .notSetUp) }
+                await setStatus(.notSetUp)
             default:
-                await MainActor.run { self.store.updateStatus(id, .stale(cached)) }
+                await setStatus(.stale(cached))
             }
         } catch {
-            await MainActor.run { self.store.updateStatus(id, .stale(cached)) }
+            await setStatus(.stale(cached))
         }
     }
 }
