@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          swift --version
+          xcodebuild -version
+
+      - name: Unit tests
+        run: make test-unit
+
+      - name: Build
+        run: make build BUILD_OUT=/tmp/codex-profile-switcher-build-check

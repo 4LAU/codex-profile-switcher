@@ -158,6 +158,7 @@ struct ProfileConfig: Codable, Identifiable {
 struct AppConfig: Codable {
     var profiles: [ProfileConfig]
     var activeProfile: String
+    var authStorageVersion: Int?
 }
 
 struct UsageSnapshot: Codable {
@@ -381,10 +382,13 @@ struct SettingsActionError: LocalizedError {
 // MARK: - ProfileStore
 
 final class ProfileStore {
+    private static let keychainAuthStorageVersion = 2
+
     private let configDir: URL
     private let configURL: URL
     private let cacheURL: URL
     private let authStoreDir: URL
+    private let authVault: AuthVault
     private let codexHome: URL
     private let codexAuthPath: URL
     private let codexGlobalStateURL: URL
@@ -399,7 +403,9 @@ final class ProfileStore {
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
 
-    init() {
+    init(authVault: AuthVault = KeychainAuthVault()) {
+        self.authVault = authVault
+
         let home = self.fileManager.homeDirectoryForCurrentUser
         self.configDir = home.appendingPathComponent(".codex-switcher")
         self.configURL = self.configDir.appendingPathComponent("config.json")
@@ -411,8 +417,6 @@ final class ProfileStore {
 
         do {
             try self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-            try self.fileManager.createDirectory(at: self.authStoreDir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         } catch {
             AppLogger.error("Failed to create app directories", metadata: ["error": error.localizedDescription])
@@ -426,7 +430,7 @@ final class ProfileStore {
                 AppLogger.warning("Config exists but could not be decoded",
                                   metadata: ["path": self.configURL.path])
             }
-            self.config = AppConfig(profiles: [], activeProfile: "1")
+            self.config = AppConfig(profiles: [], activeProfile: "1", authStorageVersion: nil)
         }
 
         let cacheDecoder = JSONDecoder()
@@ -485,16 +489,9 @@ final class ProfileStore {
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
         do {
-            try self.fileManager.removeItem(at: self.authStorePath(for: id))
-        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            try self.authVault.deleteAuthBlob(profileID: id)
         } catch {
             AppLogger.warning("Failed to remove saved profile auth",
-                              metadata: ["profile": id, "error": error.localizedDescription])
-        }
-        do {
-            try atomicWriteData(Data(), to: self.authClearedMarkerPath(for: id))
-        } catch {
-            AppLogger.warning("Failed to write cleared auth marker",
                               metadata: ["profile": id, "error": error.localizedDescription])
         }
         if self.config.activeProfile == id {
@@ -507,29 +504,20 @@ final class ProfileStore {
         self.saveCache()
     }
 
-    func authStorePath(for profileId: String) -> URL {
-        self.authStoreDir.appendingPathComponent("\(profileId).json")
-    }
-
-    func authClearedMarkerExists(for profileId: String) -> Bool {
-        self.fileManager.fileExists(atPath: self.authClearedMarkerPath(for: profileId).path)
-    }
-
-    func authStoreURL(for profileId: String) -> URL {
-        self.authStorePath(for: profileId)
-    }
-
     func authStoreExists(for profileId: String) -> Bool {
-        self.fileManager.fileExists(atPath: self.authStorePath(for: profileId).path)
+        (try? self.authVault.hasAuthBlob(profileID: profileId)) ?? false
     }
 
     func syncSavedAuthToLive(for profileId: String) throws {
-        try self.copyAuthFile(from: self.authStorePath(for: profileId), to: self.codexAuthPath)
+        guard let data = try self.authVault.loadAuthBlob(profileID: profileId) else {
+            throw AuthError.notFound
+        }
+        try self.replaceFile(at: self.codexAuthPath, with: data)
     }
 
     func authDetails(for profileId: String) -> AuthIdentityDetails? {
-        let savedURL = self.authStorePath(for: profileId)
-        if let details = Self.authDetails(at: savedURL) {
+        if let data = try? self.authVault.loadAuthBlob(profileID: profileId),
+           let details = Self.authDetails(from: data) {
             return details
         }
 
@@ -538,15 +526,6 @@ final class ProfileStore {
         }
 
         return nil
-    }
-
-    func authURL(for profileId: String) -> URL {
-        self.liveProfileId == profileId ? self.codexAuthPath : self.authStorePath(for: profileId)
-    }
-
-    func cliProbeAuthURL(for profileId: String, fallback authURL: URL) -> URL {
-        let saved = self.authStorePath(for: profileId)
-        return self.fileManager.fileExists(atPath: saved.path) ? saved : authURL
     }
 
     func codexConfigURL() -> URL {
@@ -571,6 +550,22 @@ final class ProfileStore {
         self.fileManager.fileExists(atPath: self.codexAuthPath.path)
     }
 
+    func authDataForUsage(profileId: String, activeProfileId: String) throws -> Data? {
+        if profileId == activeProfileId {
+            guard self.fileManager.fileExists(atPath: self.codexAuthPath.path) else { return nil }
+            return try Data(contentsOf: self.codexAuthPath)
+        }
+        return try self.authVault.loadAuthBlob(profileID: profileId)
+    }
+
+    func currentSavedAuthData(for profileId: String) throws -> Data? {
+        try self.authVault.loadAuthBlob(profileID: profileId)
+    }
+
+    func saveAuthDataToVault(_ data: Data, for profileId: String) throws {
+        try self.authVault.saveAuthBlob(data, profileID: profileId)
+    }
+
     func relaunchWorkspacePath() -> String? {
         guard let data = try? Data(contentsOf: self.codexGlobalStateURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -592,10 +587,12 @@ final class ProfileStore {
         var lines: [String] = [
             "config: \(self.configURL.path)",
             "cache: \(self.cacheURL.path)",
-            "auth_store: \(self.authStoreDir.path)",
+            "auth_storage: macOS Keychain (\(KeychainAuthVault.defaultService))",
+            "legacy_auth_store: \(self.authStoreDir.path)",
             "codex_home: \(self.codexHome.path)",
             "codex_auth_exists: \(self.liveAuthExists())",
             "config_active_profile: \(self.config.activeProfile)",
+            "auth_storage_version: \(self.config.authStorageVersion.map(String.init) ?? "<none>")",
             "live_profile_id: \(self.liveProfileId ?? "<none>")",
             "profile_count: \(self.config.profiles.count)",
         ]
@@ -649,8 +646,7 @@ final class ProfileStore {
         var idsByFingerprint: [String: [String]] = [:]
 
         for profile in self.config.profiles {
-            let savedURL = self.authStorePath(for: profile.id)
-            guard let fingerprint = self.authFingerprint(for: savedURL) else { continue }
+            guard let fingerprint = self.savedAuthFingerprint(for: profile.id) else { continue }
             idsByFingerprint[fingerprint, default: []].append(profile.id)
         }
 
@@ -667,12 +663,7 @@ final class ProfileStore {
             throw ProfileMutationError.cannotClearActiveProfile
         }
 
-        do {
-            try self.fileManager.removeItem(at: self.authStorePath(for: id))
-        } catch let error as CocoaError where error.code == .fileNoSuchFile {
-        }
-
-        try atomicWriteData(Data(), to: self.authClearedMarkerPath(for: id))
+        try self.authVault.deleteAuthBlob(profileID: id)
         self.cache.snapshots.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.statuses[id] = .notSetUp
@@ -704,16 +695,17 @@ final class ProfileStore {
     }
 
     func authFingerprint(for url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let identity = Self.authIdentity(from: json),
-              JSONSerialization.isValidJSONObject(identity),
-              let normalized = try? JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]) else {
-            return nil
-        }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return self.authFingerprint(for: data)
+    }
 
-        let digest = SHA256.hash(data: normalized)
-        return digest.map { String(format: "%02x", $0) }.joined()
+    func authFingerprint(for data: Data) -> String? {
+        AuthBlob.identityFingerprint(from: data)
+    }
+
+    func savedAuthFingerprint(for profileId: String) -> String? {
+        guard let data = try? self.authVault.loadAuthBlob(profileID: profileId) else { return nil }
+        return self.authFingerprint(for: data)
     }
 
     func liveAuthFingerprint() -> String? {
@@ -724,7 +716,7 @@ final class ProfileStore {
         guard let liveFingerprint = self.liveAuthFingerprint() else { return [] }
 
         return self.config.profiles.compactMap { profile in
-            guard self.authFingerprint(for: self.authStorePath(for: profile.id)) == liveFingerprint else {
+            guard self.savedAuthFingerprint(for: profile.id) == liveFingerprint else {
                 return nil
             }
             return profile.id
@@ -755,11 +747,15 @@ final class ProfileStore {
 
     private func saveConfig() {
         do {
-            let data = try Self.configEncoder.encode(self.config)
-            try data.write(to: self.configURL, options: .atomic)
+            try self.saveConfigThrowing()
         } catch {
             AppLogger.error("Failed to save config", metadata: ["error": error.localizedDescription])
         }
+    }
+
+    private func saveConfigThrowing() throws {
+        let data = try Self.configEncoder.encode(self.config)
+        try data.write(to: self.configURL, options: .atomic)
     }
 
     private func saveCache() {
@@ -787,6 +783,76 @@ final class ProfileStore {
     }
 
     private func savedProfileIDs() -> [String] {
+        ((try? self.authVault.listProfileIDs()) ?? [])
+            .filter(Self.isValidProfileId)
+            .sorted()
+    }
+
+    private func migrateLegacyProfiles() {
+        guard self.config.authStorageVersion != Self.keychainAuthStorageVersion else {
+            self.cleanupLegacyAuthStoreIfMigrated()
+            return
+        }
+
+        let legacyFiles = self.legacyAuthStoreFiles()
+        guard !legacyFiles.isEmpty else {
+            do {
+                self.config.authStorageVersion = Self.keychainAuthStorageVersion
+                try self.saveConfigThrowing()
+                self.cleanupLegacyAuthStoreIfMigrated()
+            } catch {
+                AppLogger.error("Failed to mark empty legacy disk auth migration complete",
+                                metadata: ["error": error.localizedDescription])
+            }
+            return
+        }
+
+        let validatedFiles: [(id: String, url: URL, data: Data)]
+        do {
+            validatedFiles = try legacyFiles.map { id, url in
+                let data = try Data(contentsOf: url)
+                guard AuthBlob.isPlausibleAuthBlob(data) else {
+                    throw AuthError.decodeFailed
+                }
+                return (id, url, data)
+            }
+        } catch {
+            AppLogger.error("Failed to validate legacy disk auth store before Keychain migration",
+                            metadata: ["error": error.localizedDescription])
+            return
+        }
+
+        var priorBlobs: [String: Data?] = [:]
+        var touchedProfileIDs: [String] = []
+        do {
+            for (id, _, _) in validatedFiles {
+                priorBlobs[id] = try self.authVault.loadAuthBlob(profileID: id)
+            }
+
+            for (id, _, data) in validatedFiles {
+                try self.authVault.saveAuthBlob(data, profileID: id)
+                touchedProfileIDs.append(id)
+                guard let saved = try self.authVault.loadAuthBlob(profileID: id) else {
+                    throw AuthError.notFound
+                }
+                guard saved == data || self.authFingerprint(for: saved) == self.authFingerprint(for: data) else {
+                    throw AuthError.writeFailed
+                }
+            }
+
+            self.config.authStorageVersion = Self.keychainAuthStorageVersion
+            try self.saveConfigThrowing()
+            self.cleanupLegacyAuthStoreIfMigrated()
+            AppLogger.info("Migrated legacy disk auth store to Keychain",
+                           metadata: ["profile_count": "\(validatedFiles.count)"])
+        } catch {
+            self.rollbackKeychainMigration(touchedProfileIDs: touchedProfileIDs, priorBlobs: priorBlobs)
+            AppLogger.error("Failed to migrate legacy disk auth store to Keychain",
+                            metadata: ["error": error.localizedDescription])
+        }
+    }
+
+    private func legacyAuthStoreFiles() -> [(String, URL)] {
         guard let urls = try? self.fileManager.contentsOfDirectory(
             at: self.authStoreDir,
             includingPropertiesForKeys: nil,
@@ -798,61 +864,37 @@ final class ProfileStore {
         return urls.compactMap { url in
             guard url.pathExtension == "json" else { return nil }
             let id = url.deletingPathExtension().lastPathComponent
-            return Self.isValidProfileId(id) ? id : nil
+            guard Self.isValidProfileId(id) else { return nil }
+            return (id, url)
         }
-        .sorted()
+        .sorted { $0.0 < $1.0 }
     }
 
-    private func migrateLegacyProfiles() {
-        for id in self.legacyProfileIDs()
-            where !self.authStoreExists(for: id) && !self.authClearedMarkerExists(for: id)
-        {
-            let legacyPath = self.legacyAuthPath(for: id)
+    private func rollbackKeychainMigration(touchedProfileIDs: [String], priorBlobs: [String: Data?]) {
+        for id in Set(touchedProfileIDs) {
             do {
-                try self.copyAuthFile(from: legacyPath, to: self.authStorePath(for: id))
-                AppLogger.info("Migrated legacy profile auth", metadata: ["profile": id])
+                if let prior = priorBlobs[id] ?? nil {
+                    try self.authVault.saveAuthBlob(prior, profileID: id)
+                } else {
+                    try self.authVault.deleteAuthBlob(profileID: id)
+                }
             } catch {
-                AppLogger.warning("Failed to migrate legacy profile auth",
-                                  metadata: ["profile": id, "error": error.localizedDescription])
+                AppLogger.error("Failed to roll back migrated Keychain auth",
+                                metadata: ["profile": id, "error": error.localizedDescription])
             }
         }
     }
 
-    private func legacyProfileIDs() -> [String] {
-        guard let contents = try? self.fileManager.contentsOfDirectory(
-            atPath: self.fileManager.homeDirectoryForCurrentUser.path
-        ) else {
-            return []
-        }
+    private func cleanupLegacyAuthStoreIfMigrated() {
+        guard self.config.authStorageVersion == Self.keychainAuthStorageVersion else { return }
+        guard self.fileManager.fileExists(atPath: self.authStoreDir.path) else { return }
 
-        return contents.compactMap { name in
-            guard name.hasPrefix(".codex-"), name != ".codex-switcher" else { return nil }
-            let id = String(name.dropFirst(7))
-            guard Self.isValidProfileId(id) else { return nil }
-            let authPath = self.legacyAuthPath(for: id).path
-            return self.fileManager.fileExists(atPath: authPath) ? id : nil
-        }
-        .sorted()
-    }
-
-    private func legacyAuthPath(for profileId: String) -> URL {
-        self.fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex-\(profileId)", isDirectory: true)
-            .appendingPathComponent("auth.json")
-    }
-
-    private func authClearedMarkerPath(for profileId: String) -> URL {
-        self.authStoreDir.appendingPathComponent(".\(profileId).cleared")
-    }
-
-    private func copyAuthFile(from source: URL, to destination: URL) throws {
-        let data: Data
         do {
-            data = try Data(contentsOf: source)
+            try self.fileManager.removeItem(at: self.authStoreDir)
         } catch {
-            throw AuthError.notFound
+            AppLogger.error("Failed to remove legacy disk auth store",
+                            metadata: ["error": error.localizedDescription])
         }
-        try self.replaceFile(at: destination, with: data)
     }
 
     private func replaceFile(at destination: URL, with data: Data) throws {
@@ -874,37 +916,6 @@ final class ProfileStore {
         case .reloginNeeded: return "relogin-needed"
         case .notSetUp: return "not-set-up"
         }
-    }
-
-    // SYNC: bin/codex-profile find_matching_profiles() must produce identical fingerprints
-    private static func authIdentity(from json: [String: Any]) -> [String: Any]? {
-        if let apiKey = json["OPENAI_API_KEY"] as? String,
-           !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let digest = SHA256.hash(data: Data(apiKey.utf8))
-            return [
-                "kind": "api-key",
-                "keyHash": digest.map { String(format: "%02x", $0) }.joined(),
-            ]
-        }
-
-        guard let tokens = json["tokens"] as? [String: Any] else { return nil }
-
-        let accountId = dictStringValue(tokens, "account_id", "accountId")
-        let idToken = dictStringValue(tokens, "id_token", "idToken")
-        let claims = idToken.flatMap(Self.stableClaims(fromIDToken:)) ?? [:]
-
-        guard !claims.isEmpty else {
-            return nil
-        }
-
-        var identity: [String: Any] = [
-            "kind": "oauth",
-            "idTokenClaims": claims,
-        ]
-        if let accountId {
-            identity["accountId"] = accountId
-        }
-        return identity
     }
 
     private static func stableClaims(fromIDToken idToken: String) -> [String: String]? {
@@ -934,8 +945,14 @@ final class ProfileStore {
     }
 
     private static func authDetails(at url: URL) -> AuthIdentityDetails? {
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return self.authDetails(from: data)
+    }
+
+    private static func authDetails(from data: Data) -> AuthIdentityDetails? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
 
@@ -982,115 +999,9 @@ final class ProfileStore {
 
 // MARK: - Auth Credentials (adapted from codexbar)
 
-struct AuthCredentials {
-    let accessToken: String
-    let refreshToken: String
-    let idToken: String?
-    let accountId: String?
-    let lastRefresh: Date?
-
-    var needsRefresh: Bool {
-        guard let lastRefresh else { return true }
-        let eightDays: TimeInterval = 8 * 24 * 60 * 60
-        return Date().timeIntervalSince(lastRefresh) > eightDays
-    }
-}
-
 enum AuthCredentialLoader {
-    static func load(from url: URL) throws -> AuthCredentials {
-        let data = try Data(contentsOf: url)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AuthError.decodeFailed
-        }
-
-        if let apiKey = json["OPENAI_API_KEY"] as? String,
-           !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return AuthCredentials(
-                accessToken: apiKey, refreshToken: "",
-                idToken: nil, accountId: nil, lastRefresh: nil)
-        }
-
-        guard let tokens = json["tokens"] as? [String: Any] else {
-            throw AuthError.missingTokens
-        }
-
-        guard let accessToken = dictStringValue(tokens, "access_token", "accessToken"),
-              let refreshToken = dictStringValue(tokens, "refresh_token", "refreshToken"),
-              !accessToken.isEmpty else {
-            throw AuthError.missingTokens
-        }
-
-        let idToken = dictStringValue(tokens, "id_token", "idToken")
-        let accountId = dictStringValue(tokens, "account_id", "accountId")
-        let lastRefresh = parseLastRefresh(json["last_refresh"])
-
-        return AuthCredentials(
-            accessToken: accessToken, refreshToken: refreshToken,
-            idToken: idToken, accountId: accountId, lastRefresh: lastRefresh)
-    }
-
-    static func save(_ creds: AuthCredentials, to url: URL) throws {
-        let fd = open(url.path, O_RDWR | O_CREAT, 0o600)
-        guard fd >= 0 else { throw AuthError.writeFailed }
-        defer { close(fd) }
-
-        guard flock(fd, LOCK_EX) == 0 else { throw AuthError.writeFailed }
-        defer { flock(fd, LOCK_UN) }
-
-        var existingJSON: [String: Any] = [:]
-        let fileSize = lseek(fd, 0, SEEK_END)
-        if fileSize > 0 {
-            lseek(fd, 0, SEEK_SET)
-            var buffer = [UInt8](repeating: 0, count: Int(fileSize))
-            let bytesRead = read(fd, &buffer, Int(fileSize))
-            if bytesRead > 0 {
-                let data = Data(buffer[0..<bytesRead])
-                if let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    existingJSON = parsed
-                }
-            }
-        }
-
-        var tokens: [String: Any] = [
-            "access_token": creds.accessToken,
-            "refresh_token": creds.refreshToken,
-        ]
-        if let idToken = creds.idToken { tokens["id_token"] = idToken }
-        if let accountId = creds.accountId { tokens["account_id"] = accountId }
-        existingJSON["tokens"] = tokens
-        existingJSON["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-
-        let data = try JSONSerialization.data(withJSONObject: existingJSON, options: [.prettyPrinted, .sortedKeys])
-        try atomicWriteData(data, to: url)
-    }
-
-    private static func parseLastRefresh(_ raw: Any?) -> Date? {
-        guard let value = raw as? String, !value.isEmpty else { return nil }
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = fmt.date(from: value) { return d }
-        fmt.formatOptions = [.withInternetDateTime]
-        return fmt.date(from: value)
-    }
-}
-
-enum AuthError: LocalizedError {
-    case notFound, decodeFailed, missingTokens, writeFailed
-    case refreshExpired, refreshReused, refreshRevoked
-    case networkError(Error), invalidResponse(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .notFound: return "auth.json not found"
-        case .decodeFailed: return "Failed to decode auth.json"
-        case .missingTokens: return "No tokens in auth.json"
-        case .writeFailed: return "Failed to write auth.json"
-        case .refreshExpired: return "Refresh token expired"
-        case .refreshReused: return "Refresh token already used"
-        case .refreshRevoked: return "Refresh token revoked"
-        case .networkError(let e): return "Network error: \(e.localizedDescription)"
-        case .invalidResponse(let m): return "Invalid response: \(m)"
-        }
+    static func load(from data: Data) throws -> AuthCredentials {
+        try AuthBlob.load(from: data)
     }
 }
 
@@ -1103,9 +1014,11 @@ enum AuthRefresher {
     static func refreshIfNeeded(
         profileId: String,
         activeProfileId: String,
-        authFileURL: URL
+        authData: Data,
+        currentAuthData: () throws -> Data?,
+        saveUpdatedAuthData: (Data) throws -> Void
     ) async throws -> AuthCredentials {
-        let creds = try AuthCredentialLoader.load(from: authFileURL)
+        let creds = try AuthCredentialLoader.load(from: authData)
 
         guard profileId != activeProfileId else { return creds }
         guard creds.needsRefresh else { return creds }
@@ -1147,14 +1060,18 @@ enum AuthRefresher {
             accountId: creds.accountId,
             lastRefresh: Date())
 
-        let current = try AuthCredentialLoader.load(from: authFileURL)
+        guard let currentData = try currentAuthData() else {
+            throw AuthError.notFound
+        }
+        let current = try AuthCredentialLoader.load(from: currentData)
         guard current.refreshToken == creds.refreshToken else {
             AppLogger.warning("Skipped OAuth token refresh save because auth changed",
                               metadata: ["profile": profileId])
             return current
         }
         try Task.checkCancellation()
-        try AuthCredentialLoader.save(refreshed, to: authFileURL)
+        let updatedData = try AuthBlob.updatedData(from: currentData, with: refreshed)
+        try saveUpdatedAuthData(updatedData)
         AppLogger.info("OAuth token refresh succeeded", metadata: ["profile": profileId])
         return refreshed
     }
@@ -1646,7 +1563,7 @@ private final class CodexRPCClient {
 enum CLIUsageFetcher {
     static func fetch(
         profileId: String,
-        authFileURL: URL,
+        authData: Data,
         codexConfigURL: URL,
         environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> UsageSnapshot
     {
@@ -1656,7 +1573,7 @@ enum CLIUsageFetcher {
         let tempHome = try self.makeTemporaryCodexHome(profileId: profileId)
         defer { try? FileManager.default.removeItem(at: tempHome) }
 
-        try self.copyFile(from: authFileURL, to: tempHome.appendingPathComponent("auth.json"))
+        try atomicWriteData(authData, to: tempHome.appendingPathComponent("auth.json"))
         if FileManager.default.fileExists(atPath: codexConfigURL.path) {
             try? self.copyFile(from: codexConfigURL, to: tempHome.appendingPathComponent("config.toml"))
         }
@@ -1740,15 +1657,15 @@ final class UsageProvider {
 
         let profiles = self.store.config.profiles
         let liveId = self.store.liveProfileId ?? ""
-        let contexts: [(String, URL, UsageSnapshot?)] = profiles.map { p in
-            (p.id, self.store.authURL(for: p.id), self.store.cache.snapshots[p.id])
+        let contexts: [(String, UsageSnapshot?)] = profiles.map { p in
+            (p.id, self.store.cache.snapshots[p.id])
         }
 
         self.refreshTask = Task {
             await withTaskGroup(of: Void.self) { group in
-                for (id, authURL, cached) in contexts {
+                for (id, cached) in contexts {
                     group.addTask {
-                        await self.refreshProfile(id, authURL: authURL, activeProfileId: liveId, cached: cached)
+                        await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
                     }
                 }
             }
@@ -1762,7 +1679,7 @@ final class UsageProvider {
     }
 
     private func refreshProfile(
-        _ id: String, authURL: URL, activeProfileId: String, cached: UsageSnapshot?
+        _ id: String, activeProfileId: String, cached: UsageSnapshot?
     ) async {
         guard !self.store.isAuthMutationInProgress() else { return }
 
@@ -1778,7 +1695,7 @@ final class UsageProvider {
             diagnostics.lastDecision = decision
             let snapshot = diagnostics
             await MainActor.run {
-                if !self.canUseAuthFile(for: id, authURL: authURL, activeProfileId: activeProfileId) {
+                if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
                     self.store.updateRefreshDiagnostics(id, snapshot)
                     self.store.updateStatus(id, .notSetUp)
                     return
@@ -1804,10 +1721,19 @@ final class UsageProvider {
         }
 
         func fetchOAuthSnapshot() async throws -> UsageSnapshot {
+            guard let authData = try self.store.authDataForUsage(profileId: id, activeProfileId: activeProfileId) else {
+                throw AuthError.notFound
+            }
             let creds = try await AuthRefresher.refreshIfNeeded(
                 profileId: id,
                 activeProfileId: activeProfileId,
-                authFileURL: authURL)
+                authData: authData,
+                currentAuthData: {
+                    try self.store.currentSavedAuthData(for: id)
+                },
+                saveUpdatedAuthData: { data in
+                    try self.store.saveAuthDataToVault(data, for: id)
+                })
 
             let response = try await UsageFetcher.fetch(
                 accessToken: creds.accessToken,
@@ -1829,9 +1755,14 @@ final class UsageProvider {
             await setDiagnostics()
 
             do {
+                guard let authData = try self.store.authDataForUsage(
+                    profileId: id,
+                    activeProfileId: activeProfileId) else {
+                    throw AuthError.notFound
+                }
                 let cliSnapshot = try await CLIUsageFetcher.fetch(
                     profileId: id,
-                    authFileURL: self.store.cliProbeAuthURL(for: id, fallback: authURL),
+                    authData: authData,
                     codexConfigURL: self.store.codexConfigURL())
 
                 diagnostics.lastSuccessfulSource = .cli
@@ -1868,7 +1799,7 @@ final class UsageProvider {
         }
 
         do {
-            guard self.canUseAuthFile(for: id, authURL: authURL, activeProfileId: activeProfileId) else {
+            guard self.canUseAuth(for: id, activeProfileId: activeProfileId) else {
                 await finalize(.notSetUp, decision: "not-set-up")
                 return
             }
@@ -1919,12 +1850,11 @@ final class UsageProvider {
         }
     }
 
-    private func canUseAuthFile(for id: String, authURL: URL, activeProfileId: String) -> Bool {
+    private func canUseAuth(for id: String, activeProfileId: String) -> Bool {
         if id == activeProfileId {
-            return FileManager.default.fileExists(atPath: authURL.path)
+            return self.store.liveAuthExists()
         }
         return self.store.authStoreExists(for: id)
-            && FileManager.default.fileExists(atPath: authURL.path)
     }
 }
 
@@ -3563,7 +3493,9 @@ enum LaunchAtLogin {
 
 // MARK: - Entry Point
 
+#if !TESTING
 @main
+#endif
 enum Main {
     static func main() {
         let app = NSApplication.shared

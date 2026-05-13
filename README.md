@@ -17,7 +17,6 @@ A macOS menu bar app for switching between OpenAI Codex accounts and checking us
 
 - macOS 14+
 - Xcode Command Line Tools (`xcode-select --install`)
-- `python3` on your `PATH` for the `codex-profile` helper
 - [Codex desktop app](https://openai.com/codex/) installed
 
 ## Install
@@ -32,8 +31,8 @@ cd codex-profile-switcher
 codex-profile-switcher
 ```
 
-The binary is installed to `~/.local/bin/codex-profile-switcher`, and the
-matching CLI helper is installed to `~/.local/bin/codex-profile`.
+The menu bar app is installed to `~/.local/bin/codex-profile-switcher`, and the
+matching Swift CLI helper is installed to `~/.local/bin/codex-profile`.
 
 If Codex is not installed at `/Applications/Codex.app`, set `CODEX_APP` or
 `CODEX_CLI` before using the helper.
@@ -50,8 +49,8 @@ codex-profile login 2
 ```
 
 The helper runs Codex's normal browser login flow in a temporary `CODEX_HOME`
-and saves the resulting auth file to `~/.codex-switcher/auth/<profile>.json`.
-After that, switching does not require logging in again.
+and saves the resulting auth blob in macOS Keychain. After that, switching does
+not require logging in again.
 
 If your workspace enables Codex device code authentication, you can still pass
 device-auth options through the helper manually. The app uses the normal CLI login
@@ -60,8 +59,13 @@ flow because it works across workspaces without admin changes.
 ## How It Works
 
 Codex Desktop still runs against its normal `~/.codex/` directory. This project
-stores per-profile auth in `~/.codex-switcher/auth/<profile>.json` and swaps the
-selected profile into `~/.codex/auth.json` when you switch.
+stores per-profile auth in macOS Keychain and swaps the selected profile into
+`~/.codex/auth.json` when you switch. Existing saved auth from
+`~/.codex-switcher/auth/*.json` is migrated into Keychain on startup and the
+legacy disk auth directory is removed only after successful verification.
+
+Local unsigned builds may trigger a macOS Keychain access prompt the first time
+the app or helper reads or writes saved profile auth.
 
 When you switch profiles, the helper:
 

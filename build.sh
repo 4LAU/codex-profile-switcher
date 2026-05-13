@@ -2,8 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC="$SCRIPT_DIR/CodexProfileSwitcher.swift"
-HELPER_SRC="$SCRIPT_DIR/bin/codex-profile"
+SWIFT_SOURCES=(
+  "$SCRIPT_DIR/CodexProfileSwitcher.swift"
+  "$SCRIPT_DIR/AuthBlob.swift"
+  "$SCRIPT_DIR/AuthVault.swift"
+  "$SCRIPT_DIR/KeychainAuthVault.swift"
+)
+HELPER_SRC="$SCRIPT_DIR/CodexProfileCLI.swift"
+HELPER_SOURCES=(
+  "$SCRIPT_DIR/CodexProfileCLI.swift"
+  "$SCRIPT_DIR/AuthBlob.swift"
+  "$SCRIPT_DIR/AuthVault.swift"
+  "$SCRIPT_DIR/KeychainAuthVault.swift"
+)
 ICON_SRC="$SCRIPT_DIR/assets/codex-profile-switcher-menu-icon.png"
 ICON_EMPTY_SRC="$SCRIPT_DIR/assets/codex-profile-switcher-menu-icon-empty.png"
 OUT="${1:-$HOME/.local/bin/codex-profile-switcher}"
@@ -16,24 +27,32 @@ MODULE_CACHE="${CODEX_PROFILE_SWIFT_MODULE_CACHE:-${TMPDIR:-/tmp}/codex-profile-
 mkdir -p "$OUT_DIR"
 mkdir -p "$MODULE_CACHE"
 OUT_TMP="$(mktemp "$OUT_DIR/.codex-profile-switcher.XXXXXX")"
-trap 'rm -f "$OUT_TMP"' EXIT
+HELPER_TMP="$(mktemp "$OUT_DIR/.codex-profile.XXXXXX")"
+trap 'rm -f "$OUT_TMP" "$HELPER_TMP"' EXIT
 
 echo "Building CodexProfileSwitcher..."
 swiftc -O \
   -o "$OUT_TMP" \
-  "$SRC" \
+  "${SWIFT_SOURCES[@]}" \
   -framework Cocoa \
   -framework SwiftUI \
+  -framework Security \
   -parse-as-library \
   -module-cache-path "$MODULE_CACHE"
 
 chmod +x "$OUT_TMP"
 mv -f "$OUT_TMP" "$OUT"
-trap - EXIT
 
 if [[ -f "$HELPER_SRC" ]]; then
-  cp "$HELPER_SRC" "$HELPER_OUT"
-  chmod +x "$HELPER_OUT"
+  echo "Building helper..."
+  swiftc -O \
+    -o "$HELPER_TMP" \
+    "${HELPER_SOURCES[@]}" \
+    -framework Foundation \
+    -framework Security \
+    -module-cache-path "$MODULE_CACHE"
+  chmod +x "$HELPER_TMP"
+  mv -f "$HELPER_TMP" "$HELPER_OUT"
   echo "Installed helper: $HELPER_OUT"
 else
   echo "Warning: helper not found at $HELPER_SRC" >&2
@@ -54,3 +73,4 @@ else
 fi
 
 echo "Built: $OUT"
+trap - EXIT
