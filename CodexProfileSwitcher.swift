@@ -386,6 +386,7 @@ final class ProfileStore {
     private let cacheURL: URL
     private let authStoreDir: URL
     private let authVault: AuthVault
+    private let authStorageDescription: String
     private let codexHome: URL
     private let codexAuthPath: URL
     private let codexGlobalStateURL: URL
@@ -400,10 +401,17 @@ final class ProfileStore {
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
 
-    init(authVault: AuthVault = KeychainAuthVault()) {
-        self.authVault = authVault
+    init(authVault: AuthVault? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let keychainService = Self.keychainService(environment: environment)
+        if let authVault {
+            self.authVault = authVault
+            self.authStorageDescription = "custom auth vault"
+        } else {
+            self.authVault = KeychainAuthVault(service: keychainService)
+            self.authStorageDescription = "macOS Keychain (\(keychainService))"
+        }
 
-        let home = self.fileManager.homeDirectoryForCurrentUser
+        let home = Self.userHome(environment: environment)
         self.configDir = home.appendingPathComponent(".codex-switcher")
         self.configURL = self.configDir.appendingPathComponent("config.json")
         self.cacheURL = self.configDir.appendingPathComponent("cache.json")
@@ -445,6 +453,23 @@ final class ProfileStore {
         self.refreshStatusesFromStoredAuth()
     }
 
+    static func keychainService(environment: [String: String]) -> String {
+        if let service = environment["CODEX_PROFILE_KEYCHAIN_SERVICE"], !service.isEmpty {
+            return service
+        }
+        return KeychainAuthVault.defaultService
+    }
+
+    static func userHome(environment: [String: String]) -> URL {
+        if let path = environment["CODEX_PROFILE_HOME"], !path.isEmpty {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        if let path = environment["CODEX_PROFILE_TEST_HOME"], !path.isEmpty {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
     func discoverProfiles() {
         var merged: [ProfileConfig] = []
         var seen = Set<String>()
@@ -480,17 +505,13 @@ final class ProfileStore {
         return profile
     }
 
-    func removeProfile(_ id: String) {
+    func removeProfile(_ id: String) throws {
+        try self.authVault.deleteAuthBlob(profileID: id)
+
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
-        do {
-            try self.authVault.deleteAuthBlob(profileID: id)
-        } catch {
-            AppLogger.warning("Failed to remove saved profile auth",
-                              metadata: ["profile": id, "error": error.localizedDescription])
-        }
         if self.config.activeProfile == id {
             self.config.activeProfile = self.config.profiles.first?.id ?? ""
         }
@@ -584,7 +605,7 @@ final class ProfileStore {
         var lines: [String] = [
             "config: \(self.configURL.path)",
             "cache: \(self.cacheURL.path)",
-            "auth_storage: macOS Keychain (\(KeychainAuthVault.defaultService))",
+            "auth_storage: \(self.authStorageDescription)",
             "legacy_auth_store: \(self.authStoreDir.path)",
             "codex_home: \(self.codexHome.path)",
             "codex_auth_exists: \(self.liveAuthExists())",
@@ -2414,6 +2435,13 @@ enum CodexBridge {
 
     private static func codexProfilePath() -> String? {
         let candidates: [String?] = [
+            Bundle.main.bundleURL.pathExtension == "app"
+                ? Bundle.main.bundleURL
+                    .appendingPathComponent("Contents/Helpers/codex-profile").path
+                : nil,
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent("codex-profile").path,
             Bundle.main.executableURL?
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
@@ -3276,8 +3304,9 @@ struct ProfilesTab: View {
             Button("Delete", role: .destructive) {
                 if let id = self.pendingDeleteId {
                     let label = self.labels[id] ?? id
-                    self.removeProfile(id)
-                    self.toast.show("Deleted \(label)", style: .info)
+                    if self.removeProfile(id) {
+                        self.toast.show("Deleted \(label)", style: .info)
+                    }
                 }
                 self.pendingDeleteId = nil
             }
@@ -3323,10 +3352,16 @@ struct ProfilesTab: View {
         self.toast.show("Added \(profile.label)", style: .success)
     }
 
-    private func removeProfile(_ id: String) {
-        self.store.removeProfile(id)
-        self.labels.removeValue(forKey: id)
-        self.profiles = self.store.config.profiles
+    private func removeProfile(_ id: String) -> Bool {
+        do {
+            try self.store.removeProfile(id)
+            self.labels.removeValue(forKey: id)
+            self.profiles = self.store.config.profiles
+            return true
+        } catch {
+            self.toast.show(error.localizedDescription, style: .error)
+            return false
+        }
     }
 
     private func labelBinding(for id: String, default defaultValue: String) -> Binding<String> {

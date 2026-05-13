@@ -26,3 +26,34 @@ swiftc \
   -o "$BUILD_DIR/LogRedactorTests"
 
 "$BUILD_DIR/LogRedactorTests"
+
+swiftc \
+  -D TESTING \
+  "$ROOT_DIR/CodexProfileSwitcher.swift" \
+  "$ROOT_DIR/AuthBlob.swift" \
+  "$ROOT_DIR/AuthVault.swift" \
+  "$ROOT_DIR/KeychainAuthVault.swift" \
+  "$ROOT_DIR/FileAuthVault.swift" \
+  "$ROOT_DIR/Tests/Swift/ProfileStoreEnvironmentTests.swift" \
+  -framework Cocoa \
+  -framework SwiftUI \
+  -framework Security \
+  -parse-as-library \
+  -o "$BUILD_DIR/ProfileStoreEnvironmentTests"
+
+"$BUILD_DIR/ProfileStoreEnvironmentTests"
+
+swiftc \
+  -D TESTING \
+  "$ROOT_DIR/CodexProfileSwitcher.swift" \
+  "$ROOT_DIR/AuthBlob.swift" \
+  "$ROOT_DIR/AuthVault.swift" \
+  "$ROOT_DIR/KeychainAuthVault.swift" \
+  "$ROOT_DIR/Tests/Swift/CLIUsageFetcherTests.swift" \
+  -framework Cocoa \
+  -framework SwiftUI \
+  -framework Security \
+  -parse-as-library \
+  -o "$BUILD_DIR/CLIUsageFetcherTests"
+
+"$BUILD_DIR/CLIUsageFetcherTests"

@@ -189,6 +189,52 @@ test_switch_refuses_ambiguous_live_auth() {
   assert_same_file "$exported_a" "$duplicate_a" "saved auth changed after refused ambiguous switch"
 }
 
+test_switch_uses_active_profile_to_disambiguate_live_auth() {
+  reset_home
+  local duplicate_a="$WORK_DIR/preferred-duplicate-a.json"
+  local live_duplicate="$WORK_DIR/preferred-live.json"
+  local saved_b="$WORK_DIR/preferred-b.json"
+  local exported_a="$WORK_DIR/exported-preferred-a.json"
+  local exported_clone="$WORK_DIR/exported-preferred-clone.json"
+  make_api_auth "$duplicate_a" "sk-test-preferred-a-1111111111" "duplicate-a"
+  make_api_auth "$live_duplicate" "sk-test-preferred-a-1111111111" "live-duplicate"
+  make_api_auth "$saved_b" "sk-test-preferred-b-2222222222" "saved-b"
+  save_auth "PreferredA" "$duplicate_a"
+  save_auth "PreferredClone" "$duplicate_a"
+  save_auth "PreferredB" "$saved_b"
+  cp "$live_duplicate" "$TEST_HOME/.codex/auth.json"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "PreferredClone",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "PreferredA", "label" : "Preferred A"},\n    {"id" : "PreferredClone", "label" : "Preferred Clone"},\n    {"id" : "PreferredB", "label" : "Preferred B"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+
+  run_helper app PreferredB "$WORK_DIR" >/dev/null
+
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected profile auth was not restored after disambiguated switch"
+  export_auth "PreferredA" "$exported_a"
+  export_auth "PreferredClone" "$exported_clone"
+  assert_same_file "$exported_a" "$duplicate_a" "non-active duplicate was overwritten during disambiguated switch"
+  assert_same_file "$exported_clone" "$live_duplicate" "active duplicate was not used as outgoing profile"
+}
+
+test_switch_fails_when_target_profile_has_no_saved_auth() {
+  reset_home
+  local saved_a="$WORK_DIR/missing-target-a.json"
+  local live_a="$WORK_DIR/missing-target-live-a.json"
+  local exported_a="$WORK_DIR/exported-missing-target-a.json"
+  make_api_auth "$saved_a" "sk-test-missing-target-a-1111111111" "saved-a"
+  make_api_auth "$live_a" "sk-test-missing-target-a-1111111111" "live-a"
+  save_auth "MissingTargetA" "$saved_a"
+  cp "$live_a" "$TEST_HOME/.codex/auth.json"
+
+  if run_helper app MissingTargetB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/missing-target.err"; then
+    fail "switch succeeded even though requested profile had no saved auth"
+  fi
+
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "missing-target switch modified live auth"
+  export_auth "MissingTargetA" "$exported_a"
+  assert_same_file "$exported_a" "$saved_a" "missing-target switch modified saved auth"
+}
+
 test_login_uses_isolated_home_and_preserves_live_auth() {
   reset_home
   local live="$WORK_DIR/login-live.json"
@@ -209,6 +255,24 @@ test_login_uses_isolated_home_and_preserves_live_auth() {
     */.codex-switcher/tmp/LoginProfile-*) ;;
     *) fail "login did not use an isolated CODEX_HOME under .codex-switcher/tmp (got $isolated_home)" ;;
   esac
+}
+
+test_login_fails_when_codex_exits_nonzero() {
+  reset_home
+  local live="$WORK_DIR/login-nonzero-live.json"
+  local login="$WORK_DIR/login-nonzero-result.json"
+  make_api_auth "$live" "sk-test-login-nonzero-live-1111111111" "live"
+  make_api_auth "$login" "sk-test-login-nonzero-result-2222222222" "login"
+  cp "$live" "$TEST_HOME/.codex/auth.json"
+
+  if FAKE_CODEX_LOGIN_AUTH="$login" FAKE_CODEX_LOGIN_STATUS=42 run_helper login NonzeroLogin >/dev/null 2>"$WORK_DIR/login-nonzero.err"; then
+    fail "login succeeded even though fake codex exited non-zero"
+  fi
+
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live" "nonzero login modified live Codex auth"
+  if [[ -f "$AUTH_STORE/NonzeroLogin.json" ]]; then
+    fail "nonzero login saved a profile anyway"
+  fi
 }
 
 test_login_fails_when_codex_writes_no_auth() {
@@ -274,7 +338,10 @@ test_login_prefers_bundled_codex_over_path() {
 test_switch_preserves_outgoing_auth
 test_switch_refuses_unmanaged_live_auth
 test_switch_refuses_ambiguous_live_auth
+test_switch_uses_active_profile_to_disambiguate_live_auth
+test_switch_fails_when_target_profile_has_no_saved_auth
 test_login_uses_isolated_home_and_preserves_live_auth
+test_login_fails_when_codex_exits_nonzero
 test_login_fails_when_codex_writes_no_auth
 test_login_prefers_bundled_codex_over_path
 
