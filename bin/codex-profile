@@ -67,6 +67,10 @@ live_auth_path() {
   printf '%s/auth.json\n' "$(live_codex_home)"
 }
 
+codex_global_state_path() {
+  printf '%s/.codex-global-state.json\n' "$(live_codex_home)"
+}
+
 config_path() {
   printf '%s/config.json\n' "$(switcher_home)"
 }
@@ -101,6 +105,7 @@ ensure_private_dir() {
 ensure_auth_store() {
   ensure_private_dir "$(switcher_home)"
   ensure_private_dir "$(auth_store_dir)"
+  migrate_legacy_profiles
 }
 
 atomic_copy_file() {
@@ -118,11 +123,9 @@ atomic_copy_file() {
   mv -f "$temp_file" "$destination" || { rm -f "$temp_file"; die "Failed to replace $destination"; }
 }
 
-# SYNC: find_matching_profiles() below and CodexProfileSwitcher.swift authIdentity() must produce identical fingerprints
-auth_fingerprint() {
-  local auth_path="$1"
-  [[ -f "$auth_path" ]] || return 1
-  python3 - "$auth_path" <<'PY'
+# SYNC: CodexProfileSwitcher.swift authIdentity() must produce identical fingerprints
+# Shared Python fingerprint module — used by auth_fingerprint() and find_matching_profiles()
+_FINGERPRINT_PY='
 import base64, hashlib, json, pathlib, sys
 
 STABLE_ID_TOKEN_CLAIMS = (
@@ -134,14 +137,12 @@ STABLE_ID_TOKEN_CLAIMS = (
     "https://api.openai.com/organization_id",
 )
 
-
 def string_value(data, *keys):
     for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value:
             return value
     return None
-
 
 def decode_jwt_payload(token):
     parts = token.split(".")
@@ -156,7 +157,6 @@ def decode_jwt_payload(token):
         return None
     return data if isinstance(data, dict) else None
 
-
 def stable_claims(id_token):
     payload = decode_jwt_payload(id_token)
     if not payload:
@@ -168,36 +168,38 @@ def stable_claims(id_token):
             claims[key] = value
     return claims
 
+def fingerprint(path):
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    api_key = data.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        identity = {"kind": "api-key", "keyHash": hashlib.sha256(api_key.encode()).hexdigest()}
+    else:
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+        account_id = string_value(tokens, "account_id", "accountId")
+        id_token = string_value(tokens, "id_token", "idToken")
+        claims = stable_claims(id_token) if id_token else {}
+        if not claims:
+            return None
+        identity = {"kind": "oauth", "idTokenClaims": claims}
+        if account_id:
+            identity["accountId"] = account_id
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+'
 
-path = pathlib.Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text())
-except Exception:
+auth_fingerprint() {
+  local auth_path="$1"
+  [[ -f "$auth_path" ]] || return 1
+  python3 -c "${_FINGERPRINT_PY}
+fp = fingerprint(pathlib.Path(sys.argv[1]))
+if not fp:
     sys.exit(1)
-api_key = data.get("OPENAI_API_KEY")
-if isinstance(api_key, str) and api_key.strip():
-    identity = {
-        "kind": "api-key",
-        "keyHash": hashlib.sha256(api_key.encode()).hexdigest(),
-    }
-else:
-    tokens = data.get("tokens")
-    if not isinstance(tokens, dict):
-        sys.exit(1)
-    account_id = string_value(tokens, "account_id", "accountId")
-    id_token = string_value(tokens, "id_token", "idToken")
-    claims = stable_claims(id_token) if id_token else {}
-    if not claims:
-        sys.exit(1)
-    identity = {
-        "kind": "oauth",
-        "idTokenClaims": claims,
-    }
-    if account_id:
-        identity["accountId"] = account_id
-normalized = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-print(hashlib.sha256(normalized).hexdigest())
-PY
+print(fp)
+" "$auth_path"
 }
 
 read_account_id() {
@@ -280,6 +282,27 @@ snapshot_auth_to_store() {
   atomic_copy_file "$auth_path" "$(auth_store_path "$profile")"
 }
 
+migrate_legacy_profiles() {
+  local legacy_dir profile legacy_auth destination
+  for legacy_dir in "$HOME"/.codex-*; do
+    [[ -d "$legacy_dir" ]] || continue
+    [[ "${legacy_dir##*/}" != ".codex-switcher" ]] || continue
+    profile="${legacy_dir##*/.codex-}"
+    is_valid_profile "$profile" || continue
+
+    legacy_auth="$legacy_dir/auth.json"
+    [[ -f "$legacy_auth" ]] || continue
+
+    destination="$(auth_store_path "$profile")"
+    [[ ! -f "$destination" ]] || continue
+
+    atomic_copy_file "$legacy_auth" "$destination"
+    note "Migrated legacy auth for profile '$profile' to $destination"
+  done
+
+  return 0
+}
+
 snapshot_live_auth_to_store() {
   local profile="$1"
   snapshot_auth_to_store "$profile" "$(live_auth_path)"
@@ -294,6 +317,35 @@ restore_live_auth_from_store() {
   atomic_copy_file "$source" "$(live_auth_path)"
 }
 
+resolve_workspace_from_global_state() {
+  local state_path
+  state_path="$(codex_global_state_path)"
+  [[ -f "$state_path" ]] || return 1
+  python3 - "$state_path" <<'PY'
+import json, pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    sys.exit(1)
+
+for key in ("active-workspace-roots", "electron-saved-workspace-roots"):
+    values = data.get(key)
+    if not isinstance(values, list):
+        continue
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        candidate = pathlib.Path(value).expanduser()
+        if candidate.is_dir():
+            print(str(candidate.resolve()))
+            sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 saved_profiles() {
   local store
   store="$(auth_store_dir)"
@@ -306,65 +358,22 @@ saved_profiles() {
   done
 }
 
-# SYNC: CodexProfileSwitcher.swift authIdentity() must produce identical fingerprints
 find_matching_profiles() {
   local live_auth="$1"
   local store_dir="$2"
-  python3 - "$live_auth" "$store_dir" <<'PY'
-import base64, hashlib, json, os, pathlib, sys
-
-STABLE_CLAIMS = (
-    "sub", "email",
-    "https://api.openai.com/auth",
-    "https://api.openai.com/account_id",
-    "https://api.openai.com/user_id",
-    "https://api.openai.com/organization_id",
-)
-
-def fingerprint(path):
-    try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return None
-    api_key = data.get("OPENAI_API_KEY")
-    if isinstance(api_key, str) and api_key.strip():
-        identity = {"kind": "api-key", "keyHash": hashlib.sha256(api_key.encode()).hexdigest()}
-    else:
-        tokens = data.get("tokens")
-        if not isinstance(tokens, dict):
-            return None
-        id_token = tokens.get("id_token") or tokens.get("idToken")
-        if not id_token:
-            return None
-        parts = id_token.split(".")
-        if len(parts) < 2:
-            return None
-        payload = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
-        try:
-            claims_data = json.loads(base64.urlsafe_b64decode(payload.encode()))
-        except Exception:
-            return None
-        claims = {k: claims_data[k] for k in STABLE_CLAIMS if isinstance(claims_data.get(k), str) and claims_data[k]}
-        if not claims:
-            return None
-        account_id = tokens.get("account_id") or tokens.get("accountId")
-        identity = {"kind": "oauth", "idTokenClaims": claims}
-        if account_id:
-            identity["accountId"] = account_id
-    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
+  python3 -c "${_FINGERPRINT_PY}
 live_path = pathlib.Path(sys.argv[1])
 store_dir = pathlib.Path(sys.argv[2])
 live_fp = fingerprint(live_path)
 if not live_fp:
     sys.exit(1)
-for f in sorted(store_dir.glob("*.json")):
+for f in sorted(store_dir.glob('*.json')):
     name = f.stem
     if not name or not name[0].isalnum():
         continue
     if fingerprint(f) == live_fp:
         print(name)
-PY
+" "$live_auth" "$store_dir"
 }
 
 determine_outgoing_profile() {
@@ -375,10 +384,10 @@ determine_outgoing_profile() {
   [[ -f "$live_auth" ]] || return 1
   [[ -d "$store" ]] || return 1
 
-  local matches=()
-  while read -r profile; do
-    [[ -n "$profile" ]] || continue
-    matches+=("$profile")
+  local matches=() match_profile
+  while read -r match_profile; do
+    [[ -n "$match_profile" ]] || continue
+    matches+=("$match_profile")
   done < <(find_matching_profiles "$live_auth" "$store")
 
   if [[ "${#matches[@]}" -eq 1 ]]; then
@@ -468,20 +477,30 @@ command_app() {
   validate_profile "$profile"
   shift || true
 
-  local workspace="${1:-$PWD}"
+  local requested_workspace="${1:-}"
+  local workspace=""
   [[ -x "$CODEX_APP_BIN" ]] || die "Codex Desktop binary not found at $CODEX_APP_BIN"
-  [[ -d "$workspace" ]] || die "Workspace directory not found: $workspace"
-  [[ -f "$(auth_store_path "$profile")" ]] || die "No saved auth for profile '$profile'. Run '$PROGRAM login $profile' first."
+  if [[ -n "$requested_workspace" ]]; then
+    [[ -d "$requested_workspace" ]] || die "Workspace directory not found: $requested_workspace"
+    workspace="$requested_workspace"
+  else
+    workspace="$(resolve_workspace_from_global_state 2> /dev/null || true)"
+  fi
 
   ensure_auth_store
   ensure_private_dir "$(live_codex_home)"
+  [[ -f "$(auth_store_path "$profile")" ]] || die "No saved auth for profile '$profile'. Run '$PROGRAM login $profile' first."
 
   local outgoing_profile=""
-  if [[ -f "$(live_auth_path)" ]] && determine_outgoing_profile; then
-    outgoing_profile="$OUTGOING_PROFILE"
-    if [[ "$outgoing_profile" == "$profile" ]] && codex_desktop_running; then
-      note "Profile '$profile' is already active."
-      return 0
+  if [[ -f "$(live_auth_path)" ]]; then
+    if determine_outgoing_profile; then
+      outgoing_profile="$OUTGOING_PROFILE"
+      if [[ "$outgoing_profile" == "$profile" ]] && codex_desktop_running; then
+        note "Profile '$profile' is already active."
+        return 0
+      fi
+    else
+      die "Live auth does not match any saved profile. Refusing to overwrite ~/.codex/auth.json until the current account is saved in the switcher."
     fi
   fi
 
@@ -489,8 +508,6 @@ command_app() {
 
   if [[ -n "$outgoing_profile" ]]; then
     snapshot_live_auth_to_store "$outgoing_profile"
-  elif [[ -f "$(live_auth_path)" ]]; then
-    note "Warning: live auth does not match any saved profile. Skipping outgoing snapshot."
   fi
 
   restore_live_auth_from_store "$profile"
@@ -505,7 +522,13 @@ command_app() {
 
   note "Launching Codex Desktop with profile '$profile'"
   note "Log: $log_file"
-  (umask 077 && nohup "$CODEX_APP_BIN" "$workspace" > "$log_file" 2>&1 &)
+  if [[ -n "$workspace" ]]; then
+    note "Workspace: $workspace"
+    (umask 077 && nohup "$CODEX_APP_BIN" "$workspace" > "$log_file" 2>&1 &)
+  else
+    note "Workspace: <default>"
+    (umask 077 && nohup "$CODEX_APP_BIN" > "$log_file" 2>&1 &)
+  fi
 }
 
 command_login() {
@@ -541,6 +564,8 @@ command_login() {
 }
 
 command_status() {
+  ensure_auth_store
+
   if [[ -n "${1:-}" ]]; then
     validate_profile "$1"
     print_status "$1"
@@ -560,6 +585,8 @@ command_status() {
 }
 
 command_list() {
+  ensure_auth_store
+
   local any=0 profile
   while read -r profile; do
     [[ -n "$profile" ]] || continue

@@ -190,6 +190,29 @@ enum ProfileStatus {
     }
 }
 
+enum UsageRefreshSource: String {
+    case auto
+    case oauth
+    case cli
+}
+
+struct ProfileRefreshDiagnostics {
+    var selectedMode: UsageRefreshSource = .auto
+    var lastAttemptedSource: UsageRefreshSource?
+    var lastSuccessfulSource: UsageRefreshSource?
+    var lastFallbackReason: String?
+    var lastDecision: String?
+    var lastError: String?
+}
+
+enum OAuthFallbackReason: String {
+    case usageUnauthorized = "oauth-unauthorized"
+    case missingTokens = "oauth-missing-tokens"
+    case refreshExpired = "refresh-expired"
+    case refreshReused = "refresh-reused"
+    case refreshRevoked = "refresh-revoked"
+}
+
 private func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String? {
     for key in keys {
         if let value = dict[key] as? String, !value.isEmpty { return value }
@@ -253,6 +276,7 @@ final class ProfileStore {
     private let authStoreDir: URL
     private let codexHome: URL
     private let codexAuthPath: URL
+    private let codexGlobalStateURL: URL
     private let fileManager = FileManager.default
     private let authMutationLock = NSLock()
     private var authMutationInProgress = false
@@ -261,6 +285,7 @@ final class ProfileStore {
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
     private(set) var statuses: [String: ProfileStatus] = [:]
+    private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
 
     init() {
@@ -271,6 +296,7 @@ final class ProfileStore {
         self.authStoreDir = self.configDir.appendingPathComponent("auth", isDirectory: true)
         self.codexHome = home.appendingPathComponent(".codex", isDirectory: true)
         self.codexAuthPath = self.codexHome.appendingPathComponent("auth.json")
+        self.codexGlobalStateURL = self.codexHome.appendingPathComponent(".codex-global-state.json")
 
         do {
             try self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
@@ -345,6 +371,7 @@ final class ProfileStore {
     func removeProfile(_ id: String) {
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
+        self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
         do {
             try self.fileManager.removeItem(at: self.authStorePath(for: id))
@@ -367,12 +394,25 @@ final class ProfileStore {
         self.authStoreDir.appendingPathComponent("\(profileId).json")
     }
 
+    func authStoreURL(for profileId: String) -> URL {
+        self.authStorePath(for: profileId)
+    }
+
     func authStoreExists(for profileId: String) -> Bool {
         self.fileManager.fileExists(atPath: self.authStorePath(for: profileId).path)
     }
 
     func authURL(for profileId: String) -> URL {
         self.liveProfileId == profileId ? self.codexAuthPath : self.authStorePath(for: profileId)
+    }
+
+    func cliProbeAuthURL(for profileId: String, fallback authURL: URL) -> URL {
+        let saved = self.authStorePath(for: profileId)
+        return self.fileManager.fileExists(atPath: saved.path) ? saved : authURL
+    }
+
+    func codexConfigURL() -> URL {
+        self.codexHome.appendingPathComponent("config.toml")
     }
 
     func setActiveProfile(_ id: String) {
@@ -393,6 +433,23 @@ final class ProfileStore {
         self.fileManager.fileExists(atPath: self.codexAuthPath.path)
     }
 
+    func relaunchWorkspacePath() -> String? {
+        guard let data = try? Data(contentsOf: self.codexGlobalStateURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        for key in ["active-workspace-roots", "electron-saved-workspace-roots"] {
+            guard let values = json[key] as? [String] else { continue }
+            for value in values {
+                guard let normalized = self.normalizedDirectoryPath(value) else { continue }
+                return normalized
+            }
+        }
+
+        return nil
+    }
+
     func debugSummaryLines() -> [String] {
         var lines: [String] = [
             "config: \(self.configURL.path)",
@@ -409,9 +466,17 @@ final class ProfileStore {
             let status = self.statuses[profile.id] ?? .notSetUp
             let cacheAge = self.cache.snapshots[profile.id].map { Int(Date().timeIntervalSince($0.fetchedAt)) }
             let cacheText = cacheAge.map { "\($0)s" } ?? "<none>"
+            let diagnostics = self.refreshDiagnostics[profile.id]
+            let attemptedSource = diagnostics?.lastAttemptedSource?.rawValue ?? "<none>"
+            let successfulSource = diagnostics?.lastSuccessfulSource?.rawValue ?? "<none>"
+            let fallbackReason = diagnostics?.lastFallbackReason ?? "<none>"
+            let decision = diagnostics?.lastDecision ?? "<none>"
+            let error = diagnostics?.lastError.map { LogRedactor.excerpt($0, maxLength: 120) } ?? "<none>"
             lines.append(
                 "profile[\(profile.id)]: label=\"\(profile.label)\" status=\(Self.debugStatusName(status)) " +
-                    "auth_saved=\(self.authStoreExists(for: profile.id)) cache_age=\(cacheText)")
+                    "auth_saved=\(self.authStoreExists(for: profile.id)) cache_age=\(cacheText) " +
+                    "last_attempted_source=\(attemptedSource) last_successful_source=\(successfulSource) " +
+                    "last_fallback_reason=\(fallbackReason) last_decision=\(decision) last_error=\(error)")
         }
 
         return lines
@@ -430,6 +495,10 @@ final class ProfileStore {
             self.cache.snapshots[id] = snapshot
             self.cacheDirty = true
         }
+    }
+
+    func updateRefreshDiagnostics(_ id: String, _ diagnostics: ProfileRefreshDiagnostics) {
+        self.refreshDiagnostics[id] = diagnostics
     }
 
     func flushCacheIfDirty() {
@@ -489,6 +558,15 @@ final class ProfileStore {
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
     }()
+
+    private func normalizedDirectoryPath(_ rawPath: String) -> String? {
+        guard !rawPath.isEmpty else { return nil }
+        var isDir = ObjCBool(false)
+        guard self.fileManager.fileExists(atPath: rawPath, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        return URL(fileURLWithPath: rawPath).standardizedFileURL.path
+    }
 
     private static let cacheEncoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -974,6 +1052,437 @@ enum UsageFetchError: LocalizedError, Equatable {
     }
 }
 
+enum CodexRPCError: LocalizedError {
+    case cliNotFound
+    case startFailed(String)
+    case requestFailed(String)
+    case malformed(String)
+    case timeout(method: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cliNotFound:
+            return "Codex CLI not found"
+        case .startFailed(let message):
+            return "Failed to start Codex CLI: \(message)"
+        case .requestFailed(let message):
+            return message
+        case .malformed(let message):
+            return message
+        case .timeout(let method):
+            return "Codex CLI timed out on \(method)"
+        }
+    }
+
+    var isAuthRequired: Bool {
+        guard case .requestFailed(let message) = self else { return false }
+        return message.localizedCaseInsensitiveContains("authentication required")
+            || message.localizedCaseInsensitiveContains("log in")
+    }
+}
+
+enum CLIUsageError: LocalizedError {
+    case noRateLimitsFound
+    case invalidResponse(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noRateLimitsFound:
+            return "Codex CLI returned no usage data"
+        case .invalidResponse(let message):
+            return message
+        }
+    }
+}
+
+private struct RPCRateLimitsResponse: Decodable {
+    let rateLimits: RPCRateLimitSnapshot
+}
+
+private struct RPCRateLimitSnapshot: Decodable {
+    let primary: RPCRateLimitWindow?
+    let secondary: RPCRateLimitWindow?
+    let credits: RPCCreditsSnapshot?
+    let planType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case primary
+        case secondary
+        case credits
+        case planType = "planType"
+    }
+}
+
+private struct RPCRateLimitWindow: Decodable {
+    let usedPercent: Double
+    let windowDurationMins: Int?
+    let resetsAt: Int?
+}
+
+private struct RPCCreditsSnapshot: Decodable {
+    let hasCredits: Bool
+    let unlimited: Bool
+    let balance: String?
+}
+
+enum CodexCLIResolver {
+    private static let fileManager = FileManager.default
+
+    static func resolvePath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        if let override = environment["CODEX_CLI"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           self.fileManager.isExecutableFile(atPath: override) {
+            return override
+        }
+
+        if let fromPath = self.whichCodex(environment: environment) {
+            return fromPath
+        }
+
+        let bundledRoot = environment["CODEX_APP"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "/Applications/Codex.app"
+        let bundledCLI = URL(fileURLWithPath: bundledRoot)
+            .appendingPathComponent("Contents/Resources/codex")
+            .path
+        if self.fileManager.isExecutableFile(atPath: bundledCLI) {
+            return bundledCLI
+        }
+
+        return nil
+    }
+
+    private static func whichCodex(environment: [String: String]) -> String? {
+        let proc = Process()
+        let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.arguments = ["codex"]
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+
+        var env = environment
+        env["PATH"] = self.effectivePATH(environment: environment)
+        proc.environment = env
+
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+
+    private static func effectivePATH(environment: [String: String]) -> String {
+        let home = self.fileManager.homeDirectoryForCurrentUser.path
+        let defaults = [
+            environment["PATH"],
+            "\(home)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+
+        var seen = Set<String>()
+        var parts: [String] = []
+        for chunk in defaults.compactMap({ $0 }) {
+            for item in chunk.split(separator: ":").map(String.init) where !item.isEmpty {
+                if seen.insert(item).inserted {
+                    parts.append(item)
+                }
+            }
+        }
+        return parts.joined(separator: ":")
+    }
+}
+
+private final class CodexRPCLineBuffer {
+    private let lock = NSLock()
+    private var buffer = Data()
+
+    func appendAndDrainLines(_ data: Data) -> [Data] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+
+        self.buffer.append(data)
+        var out: [Data] = []
+        while let newline = self.buffer.firstIndex(of: 0x0A) {
+            let line = Data(self.buffer[..<newline])
+            self.buffer.removeSubrange(...newline)
+            if !line.isEmpty {
+                out.append(line)
+            }
+        }
+        return out
+    }
+}
+
+private final class CodexRPCClient {
+    private let process = Process()
+    private let stdinPipe = Pipe()
+    private let stdoutPipe = Pipe()
+    private let stderrPipe = Pipe()
+    private let stdoutLineStream: AsyncStream<Data>
+    private let stdoutLineContinuation: AsyncStream<Data>.Continuation
+    private let initializeTimeoutSeconds: TimeInterval
+    private let requestTimeoutSeconds: TimeInterval
+    private var nextID = 1
+
+    init(
+        executablePath: String,
+        environment: [String: String],
+        initializeTimeoutSeconds: TimeInterval = 8,
+        requestTimeoutSeconds: TimeInterval = 3) throws
+    {
+        self.initializeTimeoutSeconds = initializeTimeoutSeconds
+        self.requestTimeoutSeconds = requestTimeoutSeconds
+
+        var continuation: AsyncStream<Data>.Continuation!
+        self.stdoutLineStream = AsyncStream<Data> { continuation = $0 }
+        self.stdoutLineContinuation = continuation
+
+        self.process.executableURL = URL(fileURLWithPath: executablePath)
+        self.process.arguments = ["-s", "read-only", "-a", "untrusted", "app-server"]
+        self.process.environment = environment
+        self.process.standardInput = self.stdinPipe
+        self.process.standardOutput = self.stdoutPipe
+        self.process.standardError = self.stderrPipe
+
+        do {
+            try self.process.run()
+        } catch {
+            throw CodexRPCError.startFailed(error.localizedDescription)
+        }
+
+        let stdoutHandle = self.stdoutPipe.fileHandleForReading
+        let stdoutBuffer = CodexRPCLineBuffer()
+        let stdoutContinuation = self.stdoutLineContinuation
+        stdoutHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                stdoutContinuation.finish()
+                return
+            }
+
+            for line in stdoutBuffer.appendAndDrainLines(data) {
+                stdoutContinuation.yield(line)
+            }
+        }
+
+        let stderrHandle = self.stderrPipe.fileHandleForReading
+        stderrHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            }
+        }
+    }
+
+    func initialize(clientName: String, clientVersion: String) async throws {
+        _ = try await self.request(
+            method: "initialize",
+            params: ["clientInfo": ["name": clientName, "version": clientVersion]],
+            timeout: self.initializeTimeoutSeconds)
+        try self.sendNotification(method: "initialized")
+    }
+
+    func fetchRateLimits() async throws -> RPCRateLimitsResponse {
+        let message = try await self.request(method: "account/rateLimits/read")
+        return try self.decodeResult(from: message)
+    }
+
+    func shutdown() {
+        self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        self.stderrPipe.fileHandleForReading.readabilityHandler = nil
+        if self.process.isRunning {
+            self.process.terminate()
+        }
+    }
+
+    private struct SendableMessage: @unchecked Sendable {
+        let value: [String: Any]
+    }
+
+    private func request(
+        method: String,
+        params: [String: Any]? = nil,
+        timeout: TimeInterval? = nil) async throws -> [String: Any]
+    {
+        let id = self.nextID
+        self.nextID += 1
+        try self.sendRequest(id: id, method: method, params: params)
+
+        let resolvedTimeout = timeout ?? self.requestTimeoutSeconds
+        let wrapped = try await self.withTimeout(seconds: resolvedTimeout, method: method) {
+            while true {
+                let message = try await self.readNextMessage()
+
+                if message["id"] == nil {
+                    continue
+                }
+
+                guard let messageID = self.jsonID(message["id"]), messageID == id else { continue }
+
+                if let error = message["error"] as? [String: Any],
+                   let messageText = error["message"] as? String {
+                    throw CodexRPCError.requestFailed(messageText)
+                }
+
+                return SendableMessage(value: message)
+            }
+        }
+        return wrapped.value
+    }
+
+    private func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        method: String,
+        body: @escaping @Sendable () async throws -> T) async throws -> T
+    {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await body()
+            }
+            group.addTask { [weak self] in
+                try await Task.sleep(for: .seconds(seconds))
+                self?.terminateForTimeout()
+                throw CodexRPCError.timeout(method: method)
+            }
+            guard let result = try await group.next() else {
+                group.cancelAll()
+                throw CodexRPCError.timeout(method: method)
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func terminateForTimeout() {
+        if self.process.isRunning {
+            self.process.terminate()
+        }
+    }
+
+    private func sendNotification(method: String, params: [String: Any]? = nil) throws {
+        try self.sendPayload(["method": method, "params": params ?? [:]])
+    }
+
+    private func sendRequest(id: Int, method: String, params: [String: Any]?) throws {
+        try self.sendPayload(["id": id, "method": method, "params": params ?? [:]])
+    }
+
+    private func sendPayload(_ payload: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        self.stdinPipe.fileHandleForWriting.write(data)
+        self.stdinPipe.fileHandleForWriting.write(Data([0x0A]))
+    }
+
+    private func readNextMessage() async throws -> [String: Any] {
+        for await lineData in self.stdoutLineStream {
+            if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                return json
+            }
+        }
+        throw CodexRPCError.malformed("codex app-server closed stdout")
+    }
+
+    private func decodeResult<T: Decodable>(from message: [String: Any]) throws -> T {
+        guard let result = message["result"] else {
+            throw CodexRPCError.malformed("missing result field")
+        }
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func jsonID(_ value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        default:
+            return nil
+        }
+    }
+}
+
+enum CLIUsageFetcher {
+    static func fetch(
+        profileId: String,
+        authFileURL: URL,
+        codexConfigURL: URL,
+        environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> UsageSnapshot
+    {
+        let executablePath = CodexCLIResolver.resolvePath(environment: environment)
+        guard let executablePath else { throw CodexRPCError.cliNotFound }
+
+        let tempHome = try self.makeTemporaryCodexHome(profileId: profileId)
+        defer { try? FileManager.default.removeItem(at: tempHome) }
+
+        try self.copyFile(from: authFileURL, to: tempHome.appendingPathComponent("auth.json"))
+        if FileManager.default.fileExists(atPath: codexConfigURL.path) {
+            try? self.copyFile(from: codexConfigURL, to: tempHome.appendingPathComponent("config.toml"))
+        }
+
+        var env = environment
+        env["CODEX_HOME"] = tempHome.path
+
+        let rpc = try CodexRPCClient(executablePath: executablePath, environment: env)
+        defer { rpc.shutdown() }
+
+        try await rpc.initialize(clientName: AppInfo.name, clientVersion: AppInfo.version)
+        let response = try await rpc.fetchRateLimits()
+        return try self.makeSnapshot(from: response.rateLimits)
+    }
+
+    private static func makeTemporaryCodexHome(profileId: String) throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-switcher-\(profileId)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: base,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        return base
+    }
+
+    private static func copyFile(from source: URL, to destination: URL) throws {
+        let data = try Data(contentsOf: source)
+        try atomicWriteData(data, to: destination)
+    }
+
+    private static func makeSnapshot(from rateLimits: RPCRateLimitSnapshot) throws -> UsageSnapshot {
+        let creditsRemaining = rateLimits.credits.flatMap { credits -> Double? in
+            guard let balance = credits.balance else { return nil }
+            return Double(balance.replacingOccurrences(of: ",", with: ""))
+        }
+
+        let primaryResetAt = rateLimits.primary?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let secondaryResetAt = rateLimits.secondary?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let primaryUsedPercent = rateLimits.primary.map { Int($0.usedPercent.rounded()) } ?? 0
+        let secondaryUsedPercent = rateLimits.secondary.map { Int($0.usedPercent.rounded()) } ?? 0
+
+        if rateLimits.primary == nil, rateLimits.secondary == nil, creditsRemaining == nil {
+            throw CLIUsageError.noRateLimitsFound
+        }
+
+        return UsageSnapshot(
+            planType: rateLimits.planType,
+            creditsRemaining: creditsRemaining,
+            primaryUsedPercent: primaryUsedPercent,
+            primaryResetAt: primaryResetAt,
+            secondaryUsedPercent: secondaryUsedPercent,
+            secondaryResetAt: secondaryResetAt,
+            fetchedAt: Date())
+    }
+}
+
 // MARK: - UsageProvider
 
 final class UsageProvider {
@@ -1032,21 +1541,25 @@ final class UsageProvider {
     ) async {
         guard !self.store.isAuthMutationInProgress() else { return }
 
-        func setStatus(_ status: ProfileStatus) async {
-            await MainActor.run { self.store.updateStatus(id, status) }
+        let selectedMode: UsageRefreshSource = .auto
+        var diagnostics = ProfileRefreshDiagnostics(selectedMode: selectedMode)
+
+        func setDiagnostics() async {
+            let snapshot = diagnostics
+            await MainActor.run { self.store.updateRefreshDiagnostics(id, snapshot) }
         }
 
-        do {
-            let creds = try await AuthRefresher.refreshIfNeeded(
-                profileId: id,
-                activeProfileId: activeProfileId,
-                authFileURL: authURL)
+        func finalize(_ status: ProfileStatus, decision: String) async {
+            diagnostics.lastDecision = decision
+            let snapshot = diagnostics
+            await MainActor.run {
+                self.store.updateRefreshDiagnostics(id, snapshot)
+                self.store.updateStatus(id, status)
+            }
+        }
 
-            let response = try await UsageFetcher.fetch(
-                accessToken: creds.accessToken,
-                accountId: creds.accountId)
-
-            let snapshot = UsageSnapshot(
+        func makeSnapshot(from response: UsageResponse) -> UsageSnapshot {
+            UsageSnapshot(
                 planType: response.planType,
                 creditsRemaining: response.credits?.balance,
                 primaryUsedPercent: response.rateLimit?.primaryWindow?.usedPercent ?? 0,
@@ -1058,30 +1571,116 @@ final class UsageProvider {
                     Date(timeIntervalSince1970: TimeInterval($0.resetAt))
                 },
                 fetchedAt: Date())
+        }
 
-            await setStatus(.available(snapshot))
-            AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])
+        func fetchOAuthSnapshot() async throws -> UsageSnapshot {
+            let creds = try await AuthRefresher.refreshIfNeeded(
+                profileId: id,
+                activeProfileId: activeProfileId,
+                authFileURL: authURL)
+
+            let response = try await UsageFetcher.fetch(
+                accessToken: creds.accessToken,
+                accountId: creds.accountId)
+            return makeSnapshot(from: response)
+        }
+
+        func attemptCLIFallback(reason: OAuthFallbackReason, sourceError: Error) async {
+            diagnostics.lastFallbackReason = reason.rawValue
+            diagnostics.lastError = sourceError.localizedDescription
+            AppLogger.info("Usage refresh falling back to Codex CLI",
+                           metadata: [
+                               "profile": id,
+                               "from": UsageRefreshSource.oauth.rawValue,
+                               "reason": reason.rawValue,
+                           ])
+
+            diagnostics.lastAttemptedSource = .cli
+            await setDiagnostics()
+
+            do {
+                let cliSnapshot = try await CLIUsageFetcher.fetch(
+                    profileId: id,
+                    authFileURL: self.store.cliProbeAuthURL(for: id, fallback: authURL),
+                    codexConfigURL: self.store.codexConfigURL())
+
+                diagnostics.lastSuccessfulSource = .cli
+                diagnostics.lastError = nil
+                await finalize(.available(cliSnapshot), decision: "available")
+                AppLogger.info("Usage refresh succeeded",
+                               metadata: [
+                                   "profile": id,
+                                   "mode": selectedMode.rawValue,
+                                   "source": UsageRefreshSource.cli.rawValue,
+                                   "reason": reason.rawValue,
+                               ])
+            } catch is CancellationError {
+                return
+            } catch let error as CodexRPCError where error.isAuthRequired {
+                diagnostics.lastError = error.localizedDescription
+                await finalize(.reloginNeeded(cached), decision: "relogin-needed")
+                AppLogger.warning("Codex CLI fallback requires re-login",
+                                  metadata: [
+                                      "profile": id,
+                                      "reason": reason.rawValue,
+                                      "error": error.localizedDescription,
+                                  ])
+            } catch {
+                diagnostics.lastError = error.localizedDescription
+                await finalize(.stale(cached), decision: "stale")
+                AppLogger.warning("Codex CLI fallback failed",
+                                  metadata: [
+                                      "profile": id,
+                                      "reason": reason.rawValue,
+                                      "error": error.localizedDescription,
+                                  ])
+            }
+        }
+
+        do {
+            diagnostics.lastAttemptedSource = .oauth
+            await setDiagnostics()
+
+            let snapshot = try await fetchOAuthSnapshot()
+            diagnostics.lastSuccessfulSource = .oauth
+            diagnostics.lastError = nil
+            await finalize(.available(snapshot), decision: "available")
+            AppLogger.info("Usage refresh succeeded",
+                           metadata: [
+                               "profile": id,
+                               "mode": selectedMode.rawValue,
+                               "source": UsageRefreshSource.oauth.rawValue,
+                           ])
         } catch is CancellationError {
             return
         } catch let error as UsageFetchError where error == .unauthorized {
             AppLogger.warning("Usage refresh unauthorized",
                               metadata: ["profile": id, "error": error.localizedDescription])
-            await setStatus(.reloginNeeded(cached))
+            await attemptCLIFallback(reason: .usageUnauthorized, sourceError: error)
         } catch let error as AuthError {
             AppLogger.warning("Auth refresh failed",
                               metadata: ["profile": id, "error": error.localizedDescription])
             switch error {
-            case .refreshExpired, .refreshReused, .refreshRevoked:
-                await setStatus(.reloginNeeded(cached))
+            case .refreshExpired:
+                await attemptCLIFallback(reason: .refreshExpired, sourceError: error)
+            case .refreshReused:
+                await attemptCLIFallback(reason: .refreshReused, sourceError: error)
+            case .refreshRevoked:
+                await attemptCLIFallback(reason: .refreshRevoked, sourceError: error)
+            case .missingTokens:
+                await attemptCLIFallback(reason: .missingTokens, sourceError: error)
             case .notFound:
-                await setStatus(.notSetUp)
+                diagnostics.lastError = error.localizedDescription
+                await finalize(.notSetUp, decision: "not-set-up")
             default:
-                await setStatus(.stale(cached))
+                diagnostics.lastError = error.localizedDescription
+                await finalize(.stale(cached), decision: "stale")
             }
         } catch {
             AppLogger.warning("Usage refresh failed",
                               metadata: ["profile": id, "error": error.localizedDescription])
-            await setStatus(.stale(cached))
+            diagnostics.lastError = error.localizedDescription
+            await finalize(.stale(cached), decision: "stale")
         }
     }
 }
@@ -1522,14 +2121,18 @@ enum CodexBridge {
         }
     }
 
-    static func switchToProfile(_ profileId: String) async -> Result<Void, CodexBridgeError> {
+    static func switchToProfile(_ profileId: String, workspacePath: String?) async -> Result<Void, CodexBridgeError> {
         await withCheckedContinuation { continuation in
             guard let path = Self.codexProfilePath() else {
                 AppLogger.error("codex-profile helper not found")
                 continuation.resume(returning: .failure(.cliNotFound))
                 return
             }
-            Self.runCommand(path: path, arguments: ["app", profileId]) { result in
+            var arguments = ["app", profileId]
+            if let workspacePath, !workspacePath.isEmpty {
+                arguments.append(workspacePath)
+            }
+            Self.runCommand(path: path, arguments: arguments) { result in
                 continuation.resume(returning: result)
             }
         }
@@ -1825,9 +2428,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         switch status {
-        case .notSetUp, .reloginNeeded:
+        case .notSetUp:
             startLogin()
             return
+        case .reloginNeeded:
+            if !self.store.authStoreExists(for: id) {
+                AppLogger.warning("Profile requires login and has no saved auth; starting login",
+                                  metadata: ["profile": id])
+                startLogin()
+                return
+            }
         default:
             if isActive { return }
             if !self.store.authStoreExists(for: id) {
@@ -1850,9 +2460,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         let storeRef = self.store!
+        let workspacePath = self.store.relaunchWorkspacePath()
         storeRef.beginAuthMutation()
         Task { [weak self] in
-            let result = await CodexBridge.switchToProfile(id)
+            let result = await CodexBridge.switchToProfile(id, workspacePath: workspacePath)
             storeRef.endAuthMutation()
             guard let self else { return }
             switch result {
