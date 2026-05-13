@@ -2,6 +2,152 @@ import Cocoa
 import CryptoKit
 import SwiftUI
 
+// MARK: - App Info
+
+enum AppInfo {
+    static let name = "CodexProfileSwitcher"
+    static let version = "0.1.0"
+    static let issueURL = URL(string: "https://github.com/aaronlau/codex-profile-switcher/issues/new")!
+}
+
+// MARK: - Logging (adapted from CodexBar)
+
+enum LogLevel: String {
+    case info = "INFO"
+    case warning = "WARN"
+    case error = "ERROR"
+}
+
+enum LogRedactor {
+    private static let fallbackRegex = try! NSRegularExpression(pattern: "$^")
+    private static let emailRegex = Self.makeRegex(#"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#,
+                                                   options: [.caseInsensitive])
+    private static let cookieHeaderRegex = Self.makeRegex(#"(?i)(cookie\s*:\s*)([^\r\n]+)"#)
+    private static let authorizationRegex = Self.makeRegex(#"(?i)(authorization\s*:\s*)([^\r\n]+)"#)
+    private static let bearerRegex = Self.makeRegex(#"(?i)\bbearer\s+[a-z0-9._\-]+=*\b"#)
+    private static let openAIKeyRegex = Self.makeRegex(#"(?i)sk-[a-z0-9_\-]{16,}"#)
+    private static let tokenFieldRegex = Self.makeRegex(
+        #"(?i)("(?:access|refresh|id)_token"\s*:\s*")[^"]+(")"#)
+    private static let sensitiveQueryRegex = Self.makeRegex(
+        #"(?i)([?&](?:code|device_code|user_code|access_token|refresh_token|id_token|state)=)[^&\s]+"#)
+
+    static func redact(_ text: String) -> String {
+        var output = text
+        output = self.replace(self.emailRegex, in: output, with: "<redacted-email>")
+        output = self.replace(self.cookieHeaderRegex, in: output, with: "$1<redacted>")
+        output = self.replace(self.authorizationRegex, in: output, with: "$1<redacted>")
+        output = self.replace(self.bearerRegex, in: output, with: "Bearer <redacted>")
+        output = self.replace(self.openAIKeyRegex, in: output, with: "<redacted-openai-key>")
+        output = self.replace(self.tokenFieldRegex, in: output, with: "$1<redacted>$2")
+        output = self.replace(self.sensitiveQueryRegex, in: output, with: "$1<redacted>")
+        return output
+    }
+
+    static func excerpt(_ text: String, maxLength: Int = 2_000) -> String {
+        let singleLine = self.redact(text).replacingOccurrences(of: "\n", with: "\\n")
+        guard singleLine.count > maxLength else { return singleLine }
+        let end = singleLine.index(singleLine.startIndex, offsetBy: maxLength)
+        return "\(singleLine[..<end])...<truncated>"
+    }
+
+    private static func makeRegex(_ pattern: String, options: NSRegularExpression.Options = [])
+        -> NSRegularExpression
+    {
+        (try? NSRegularExpression(pattern: pattern, options: options)) ?? self.fallbackRegex
+    }
+
+    private static func replace(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
+}
+
+enum AppLogger {
+    static let logURL: URL = {
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library", isDirectory: true)
+        return base
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent(AppInfo.name, isDirectory: true)
+            .appendingPathComponent("\(AppInfo.name).log")
+    }()
+
+    private static let queue = DispatchQueue(label: "com.codex-profile-switcher.log", qos: .utility)
+    private static let maxBytes: UInt64 = 2 * 1024 * 1024
+
+    static func info(_ message: String, metadata: [String: String] = [:]) {
+        self.write(level: .info, message: message, metadata: metadata)
+    }
+
+    static func warning(_ message: String, metadata: [String: String] = [:]) {
+        self.write(level: .warning, message: message, metadata: metadata)
+    }
+
+    static func error(_ message: String, metadata: [String: String] = [:]) {
+        self.write(level: .error, message: message, metadata: metadata)
+    }
+
+    static func recentLines(limit: Int = 200) -> String {
+        guard let data = try? Data(contentsOf: self.logURL),
+              let text = String(data: data, encoding: .utf8) else {
+            return "<no log file>"
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(limit)
+        return lines.joined(separator: "\n")
+    }
+
+    private static func write(level: LogLevel, message: String, metadata: [String: String]) {
+        let safeMessage = LogRedactor.redact(message)
+        let safeMetadata = metadata
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(LogRedactor.excerpt($0.value))" }
+            .joined(separator: " ")
+        let suffix = safeMetadata.isEmpty ? "" : " \(safeMetadata)"
+        let line = "[\(Self.timestamp())] [\(level.rawValue)] \(safeMessage)\(suffix)\n"
+
+        self.queue.async {
+            do {
+                try self.prepareFile()
+                let data = Data(line.utf8)
+                let handle = try FileHandle(forWritingTo: self.logURL)
+                defer { try? handle.close() }
+                handle.seekToEndOfFile()
+                try handle.write(contentsOf: data)
+            } catch {
+                NSLog("%@: log write failed: %@", AppInfo.name, error.localizedDescription)
+            }
+        }
+    }
+
+    private static func prepareFile() throws {
+        let fm = FileManager.default
+        let dir = self.logURL.deletingLastPathComponent()
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+
+        if fm.fileExists(atPath: self.logURL.path) {
+            let attrs = try fm.attributesOfItem(atPath: self.logURL.path)
+            let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+            if size > self.maxBytes {
+                let rotated = dir.appendingPathComponent("\(AppInfo.name).old.log")
+                try? fm.removeItem(at: rotated)
+                try? fm.moveItem(at: self.logURL, to: rotated)
+            }
+        }
+
+        if !fm.fileExists(atPath: self.logURL.path) {
+            fm.createFile(atPath: self.logURL.path, contents: nil,
+                          attributes: [.posixPermissions: 0o600])
+        }
+    }
+
+    private static func timestamp() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
+    }
+}
+
 // MARK: - Models
 
 struct ProfileConfig: Codable, Identifiable {
@@ -16,6 +162,7 @@ struct AppConfig: Codable {
 
 struct UsageSnapshot: Codable {
     let planType: String?
+    let creditsRemaining: Double?
     let primaryUsedPercent: Int
     let primaryResetAt: Date?
     let secondaryUsedPercent: Int
@@ -50,18 +197,66 @@ private func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String
     return nil
 }
 
+private func atomicWriteData(_ data: Data, to destination: URL) throws {
+    let dir = destination.deletingLastPathComponent()
+    let tempPath = dir.appendingPathComponent(
+        ".\(destination.lastPathComponent).tmp-\(UUID().uuidString)").path
+    let fd = open(tempPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    guard fd >= 0 else { throw AuthError.writeFailed }
+
+    do {
+        let written = data.withUnsafeBytes { ptr -> Bool in
+            guard let base = ptr.baseAddress else { return data.isEmpty }
+            var remaining = data.count
+            var offset = 0
+            while remaining > 0 {
+                let n = Darwin.write(fd, base + offset, remaining)
+                guard n > 0 else { return false }
+                offset += n
+                remaining -= n
+            }
+            return true
+        }
+        guard written else { throw AuthError.writeFailed }
+        fsync(fd)
+        close(fd)
+    } catch {
+        close(fd)
+        unlink(tempPath)
+        throw error
+    }
+
+    guard rename(tempPath, destination.path) == 0 else {
+        unlink(tempPath)
+        throw AuthError.writeFailed
+    }
+}
+
+enum LiveAuthWarning: Equatable {
+    case unmanaged
+    case ambiguous
+
+    var message: String {
+        switch self {
+        case .unmanaged: return "Live Codex auth is unmanaged"
+        case .ambiguous: return "Live Codex auth matches multiple saved profiles"
+        }
+    }
+}
+
 // MARK: - ProfileStore
 
 final class ProfileStore {
     private let configDir: URL
     private let configURL: URL
     private let cacheURL: URL
-    let authStoreDir: URL
-    let codexHome: URL
-    let codexAuthPath: URL
+    private let authStoreDir: URL
+    private let codexHome: URL
+    private let codexAuthPath: URL
     private let fileManager = FileManager.default
     private let authMutationLock = NSLock()
     private var authMutationInProgress = false
+    private var cacheDirty = false
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
@@ -77,15 +272,23 @@ final class ProfileStore {
         self.codexHome = home.appendingPathComponent(".codex", isDirectory: true)
         self.codexAuthPath = self.codexHome.appendingPathComponent("auth.json")
 
-        try? self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
-                                              attributes: [.posixPermissions: 0o700])
-        try? self.fileManager.createDirectory(at: self.authStoreDir, withIntermediateDirectories: true,
-                                              attributes: [.posixPermissions: 0o700])
+        do {
+            try self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+            try self.fileManager.createDirectory(at: self.authStoreDir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        } catch {
+            AppLogger.error("Failed to create app directories", metadata: ["error": error.localizedDescription])
+        }
 
         if let data = try? Data(contentsOf: self.configURL),
            let loaded = try? JSONDecoder().decode(AppConfig.self, from: data) {
             self.config = loaded
         } else {
+            if self.fileManager.fileExists(atPath: self.configURL.path) {
+                AppLogger.warning("Config exists but could not be decoded",
+                                  metadata: ["path": self.configURL.path])
+            }
             self.config = AppConfig(profiles: [], activeProfile: "1")
         }
 
@@ -94,6 +297,9 @@ final class ProfileStore {
         let cacheData = try? Data(contentsOf: self.cacheURL)
         self.cache = cacheData.flatMap { try? cacheDecoder.decode(UsageCache.self, from: $0) }
             ?? UsageCache(snapshots: [:])
+        if cacheData != nil, self.cache.snapshots.isEmpty {
+            AppLogger.warning("Cache exists but could not be decoded", metadata: ["path": self.cacheURL.path])
+        }
 
         self.migrateLegacyProfiles()
         self.discoverProfiles()
@@ -140,7 +346,13 @@ final class ProfileStore {
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
-        try? self.fileManager.removeItem(at: self.authStorePath(for: id))
+        do {
+            try self.fileManager.removeItem(at: self.authStorePath(for: id))
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+        } catch {
+            AppLogger.warning("Failed to remove saved profile auth",
+                              metadata: ["profile": id, "error": error.localizedDescription])
+        }
         if self.config.activeProfile == id {
             self.config.activeProfile = self.config.profiles.first?.id ?? ""
         }
@@ -172,6 +384,39 @@ final class ProfileStore {
         self.liveProfileId = id
     }
 
+    func liveAuthModificationDate() -> Date? {
+        let attrs = try? self.fileManager.attributesOfItem(atPath: self.codexAuthPath.path)
+        return attrs?[.modificationDate] as? Date
+    }
+
+    func liveAuthExists() -> Bool {
+        self.fileManager.fileExists(atPath: self.codexAuthPath.path)
+    }
+
+    func debugSummaryLines() -> [String] {
+        var lines: [String] = [
+            "config: \(self.configURL.path)",
+            "cache: \(self.cacheURL.path)",
+            "auth_store: \(self.authStoreDir.path)",
+            "codex_home: \(self.codexHome.path)",
+            "codex_auth_exists: \(self.liveAuthExists())",
+            "config_active_profile: \(self.config.activeProfile)",
+            "live_profile_id: \(self.liveProfileId ?? "<none>")",
+            "profile_count: \(self.config.profiles.count)",
+        ]
+
+        for profile in self.config.profiles {
+            let status = self.statuses[profile.id] ?? .notSetUp
+            let cacheAge = self.cache.snapshots[profile.id].map { Int(Date().timeIntervalSince($0.fetchedAt)) }
+            let cacheText = cacheAge.map { "\($0)s" } ?? "<none>"
+            lines.append(
+                "profile[\(profile.id)]: label=\"\(profile.label)\" status=\(Self.debugStatusName(status)) " +
+                    "auth_saved=\(self.authStoreExists(for: profile.id)) cache_age=\(cacheText)")
+        }
+
+        return lines
+    }
+
     func updateLabel(for id: String, label: String) {
         if let idx = self.config.profiles.firstIndex(where: { $0.id == id }) {
             self.config.profiles[idx].label = label
@@ -183,8 +428,14 @@ final class ProfileStore {
         self.statuses[id] = status
         if case let .available(snapshot) = status {
             self.cache.snapshots[id] = snapshot
-            self.saveCache()
+            self.cacheDirty = true
         }
+    }
+
+    func flushCacheIfDirty() {
+        guard self.cacheDirty else { return }
+        self.cacheDirty = false
+        self.saveCache()
     }
 
     func beginAuthMutation() {
@@ -233,28 +484,46 @@ final class ProfileStore {
         }
     }
 
+    private static let configEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
+    }()
+
+    private static let cacheEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+
     private func saveConfig() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(self.config) else { return }
-        try? data.write(to: self.configURL, options: .atomic)
+        do {
+            let data = try Self.configEncoder.encode(self.config)
+            try data.write(to: self.configURL, options: .atomic)
+        } catch {
+            AppLogger.error("Failed to save config", metadata: ["error": error.localizedDescription])
+        }
     }
 
     private func saveCache() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(self.cache) else { return }
-        try? data.write(to: self.cacheURL, options: .atomic)
+        do {
+            let data = try Self.cacheEncoder.encode(self.cache)
+            try data.write(to: self.cacheURL, options: .atomic)
+        } catch {
+            AppLogger.error("Failed to save usage cache", metadata: ["error": error.localizedDescription])
+        }
     }
 
     private func refreshStatusesFromStoredAuth() {
         self.statuses = [:]
         for profile in self.config.profiles {
-            if let cached = self.cache.snapshots[profile.id] {
-                self.statuses[profile.id] = .stale(cached)
-            } else if self.authStoreExists(for: profile.id) {
-                self.statuses[profile.id] = .loading
+            if self.authStoreExists(for: profile.id) {
+                if let cached = self.cache.snapshots[profile.id] {
+                    self.statuses[profile.id] = .stale(cached)
+                } else {
+                    self.statuses[profile.id] = .loading
+                }
             } else {
                 self.statuses[profile.id] = .notSetUp
             }
@@ -279,10 +548,15 @@ final class ProfileStore {
     }
 
     private func migrateLegacyProfiles() {
-        guard self.savedProfileIDs().isEmpty else { return }
         for id in self.legacyProfileIDs() where !self.authStoreExists(for: id) {
             let legacyPath = self.legacyAuthPath(for: id)
-            try? self.copyAuthFile(from: legacyPath, to: self.authStorePath(for: id))
+            do {
+                try self.copyAuthFile(from: legacyPath, to: self.authStorePath(for: id))
+                AppLogger.info("Migrated legacy profile auth", metadata: ["profile": id])
+            } catch {
+                AppLogger.warning("Failed to migrate legacy profile auth",
+                                  metadata: ["profile": id, "error": error.localizedDescription])
+            }
         }
     }
 
@@ -322,50 +596,22 @@ final class ProfileStore {
     private func replaceFile(at destination: URL, with data: Data) throws {
         let dir = destination.deletingLastPathComponent()
         try self.fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let tempPath = dir.appendingPathComponent(
-            ".\(destination.lastPathComponent).tmp-\(UUID().uuidString)").path
-        let fd = open(tempPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
-        guard fd >= 0 else { throw AuthError.writeFailed }
-
-        do {
-            let written = data.withUnsafeBytes { ptr -> Bool in
-                guard let base = ptr.baseAddress else { return data.isEmpty }
-                var remaining = data.count
-                var offset = 0
-                while remaining > 0 {
-                    let n = Darwin.write(fd, base + offset, remaining)
-                    guard n > 0 else { return false }
-                    offset += n
-                    remaining -= n
-                }
-                return true
-            }
-            guard written else { throw AuthError.writeFailed }
-            fsync(fd)
-            close(fd)
-        } catch {
-            close(fd)
-            unlink(tempPath)
-            throw error
-        }
-
-        let tempURL = URL(fileURLWithPath: tempPath)
-        do {
-            _ = try self.fileManager.replaceItemAt(destination, withItemAt: tempURL)
-        } catch {
-            do {
-                try self.fileManager.moveItem(at: tempURL, to: destination)
-            } catch {
-                try? self.fileManager.removeItem(at: tempURL)
-                throw error
-            }
-        }
+        try atomicWriteData(data, to: destination)
     }
 
     private static func isValidProfileId(_ id: String) -> Bool {
         let pattern = #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#
         return id.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func debugStatusName(_ status: ProfileStatus) -> String {
+        switch status {
+        case .available: return "available"
+        case .loading: return "loading"
+        case .stale(let snapshot): return snapshot == nil ? "stale-no-cache" : "stale"
+        case .reloginNeeded: return "relogin-needed"
+        case .notSetUp: return "not-set-up"
+        }
     }
 
     // SYNC: bin/codex-profile find_matching_profiles() must produce identical fingerprints
@@ -516,35 +762,7 @@ enum AuthCredentialLoader {
         existingJSON["last_refresh"] = ISO8601DateFormatter().string(from: Date())
 
         let data = try JSONSerialization.data(withJSONObject: existingJSON, options: [.prettyPrinted, .sortedKeys])
-
-        let dir = url.deletingLastPathComponent().path
-        let tmpPath = "\(dir)/.\(url.lastPathComponent).tmp-\(UUID().uuidString)"
-        let tmpFd = open(tmpPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
-        guard tmpFd >= 0 else { throw AuthError.writeFailed }
-
-        do {
-            try data.withUnsafeBytes { ptr in
-                var remaining = data.count
-                var offset = 0
-                while remaining > 0 {
-                    let written = Darwin.write(tmpFd, ptr.baseAddress! + offset, remaining)
-                    guard written > 0 else { throw AuthError.writeFailed }
-                    offset += written
-                    remaining -= written
-                }
-            }
-            fsync(tmpFd)
-            close(tmpFd)
-        } catch {
-            close(tmpFd)
-            unlink(tmpPath)
-            throw error
-        }
-
-        guard rename(tmpPath, url.path) == 0 else {
-            unlink(tmpPath)
-            throw AuthError.writeFailed
-        }
+        try atomicWriteData(data, to: url)
     }
 
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
@@ -593,6 +811,7 @@ enum AuthRefresher {
         guard profileId != activeProfileId else { return creds }
         guard creds.needsRefresh else { return creds }
         guard !creds.refreshToken.isEmpty else { return creds }
+        AppLogger.info("Refreshing inactive OAuth token", metadata: ["profile": profileId])
 
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
@@ -628,6 +847,7 @@ enum AuthRefresher {
             lastRefresh: Date())
 
         try AuthCredentialLoader.save(refreshed, to: authFileURL)
+        AppLogger.info("OAuth token refresh succeeded", metadata: ["profile": profileId])
         return refreshed
     }
 
@@ -655,10 +875,19 @@ enum AuthRefresher {
 struct UsageResponse: Decodable {
     let planType: String?
     let rateLimit: RateLimitInfo?
+    let credits: CreditInfo?
 
     enum CodingKeys: String, CodingKey {
         case planType = "plan_type"
         case rateLimit = "rate_limit"
+        case credits
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
+        self.rateLimit = try container.decodeIfPresent(RateLimitInfo.self, forKey: .rateLimit)
+        self.credits = try? container.decodeIfPresent(CreditInfo.self, forKey: .credits)
     }
 
     struct RateLimitInfo: Decodable {
@@ -674,12 +903,30 @@ struct UsageResponse: Decodable {
     struct WindowInfo: Decodable {
         let usedPercent: Int
         let resetAt: Int
-        let limitWindowSeconds: Int
 
         enum CodingKeys: String, CodingKey {
             case usedPercent = "used_percent"
             case resetAt = "reset_at"
-            case limitWindowSeconds = "limit_window_seconds"
+        }
+    }
+
+    struct CreditInfo: Decodable {
+        let balance: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case balance
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let value = try? container.decode(Double.self, forKey: .balance) {
+                self.balance = value
+            } else if let raw = try? container.decode(String.self, forKey: .balance),
+                      let value = Double(raw.replacingOccurrences(of: ",", with: "")) {
+                self.balance = value
+            } else {
+                self.balance = nil
+            }
         }
     }
 }
@@ -706,8 +953,10 @@ enum UsageFetcher {
         case 200...299:
             return try JSONDecoder().decode(UsageResponse.self, from: data)
         case 401, 403:
+            AppLogger.warning("Usage API unauthorized", metadata: ["status": "\(http.statusCode)"])
             throw UsageFetchError.unauthorized
         default:
+            AppLogger.warning("Usage API server error", metadata: ["status": "\(http.statusCode)"])
             throw UsageFetchError.serverError(http.statusCode)
         }
     }
@@ -756,7 +1005,10 @@ final class UsageProvider {
                     }
                 }
             }
-            await MainActor.run { self.onRefreshComplete?() }
+            await MainActor.run {
+                self.store.flushCacheIfDirty()
+                self.onRefreshComplete?()
+            }
         }
     }
 
@@ -768,7 +1020,10 @@ final class UsageProvider {
 
         Task {
             await self.refreshProfile(id, authURL: authURL, activeProfileId: liveId, cached: cached)
-            await MainActor.run { self.onRefreshComplete?() }
+            await MainActor.run {
+                self.store.flushCacheIfDirty()
+                self.onRefreshComplete?()
+            }
         }
     }
 
@@ -793,6 +1048,7 @@ final class UsageProvider {
 
             let snapshot = UsageSnapshot(
                 planType: response.planType,
+                creditsRemaining: response.credits?.balance,
                 primaryUsedPercent: response.rateLimit?.primaryWindow?.usedPercent ?? 0,
                 primaryResetAt: response.rateLimit?.primaryWindow.map {
                     Date(timeIntervalSince1970: TimeInterval($0.resetAt))
@@ -804,11 +1060,16 @@ final class UsageProvider {
                 fetchedAt: Date())
 
             await setStatus(.available(snapshot))
+            AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])
         } catch is CancellationError {
             return
         } catch let error as UsageFetchError where error == .unauthorized {
+            AppLogger.warning("Usage refresh unauthorized",
+                              metadata: ["profile": id, "error": error.localizedDescription])
             await setStatus(.reloginNeeded(cached))
         } catch let error as AuthError {
+            AppLogger.warning("Auth refresh failed",
+                              metadata: ["profile": id, "error": error.localizedDescription])
             switch error {
             case .refreshExpired, .refreshReused, .refreshRevoked:
                 await setStatus(.reloginNeeded(cached))
@@ -818,6 +1079,8 @@ final class UsageProvider {
                 await setStatus(.stale(cached))
             }
         } catch {
+            AppLogger.warning("Usage refresh failed",
+                              metadata: ["profile": id, "error": error.localizedDescription])
             await setStatus(.stale(cached))
         }
     }
@@ -854,6 +1117,17 @@ func planDisplayName(_ raw: String?) -> String {
     case "edu", "education": return "Edu"
     default: return raw.capitalized
     }
+}
+
+func creditsDisplayName(_ value: Double?) -> String? {
+    guard let value else { return nil }
+    let clamped = max(0, value)
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .decimal
+    formatter.maximumFractionDigits = clamped >= 100 ? 0 : 1
+    formatter.minimumFractionDigits = 0
+    guard let formatted = formatter.string(from: NSNumber(value: clamped)) else { return nil }
+    return "\(formatted) cr"
 }
 
 // MARK: - Toast
@@ -1030,10 +1304,18 @@ struct ProfileCardView: View {
 
             Spacer()
 
-            if let planName = self.planType {
-                Text(planName)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                if let credits = self.credits {
+                    Text(credits)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let planName = self.planType {
+                    Text(planName)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -1081,6 +1363,11 @@ struct ProfileCardView: View {
     private var planType: String? {
         guard let snap = self.status.snapshot else { return nil }
         return planDisplayName(snap.planType)
+    }
+
+    private var credits: String? {
+        guard let snap = self.status.snapshot else { return nil }
+        return creditsDisplayName(snap.creditsRemaining)
     }
 }
 
@@ -1185,11 +1472,17 @@ enum CodexBridge {
         }
     }
 
+    static func helperPathForDebug() -> String {
+        self.codexProfilePath() ?? "<not found>"
+    }
+
     private static func runCommand(
         path: String,
         arguments: [String],
         completion: @escaping (Result<Void, CodexBridgeError>) -> Void
     ) {
+        AppLogger.info("Running helper command",
+                       metadata: ["path": path, "arguments": arguments.joined(separator: " ")])
         let proc = Process()
         let pipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: path)
@@ -1202,8 +1495,16 @@ enum CodexBridge {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             if p.terminationStatus == 0 {
+                AppLogger.info("Helper command succeeded",
+                               metadata: ["arguments": arguments.joined(separator: " ")])
                 completion(.success(()))
             } else {
+                AppLogger.error("Helper command failed",
+                                metadata: [
+                                    "arguments": arguments.joined(separator: " "),
+                                    "status": "\(p.terminationStatus)",
+                                    "output": output,
+                                ])
                 completion(.failure(.commandFailed(p.terminationStatus, output)))
             }
         }
@@ -1211,6 +1512,12 @@ enum CodexBridge {
         do {
             try proc.run()
         } catch {
+            AppLogger.error("Failed to launch helper command",
+                            metadata: [
+                                "path": path,
+                                "arguments": arguments.joined(separator: " "),
+                                "error": error.localizedDescription,
+                            ])
             completion(.failure(.launchFailed(error.localizedDescription)))
         }
     }
@@ -1218,6 +1525,7 @@ enum CodexBridge {
     static func switchToProfile(_ profileId: String) async -> Result<Void, CodexBridgeError> {
         await withCheckedContinuation { continuation in
             guard let path = Self.codexProfilePath() else {
+                AppLogger.error("codex-profile helper not found")
                 continuation.resume(returning: .failure(.cliNotFound))
                 return
             }
@@ -1233,10 +1541,12 @@ enum CodexBridge {
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !Self.activeLogins.contains(profileId) else {
+            AppLogger.warning("Login already running", metadata: ["profile": profileId])
             completion(.failure(.loginAlreadyRunning))
             return
         }
         guard let path = Self.codexProfilePath() else {
+            AppLogger.error("codex-profile helper not found")
             completion(.failure(.cliNotFound))
             return
         }
@@ -1251,6 +1561,66 @@ enum CodexBridge {
     }
 }
 
+// MARK: - Debug Info
+
+enum DebugInfoBuilder {
+    static func build(store: ProfileStore) -> String {
+        var lines: [String] = [
+            "\(AppInfo.name) Debug Info",
+            "generated_at: \(ISO8601DateFormatter().string(from: Date()))",
+            "app_version: \(AppInfo.version)",
+            "macos: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+            "executable: \(ProcessInfo.processInfo.arguments.first ?? "<unknown>")",
+            "helper: \(CodexBridge.helperPathForDebug())",
+            "log_file: \(AppLogger.logURL.path)",
+            "",
+            "State:",
+        ]
+
+        lines.append(contentsOf: store.debugSummaryLines().map { "  \($0)" })
+        lines.append("")
+        lines.append("Recent Logs:")
+        lines.append(AppLogger.recentLines(limit: 200))
+        return LogRedactor.redact(lines.joined(separator: "\n"))
+    }
+
+    static func copyToPasteboard(store: ProfileStore) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(Self.build(store: store), forType: .string)
+        AppLogger.info("Copied debug info to pasteboard")
+    }
+
+    static func openLogFile() {
+        AppLogger.info("Opening log file", metadata: ["path": AppLogger.logURL.path])
+        if !FileManager.default.fileExists(atPath: AppLogger.logURL.path) {
+            try? FileManager.default.createDirectory(
+                at: AppLogger.logURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            FileManager.default.createFile(atPath: AppLogger.logURL.path, contents: nil,
+                                           attributes: [.posixPermissions: 0o600])
+        }
+        NSWorkspace.shared.open(AppLogger.logURL)
+    }
+
+    static func reportBug() {
+        AppLogger.info("Opening bug report URL")
+        var components = URLComponents(url: AppInfo.issueURL, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "Bug: "),
+            URLQueryItem(name: "body", value: """
+            ## What happened
+
+
+            ## Debug info
+            Paste the output from Settings > General > Copy Debug Info here.
+            """),
+        ]
+        NSWorkspace.shared.open(components?.url ?? AppInfo.issueURL)
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -1259,10 +1629,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var usageProvider: UsageProvider!
     private var activeRefreshTimer: Timer?
     private var menu: NSMenu!
-    private var liveProfileMessage: String?
+    private var liveAuthWarning: LiveAuthWarning?
     private var lastLiveAuthMtime: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLogger.info("App launched", metadata: ["version": AppInfo.version])
         self.store = ProfileStore()
         self.usageProvider = UsageProvider(store: self.store)
         self.syncActiveProfile(force: true)
@@ -1321,8 +1692,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         self.menu.removeAllItems()
 
-        if let liveProfileMessage = self.liveProfileMessage {
-            let warningItem = NSMenuItem(title: liveProfileMessage, action: nil, keyEquivalent: "")
+        if let warning = self.liveAuthWarning {
+            let warningItem = NSMenuItem(title: warning.message, action: nil, keyEquivalent: "")
             warningItem.isEnabled = false
             warningItem.image = NSImage(
                 systemSymbolName: "exclamationmark.triangle.fill",
@@ -1388,8 +1759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !self.store.isAuthMutationInProgress() else { return }
 
         if !force {
-            let attrs = try? FileManager.default.attributesOfItem(atPath: self.store.codexAuthPath.path)
-            let mtime = attrs?[.modificationDate] as? Date
+            let mtime = self.store.liveAuthModificationDate()
             if mtime == self.lastLiveAuthMtime { return }
             self.lastLiveAuthMtime = mtime
         } else {
@@ -1399,7 +1769,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let matches = self.store.matchingProfilesForLiveAuth()
         if matches.count == 1, let match = matches.first {
             self.store.setLiveProfileId(match)
-            self.liveProfileMessage = nil
+            self.liveAuthWarning = nil
             if self.store.config.activeProfile != match {
                 self.store.setActiveProfile(match)
             }
@@ -1410,19 +1780,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let preferred = self.store.liveProfileId ?? self.store.config.activeProfile
             if !preferred.isEmpty, matches.contains(preferred) {
                 self.store.setLiveProfileId(preferred)
-                self.liveProfileMessage = nil
+                self.liveAuthWarning = nil
             } else {
                 self.store.setLiveProfileId(nil)
-                self.liveProfileMessage = "Live Codex auth matches multiple saved profiles"
+                self.liveAuthWarning = .ambiguous
+                AppLogger.warning("Live auth matched multiple saved profiles",
+                                  metadata: ["matches": matches.joined(separator: ",")])
             }
             return
         }
 
         self.store.setLiveProfileId(nil)
-        if FileManager.default.fileExists(atPath: self.store.codexAuthPath.path) {
-            self.liveProfileMessage = "Live Codex auth is unmanaged"
-        } else {
-            self.liveProfileMessage = nil
+        self.liveAuthWarning = self.store.liveAuthExists() ? .unmanaged : nil
+        if self.liveAuthWarning == .unmanaged {
+            AppLogger.warning("Live auth does not match any saved profile")
         }
     }
 
@@ -1430,12 +1801,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func switchToProfile(_ id: String) {
         self.menu.cancelTracking()
+        AppLogger.info("Profile selected", metadata: ["profile": id])
 
         let isActive = id == self.store.liveProfileId
         let status = self.store.statuses[id]
 
-        switch status {
-        case .notSetUp, .reloginNeeded:
+        func startLogin() {
             let store = self.store!
             store.beginAuthMutation()
             CodexBridge.startLogin(profileId: id) { [weak self] result in
@@ -1443,6 +1814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 switch result {
                 case .success:
+                    AppLogger.info("Login succeeded", metadata: ["profile": id])
                     self.syncActiveProfile(force: true)
                     self.usageProvider.refreshAll(force: true)
                     self.updateIcon()
@@ -1450,9 +1822,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.presentBridgeError(title: "Login failed", message: error.localizedDescription)
                 }
             }
+        }
+
+        switch status {
+        case .notSetUp, .reloginNeeded:
+            startLogin()
             return
         default:
             if isActive { return }
+            if !self.store.authStoreExists(for: id) {
+                AppLogger.warning("Profile has cached usage but no saved auth; starting login",
+                                  metadata: ["profile": id])
+                startLogin()
+                return
+            }
         }
 
         let profileLabel = self.store.config.profiles.first { $0.id == id }?.label ?? "Profile \(id)"
@@ -1474,9 +1857,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             switch result {
             case .success:
+                AppLogger.info("Profile switch succeeded", metadata: ["profile": id])
                 self.store.setActiveProfile(id)
                 self.store.setLiveProfileId(id)
-                self.liveProfileMessage = nil
+                self.liveAuthWarning = nil
                 self.usageProvider.refreshAll(force: true)
                 self.updateIcon()
             case .failure(let error):
@@ -1497,6 +1881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func presentBridgeError(title: String, message: String?) {
+        AppLogger.error(title, metadata: ["message": message ?? "Unknown error"])
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message ?? "Unknown error"
@@ -1521,7 +1906,7 @@ enum SettingsWindow {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -1562,7 +1947,7 @@ struct SettingsView: View {
 
                 switch self.selectedTab {
                 case 0: ProfilesTab(store: self.store, toast: self.toast)
-                case 1: GeneralTab()
+                case 1: GeneralTab(store: self.store, toast: self.toast)
                 case 2: AboutTab()
                 default: EmptyView()
                 }
@@ -1686,20 +2071,59 @@ struct ProfilesTab: View {
 }
 
 struct GeneralTab: View {
+    let store: ProfileStore
+    @ObservedObject var toast: ToastState
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("STARTUP")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("STARTUP")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
 
-            Toggle("Launch at Login", isOn: self.$launchAtLogin)
-                .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
+                Toggle("Launch at Login", isOn: self.$launchAtLogin)
+                    .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
 
-            Text("Automatically opens CodexProfileSwitcher when you start your Mac.")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                Text("Automatically opens CodexProfileSwitcher when you start your Mac.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("SUPPORT")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Button {
+                        DebugInfoBuilder.copyToPasteboard(store: self.store)
+                        self.toast.show("Copied debug info", style: .success)
+                    } label: {
+                        Label("Copy Debug Info", systemImage: "doc.on.doc")
+                    }
+
+                    Button {
+                        DebugInfoBuilder.openLogFile()
+                    } label: {
+                        Label("Open Log", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+
+                Button {
+                    DebugInfoBuilder.reportBug()
+                } label: {
+                    Label("Report Bug", systemImage: "exclamationmark.bubble")
+                }
+
+                Text(AppLogger.logURL.path)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
 
             Spacer()
         }
@@ -1717,10 +2141,10 @@ struct AboutTab: View {
                 .font(.system(size: 40))
                 .foregroundStyle(.blue)
 
-            Text("CodexProfileSwitcher")
+            Text(AppInfo.name)
                 .font(.system(size: 16, weight: .bold))
 
-            Text("Version 0.1.0")
+            Text("Version \(AppInfo.version)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
@@ -1756,7 +2180,12 @@ enum LaunchAtLogin {
 
     static func toggle() {
         if Self.isEnabled {
-            try? FileManager.default.removeItem(at: Self.plistURL)
+            do {
+                try FileManager.default.removeItem(at: Self.plistURL)
+                AppLogger.info("Disabled Launch at Login")
+            } catch {
+                AppLogger.error("Failed to disable Launch at Login", metadata: ["error": error.localizedDescription])
+            }
         } else {
             Self.enable()
         }
@@ -1772,9 +2201,14 @@ enum LaunchAtLogin {
             "KeepAlive": false,
         ]
         let dir = Self.plistURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        guard let data = try? PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0) else { return }
-        try? data.write(to: Self.plistURL, options: .atomic)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let data = try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            try data.write(to: Self.plistURL, options: .atomic)
+            AppLogger.info("Enabled Launch at Login")
+        } catch {
+            AppLogger.error("Failed to enable Launch at Login", metadata: ["error": error.localizedDescription])
+        }
     }
 }
 
