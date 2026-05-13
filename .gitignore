@@ -7,3 +7,10 @@ auth.json
 *.pem
 *.key
 .env*
+.claude/
+.agents/
+docs/
+skills/
+skills-lock.json
+CLAUDE.md
+PRODUCT.md

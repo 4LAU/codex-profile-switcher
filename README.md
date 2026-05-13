@@ -81,6 +81,12 @@ Open Settings → General for support tools:
 
 The log redacts emails, bearer tokens, cookies, OpenAI API keys, and OAuth token fields before writing.
 
+## Contributing and Security
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
+- Community expectations are in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## Credits
 
 Auth and usage API patterns adapted from [CodexBar](https://github.com/steipete/codexbar) by Peter Steinberger.
