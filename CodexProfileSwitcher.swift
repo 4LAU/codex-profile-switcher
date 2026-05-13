@@ -1698,10 +1698,19 @@ func resetCountdown(from date: Date?) -> String {
     return "\(mins)m"
 }
 
+private enum Palette {
+    static let accent = Color(red: 0.40, green: 0.55, blue: 0.75)
+    static let accentLight = Color(red: 0.45, green: 0.58, blue: 0.72)
+    static let success = Color(red: 0.40, green: 0.60, blue: 0.55)
+    static let warning = Color(red: 0.75, green: 0.55, blue: 0.30)
+    static let danger = Color(red: 0.75, green: 0.38, blue: 0.35)
+    static let mid = Color(red: 0.70, green: 0.55, blue: 0.35)
+}
+
 func progressColor(for percent: Int) -> Color {
-    if percent >= 80 { return .red }
-    if percent >= 50 { return .orange }
-    return .green
+    if percent >= 80 { return Palette.danger }
+    if percent >= 50 { return Palette.mid }
+    return Palette.success
 }
 
 func planDisplayName(_ raw: String?) -> String {
@@ -1793,17 +1802,17 @@ struct ToastOverlay: View {
 
     private var foregroundColor: Color {
         switch self.state.style {
-        case .success: .green
-        case .error: .red
-        case .info: .blue
+        case .success: Palette.success
+        case .error: Palette.danger
+        case .info: Palette.accent
         }
     }
 
     private var borderColor: Color {
         switch self.state.style {
-        case .success: Color.green.opacity(0.3)
-        case .error: Color.red.opacity(0.3)
-        case .info: Color.blue.opacity(0.3)
+        case .success: Palette.success.opacity(0.3)
+        case .error: Palette.danger.opacity(0.3)
+        case .info: Palette.accent.opacity(0.3)
         }
     }
 }
@@ -1824,7 +1833,7 @@ struct UsageBar: View {
             let rect = CGRect(origin: .zero, size: size)
 
             let trackPath = Path { p in p.addRoundedRect(in: rect, cornerSize: cornerSize) }
-            context.fill(trackPath, with: .color(.gray.opacity(0.25)))
+            context.fill(trackPath, with: .color(.primary.opacity(0.10)))
 
             if fillWidth > 0 {
                 let fillRect = CGRect(x: 0, y: 0, width: min(fillWidth, size.width), height: size.height)
@@ -1879,7 +1888,7 @@ struct ProfileCardView: View {
     var body: some View {
         HStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 1.5)
-                .fill(self.isActive ? Color.blue : Color.clear)
+                .fill(self.isActive ? Palette.accent : Color.clear)
                 .frame(width: 3)
                 .padding(.vertical, 2)
 
@@ -1944,11 +1953,11 @@ struct ProfileCardView: View {
                 Text("Re-login needed")
                     .font(.system(size: 10))
             }
-            .foregroundStyle(.orange)
+            .foregroundStyle(Palette.warning)
         case .notSetUp:
             Text("Click to set up")
                 .font(.system(size: 10))
-                .foregroundStyle(.blue)
+                .foregroundStyle(Palette.accentLight)
         }
     }
 
@@ -2598,7 +2607,7 @@ struct ProfilesTab: View {
 
                             Button(action: { self.pendingDeleteId = profile.id }) {
                                 Image(systemName: "minus.circle.fill")
-                                    .foregroundStyle(.red.opacity(0.7))
+                                    .foregroundStyle(Palette.danger.opacity(0.8))
                             }
                             .buttonStyle(.plain)
                         }
