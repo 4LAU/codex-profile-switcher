@@ -1960,6 +1960,17 @@ private enum Palette {
     static let mid = Color(red: 0.70, green: 0.55, blue: 0.35)
 }
 
+private func blankMenuGlyph() -> NSImage {
+    let size = NSSize(width: 1, height: 1)
+    let image = NSImage(size: size)
+    image.lockFocus()
+    NSColor.clear.setFill()
+    NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
+    image.unlockFocus()
+    image.isTemplate = true
+    return image
+}
+
 func progressColor(for percent: Int) -> Color {
     if percent >= 80 { return Palette.danger }
     if percent >= 50 { return Palette.mid }
@@ -2109,24 +2120,25 @@ struct UsageRow: View {
     let label: String
     let percent: Int
     let resetAt: Date?
+    let isHighlighted: Bool
 
     var body: some View {
         HStack(spacing: 4) {
             Text(self.label)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(self.isHighlighted ? .secondary : .tertiary)
                 .frame(width: 16, alignment: .leading)
 
             UsageBar(percent: Double(self.percent), tint: progressColor(for: self.percent))
 
             Text("\(self.percent)%")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(self.isHighlighted ? .primary : .secondary)
                 .frame(width: 30, alignment: .trailing)
 
             Text(resetCountdown(from: self.resetAt))
                 .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(self.isHighlighted ? .secondary : .tertiary)
                 .frame(width: 42, alignment: .trailing)
         }
     }
@@ -2138,14 +2150,12 @@ struct ProfileCardView: View {
     let isActive: Bool
     let duplicateLine: String?
     let onSwitch: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(self.isActive ? Palette.accent : Color.clear)
-                .frame(width: 3)
-                .padding(.vertical, 2)
-
+        Button(action: self.onSwitch) {
             VStack(alignment: .leading, spacing: 4) {
                 self.headerRow
                 if let duplicateLine, !duplicateLine.isEmpty {
@@ -2156,18 +2166,26 @@ struct ProfileCardView: View {
                 }
                 self.statusContent
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(width: 290, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-        .frame(width: 290, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { self.onSwitch() }
+        .buttonStyle(ProfileCardButtonStyle(
+            isActive: self.isActive,
+            isHovered: self.isHovered,
+            colorScheme: self.colorScheme))
+        .onHover { hovering in
+            self.isHovered = hovering
+        }
+        .animation(self.reduceMotion ? nil : .easeOut(duration: 0.16), value: self.isHovered)
     }
 
     private var headerRow: some View {
         HStack(spacing: 6) {
             Text(self.profile.label)
                 .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(self.titleColor)
                 .lineLimit(1)
 
             Spacer()
@@ -2176,13 +2194,13 @@ struct ProfileCardView: View {
                 if let credits = self.credits {
                     Text(credits)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(self.metadataColor)
                 }
 
                 if let planName = self.planType {
                     Text(planName)
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(self.metadataColor)
                 }
             }
         }
@@ -2196,14 +2214,14 @@ struct ProfileCardView: View {
         case .loading:
             Text("Refreshing...")
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(self.metadataColor)
         case .stale(let snap):
             if let snap {
                 self.usageBars(snap)
             } else {
                 Text("No data yet")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(self.metadataColor)
             }
         case .reloginNeeded(let snap):
             if let snap { self.usageBars(snap) }
@@ -2223,8 +2241,16 @@ struct ProfileCardView: View {
 
     private func usageBars(_ snap: UsageSnapshot) -> some View {
         VStack(spacing: 2) {
-            UsageRow(label: "5h", percent: snap.primaryUsedPercent, resetAt: snap.primaryResetAt)
-            UsageRow(label: "Wk", percent: snap.secondaryUsedPercent, resetAt: snap.secondaryResetAt)
+            UsageRow(
+                label: "5h",
+                percent: snap.primaryUsedPercent,
+                resetAt: snap.primaryResetAt,
+                isHighlighted: self.isActive || self.isHovered)
+            UsageRow(
+                label: "Wk",
+                percent: snap.secondaryUsedPercent,
+                resetAt: snap.secondaryResetAt,
+                isHighlighted: self.isActive || self.isHovered)
         }
     }
 
@@ -2237,6 +2263,88 @@ struct ProfileCardView: View {
         guard let snap = self.status.snapshot else { return nil }
         return creditsDisplayName(snap.creditsRemaining)
     }
+
+    private var titleColor: Color {
+        let base = Color(nsColor: .labelColor)
+        return self.isActive || self.isHovered ? base : base.opacity(0.94)
+    }
+
+    private var metadataColor: Color {
+        let base = Color(nsColor: .secondaryLabelColor)
+        return self.isActive || self.isHovered ? base : base.opacity(0.82)
+    }
+}
+
+private struct ProfileCardButtonStyle: ButtonStyle {
+    let isActive: Bool
+    let isHovered: Bool
+    let colorScheme: ColorScheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        let visualState = ProfileCardVisualState(
+            isActive: self.isActive,
+            isHovered: self.isHovered,
+            isPressed: configuration.isPressed,
+            colorScheme: self.colorScheme)
+
+        return configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(visualState.fillColor)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(visualState.borderColor, lineWidth: visualState.borderWidth)
+            }
+    }
+}
+
+private struct ProfileCardVisualState {
+    let isActive: Bool
+    let isHovered: Bool
+    let isPressed: Bool
+    let colorScheme: ColorScheme
+
+    var fillColor: Color {
+        if self.isPressed {
+            return self.neutralWash(dark: 0.14, light: 0.10)
+        }
+        if self.isActive && self.isHovered {
+            return self.neutralWash(dark: 0.13, light: 0.085)
+        }
+        if self.isActive {
+            return self.accentedWash(dark: 0.085, light: 0.055)
+        }
+        if self.isHovered {
+            return self.neutralWash(dark: 0.085, light: 0.055)
+        }
+        return .clear
+    }
+
+    var borderColor: Color {
+        if self.isPressed {
+            return Palette.accent.opacity(self.colorScheme == .dark ? 0.26 : 0.22)
+        }
+        if self.isActive {
+            return Palette.accent.opacity(self.colorScheme == .dark ? 0.22 : 0.18)
+        }
+        if self.isHovered {
+            return Color.primary.opacity(self.colorScheme == .dark ? 0.12 : 0.08)
+        }
+        return .clear
+    }
+
+    var borderWidth: CGFloat {
+        (self.isActive || self.isHovered || self.isPressed) ? 1 : 0
+    }
+
+    private func neutralWash(dark: Double, light: Double) -> Color {
+        Color.primary.opacity(self.colorScheme == .dark ? dark : light)
+    }
+
+    private func accentedWash(dark: Double, light: Double) -> Color {
+        Palette.accent.opacity(self.colorScheme == .dark ? dark : light)
+    }
 }
 
 // MARK: - Menu Bar Icon
@@ -2244,28 +2352,47 @@ struct ProfileCardView: View {
 enum IconRenderer {
     static let iconSize = CGSize(width: 18, height: 18)
     private static let scale: CGFloat = 2
+    private static let filledIconName = "codex-profile-switcher-menu-icon.png"
+    private static let emptyIconName = "codex-profile-switcher-menu-icon-empty.png"
 
     static func render(primaryPercent: Int, secondaryPercent: Int) -> NSImage {
+        Self.loadIcon(named: Self.filledIconName)
+            ?? Self.renderStackedProfiles(showRearCard: true)
+    }
+
+    static func renderEmpty() -> NSImage {
+        Self.loadIcon(named: Self.emptyIconName)
+            ?? Self.renderStackedProfiles(showRearCard: false)
+    }
+
+    private static func loadIcon(named name: String) -> NSImage? {
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent(name),
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent(name)
+        ].compactMap { $0 }
+
+        for url in candidates {
+            guard let image = NSImage(contentsOf: url) else { continue }
+            image.size = Self.iconSize
+            image.isTemplate = true
+            return image
+        }
+
+        return nil
+    }
+
+    private static func renderStackedProfiles(showRearCard: Bool) -> NSImage {
         let size = Self.iconSize
 
         let image = NSImage(size: size, flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             ctx.scaleBy(x: Self.scale, y: Self.scale)
-
-            let barWidth: CGFloat = 12
-            let barHeight: CGFloat = 3
-            let barX: CGFloat = (size.width - barWidth) / 2
-            let gap: CGFloat = 2
-            let totalHeight = barHeight * 2 + gap
-            let startY = (size.height - totalHeight) / 2
-
-            Self.drawCapsule(ctx: ctx, x: barX, y: startY + barHeight + gap,
-                             width: barWidth, height: barHeight,
-                             fillPercent: max(0, 100 - primaryPercent))
-
-            Self.drawCapsule(ctx: ctx, x: barX, y: startY,
-                             width: barWidth, height: barHeight,
-                             fillPercent: max(0, 100 - secondaryPercent))
+            if showRearCard {
+                Self.drawRearCard(ctx: ctx)
+            }
+            Self.drawFrontCard(ctx: ctx)
 
             return true
         }
@@ -2274,30 +2401,45 @@ enum IconRenderer {
         return image
     }
 
-    static func renderEmpty() -> NSImage {
-        Self.render(primaryPercent: 100, secondaryPercent: 100)
-    }
-
-    private static func drawCapsule(
-        ctx: CGContext, x: CGFloat, y: CGFloat,
-        width: CGFloat, height: CGFloat, fillPercent: Int
-    ) {
-        let radius = height / 2
-        let trackRect = CGRect(x: x, y: y, width: width, height: height)
-        let trackPath = CGPath(roundedRect: trackRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-
-        ctx.setFillColor(NSColor.gray.withAlphaComponent(0.4).cgColor)
-        ctx.addPath(trackPath)
+    private static func drawRearCard(ctx: CGContext) {
+        let rearRect = CGRect(x: 5.2, y: 3.2, width: 8.8, height: 7.4)
+        let rearPath = CGPath(roundedRect: rearRect, cornerWidth: 2.2, cornerHeight: 2.2, transform: nil)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.18).cgColor)
+        ctx.addPath(rearPath)
         ctx.fillPath()
 
-        let fillWidth = width * CGFloat(min(100, max(0, fillPercent))) / 100
-        if fillWidth > 0 {
-            let fillRect = CGRect(x: x, y: y, width: fillWidth, height: height)
-            let fillPath = CGPath(roundedRect: fillRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-            ctx.setFillColor(NSColor.black.cgColor)
-            ctx.addPath(fillPath)
-            ctx.fillPath()
-        }
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.28).cgColor)
+        ctx.setLineWidth(1.1)
+        ctx.addPath(rearPath)
+        ctx.strokePath()
+
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.28).cgColor)
+        ctx.setLineWidth(1.1)
+        ctx.setLineCap(.round)
+        ctx.move(to: CGPoint(x: 7.3, y: 6.2))
+        ctx.addLine(to: CGPoint(x: 11.7, y: 6.2))
+        ctx.strokePath()
+    }
+
+    private static func drawFrontCard(ctx: CGContext) {
+        let frontRect = CGRect(x: 3.0, y: 6.4, width: 9.8, height: 8.4)
+        let frontPath = CGPath(roundedRect: frontRect, cornerWidth: 2.4, cornerHeight: 2.4, transform: nil)
+        ctx.setFillColor(NSColor.black.cgColor)
+        ctx.addPath(frontPath)
+        ctx.fillPath()
+
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.setLineCap(.round)
+        ctx.move(to: CGPoint(x: 5.8, y: 10.6))
+        ctx.addLine(to: CGPoint(x: 10.1, y: 10.6))
+        ctx.strokePath()
+
+        let markerRect = CGRect(x: 4.45, y: 9.65, width: 1.9, height: 1.9)
+        let markerPath = CGPath(ellipseIn: markerRect, transform: nil)
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.addPath(markerPath)
+        ctx.fillPath()
     }
 }
 
@@ -2621,8 +2763,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         self.menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem()
+        quitItem.title = "Quit"
+        quitItem.action = #selector(NSApplication.terminate(_:))
+        quitItem.keyEquivalent = "q"
+        quitItem.target = NSApp
+        quitItem.state = .off
         quitItem.image = nil
+        quitItem.offStateImage = blankMenuGlyph()
+        quitItem.onStateImage = blankMenuGlyph()
+        quitItem.mixedStateImage = blankMenuGlyph()
         self.menu.addItem(quitItem)
     }
 
