@@ -1717,8 +1717,9 @@ enum CLIUsageFetcher {
 
 final class UsageProvider {
     private let store: ProfileStore
-    private var activeRefreshTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
     private var lastRefreshAll: Date = .distantPast
+    private(set) var isRefreshing = false
     var onRefreshComplete: (() -> Void)?
 
     init(store: ProfileStore) {
@@ -1726,14 +1727,16 @@ final class UsageProvider {
     }
 
     func cancelRefreshes() {
-        self.activeRefreshTask?.cancel()
-        self.activeRefreshTask = nil
+        self.refreshTask?.cancel()
+        self.refreshTask = nil
+        self.isRefreshing = false
     }
 
     func refreshAll(force: Bool = false) {
+        guard !self.isRefreshing else { return }
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
         self.lastRefreshAll = Date()
-        self.activeRefreshTask?.cancel()
+        self.isRefreshing = true
 
         let profiles = self.store.config.profiles
         let liveId = self.store.liveProfileId ?? ""
@@ -1741,7 +1744,7 @@ final class UsageProvider {
             (p.id, self.store.authURL(for: p.id), self.store.cache.snapshots[p.id])
         }
 
-        self.activeRefreshTask = Task {
+        self.refreshTask = Task {
             await withTaskGroup(of: Void.self) { group in
                 for (id, authURL, cached) in contexts {
                     group.addTask {
@@ -1750,21 +1753,8 @@ final class UsageProvider {
                 }
             }
             await MainActor.run {
-                self.store.flushCacheIfDirty()
-                self.onRefreshComplete?()
-            }
-        }
-    }
-
-    func refreshActive() {
-        guard let id = self.store.liveProfileId else { return }
-        let authURL = self.store.authURL(for: id)
-        let cached = self.store.cache.snapshots[id]
-        let liveId = id
-
-        Task {
-            await self.refreshProfile(id, authURL: authURL, activeProfileId: liveId, cached: cached)
-            await MainActor.run {
+                self.isRefreshing = false
+                self.refreshTask = nil
                 self.store.flushCacheIfDirty()
                 self.onRefreshComplete?()
             }
@@ -2644,10 +2634,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var store: ProfileStore!
     private var usageProvider: UsageProvider!
-    private var activeRefreshTimer: Timer?
+    private var periodicRefreshTimer: Timer?
     private var menu: NSMenu!
     private var liveAuthWarning: LiveAuthWarning?
     private var lastLiveAuthMtime: Date?
+    private var isMenuOpen = false
+    private var menuRefreshRetryTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.info("App launched", metadata: ["version": AppInfo.version])
@@ -2663,27 +2655,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menu.delegate = self
         self.statusItem.menu = self.menu
 
-        self.usageProvider.onRefreshComplete = { [weak self] in self?.updateIcon() }
+        self.registerWorkspaceObservers()
+        self.usageProvider.onRefreshComplete = { [weak self] in
+            self?.handleRefreshComplete()
+        }
         self.usageProvider.refreshAll()
-        self.startActiveProfileTimer()
+        self.startPeriodicRefreshTimer()
+    }
+
+    deinit {
+        self.periodicRefreshTimer?.invalidate()
+        self.menuRefreshRetryTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        self.isMenuOpen = true
         self.syncActiveProfile()
         self.rebuildMenu()
         self.usageProvider.refreshAll()
+        self.scheduleOpenMenuRefreshRetry()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        self.isMenuOpen = false
+        self.menuRefreshRetryTask?.cancel()
+        self.menuRefreshRetryTask = nil
     }
 
     // MARK: - Timer
 
-    private func startActiveProfileTimer() {
-        self.activeRefreshTimer?.invalidate()
-        self.activeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+    private func startPeriodicRefreshTimer() {
+        self.periodicRefreshTimer?.invalidate()
+        self.periodicRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.syncActiveProfile()
-            self?.usageProvider.refreshActive()
-            self?.updateIcon()
+            self?.usageProvider.refreshAll()
+        }
+    }
+
+    private func registerWorkspaceObservers() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(self.handleSystemWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil)
+    }
+
+    @objc private func handleSystemWake() {
+        AppLogger.info("System woke; forcing usage refresh")
+        self.syncActiveProfile(force: true)
+        self.updateIcon()
+        self.usageProvider.refreshAll(force: true)
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        self.syncActiveProfile()
+        self.usageProvider.refreshAll()
+    }
+
+    private func handleRefreshComplete() {
+        self.updateIcon()
+        guard self.isMenuOpen else { return }
+        self.rebuildMenu()
+    }
+
+    private func scheduleOpenMenuRefreshRetry() {
+        self.menuRefreshRetryTask?.cancel()
+        self.menuRefreshRetryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            guard self.isMenuOpen else { return }
+            guard !self.usageProvider.isRefreshing else { return }
+            guard self.hasDisplayedStaleOrLoadingProfiles() else { return }
+            AppLogger.info("Retrying menu-open usage refresh because stale data is still visible")
+            self.usageProvider.refreshAll(force: true)
+        }
+    }
+
+    private func hasDisplayedStaleOrLoadingProfiles() -> Bool {
+        self.store.config.profiles.contains { profile in
+            switch self.store.statuses[profile.id] ?? .notSetUp {
+            case .loading, .stale:
+                return true
+            default:
+                return false
+            }
         }
     }
 
@@ -2915,6 +2975,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refreshAll() {
+        self.syncActiveProfile(force: true)
         self.usageProvider.refreshAll(force: true)
     }
 
