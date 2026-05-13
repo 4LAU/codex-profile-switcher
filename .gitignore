@@ -3,3 +3,7 @@
 *.d
 .build/
 ignore-dump/
+auth.json
+*.pem
+*.key
+.env*

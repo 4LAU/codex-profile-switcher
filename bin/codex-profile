@@ -16,6 +16,7 @@ Usage:
   $PROGRAM app <profile> [workspace]
   $PROGRAM cli <profile> [codex-args...]
   $PROGRAM login <profile> [codex-login-args...]
+  $PROGRAM link <profile>
   $PROGRAM status [profile]
   $PROGRAM list
   $PROGRAM path <profile>
@@ -24,6 +25,7 @@ Usage:
 Examples:
   $PROGRAM login 1
   $PROGRAM app 1 ~/Dev/my-project
+  $PROGRAM link 1
   $PROGRAM cli 3 exec "review this repo"
   $PROGRAM list
   $PROGRAM status
@@ -59,7 +61,7 @@ codex_home_for_profile() {
   local profile="$1"
   validate_profile "$profile"
   case "$profile" in
-    default | dev | main)
+    0 | default | dev | main)
       printf '%s/.codex\n' "$HOME"
       ;;
     *)
@@ -128,6 +130,27 @@ command_app() {
   codex_home="$(codex_home_for_profile "$profile")"
   ensure_home "$codex_home"
   quit_codex_app
+
+  # After Codex quits, checkpoint all sqlite WALs so shared data is flushed to base DB
+  local source_home="$HOME/.codex"
+  local db
+  for db in "$source_home"/state_5.sqlite "$codex_home"/state_5.sqlite; do
+    [[ -f "$db" ]] || continue
+    sqlite3 "$db" "PRAGMA wal_checkpoint(TRUNCATE);" > /dev/null 2>&1 || true
+  done
+
+  # Remove WAL/SHM at the profile path so Codex reads the clean base DB through the symlink
+  rm -f "$codex_home"/state_5.sqlite-shm "$codex_home"/state_5.sqlite-wal 2> /dev/null || true
+
+  # Same for sqlite subdirectory
+  if [[ -L "$codex_home/sqlite" ]]; then
+    local real_sqlite_dir
+    real_sqlite_dir="$(readlink "$codex_home/sqlite")"
+    for db in "$real_sqlite_dir"/*.db; do
+      [[ -f "$db" ]] || continue
+      sqlite3 "$db" "PRAGMA wal_checkpoint(TRUNCATE);" > /dev/null 2>&1 || true
+    done
+  fi
 
   local log_dir="$codex_home/logs"
   local log_file="$log_dir/desktop.log"
@@ -245,6 +268,97 @@ command_path() {
   codex_home_for_profile "$profile"
 }
 
+SHARED_ITEMS=(
+  sessions
+  archived_sessions
+  session_index.jsonl
+  state_5.sqlite
+  sqlite
+  config.toml
+  plugins
+  skills
+  memories
+  AGENTS.md
+  .codex-global-state.json
+  vendor_imports
+  ambient-suggestions
+  computer-use
+  models_cache.json
+)
+
+command_link() {
+  local profile="${1:-}"
+  [[ -n "$profile" ]] || die "Usage: $PROGRAM link <profile>"
+
+  local codex_home source_home
+  codex_home="$(codex_home_for_profile "$profile")"
+  source_home="$HOME/.codex"
+
+  [[ "$codex_home" != "$source_home" ]] || die "Cannot link default profile to itself"
+  [[ -d "$source_home" ]] || die "Default profile ($source_home) does not exist. Set it up first."
+
+  ensure_home "$codex_home"
+
+  local item source target linked=0
+  for item in "${SHARED_ITEMS[@]}"; do
+    source="$source_home/$item"
+    target="$codex_home/$item"
+
+    [[ -e "$source" ]] || continue
+
+    if [[ -L "$target" ]]; then
+      local current_target
+      current_target="$(readlink "$target")"
+      [[ "$current_target" != "$source" ]] || continue
+      rm "$target"
+    elif [[ -e "$target" ]]; then
+      mv "$target" "${target}.bak"
+      note "  Backed up: $item -> ${item}.bak"
+    fi
+
+    ln -s "$source" "$target"
+    note "  Linked: $item"
+    linked=$((linked + 1))
+  done
+
+  if [[ "$linked" -eq 0 ]]; then
+    note "Profile '$profile' is already linked."
+  else
+    note "Linked $linked items from default profile to '$profile'."
+  fi
+}
+
+command_unlink() {
+  local profile="${1:-}"
+  [[ -n "$profile" ]] || die "Usage: $PROGRAM unlink <profile>"
+
+  local codex_home source_home
+  codex_home="$(codex_home_for_profile "$profile")"
+  source_home="$HOME/.codex"
+
+  [[ "$codex_home" != "$source_home" ]] || die "Cannot unlink default profile"
+
+  local item target unlinked=0
+  for item in "${SHARED_ITEMS[@]}"; do
+    target="$codex_home/$item"
+    [[ -L "$target" ]] || continue
+    rm "$target"
+    if [[ -e "${target}.bak" ]]; then
+      mv "${target}.bak" "$target"
+      note "  Restored: $item from backup"
+    else
+      note "  Removed link: $item"
+    fi
+    unlinked=$((unlinked + 1))
+  done
+
+  if [[ "$unlinked" -eq 0 ]]; then
+    note "Profile '$profile' has no links."
+  else
+    note "Unlinked $unlinked items from profile '$profile'."
+  fi
+}
+
 command_doctor() {
   local codex_cli
 
@@ -283,6 +397,8 @@ main() {
     app)    command_app "$@" ;;
     cli)    command_cli "$@" ;;
     login)  command_login "$@" ;;
+    link)   command_link "$@" ;;
+    unlink) command_unlink "$@" ;;
     status) command_status "$@" ;;
     list)   command_list "$@" ;;
     path)   command_path "$@" ;;

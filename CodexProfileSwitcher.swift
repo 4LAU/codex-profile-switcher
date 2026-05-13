@@ -76,6 +76,12 @@ final class ProfileStore {
 
         if self.config.profiles.isEmpty {
             self.discoverProfiles()
+        } else if self.config.profiles.contains(where: { $0.id == "0" }) {
+            self.config.profiles.removeAll { $0.id == "0" }
+            if self.config.activeProfile == "0" {
+                self.config.activeProfile = self.config.profiles.first?.id ?? "1"
+            }
+            self.saveConfig()
         }
 
         for profile in self.config.profiles {
@@ -92,14 +98,43 @@ final class ProfileStore {
     func discoverProfiles() {
         var profiles: [ProfileConfig] = []
 
-        for i in 1...8 {
-            let id = "\(i)"
-            let existing = self.config.profiles.first { $0.id == id }
-            profiles.append(ProfileConfig(id: id, label: existing?.label ?? "Profile \(id)"))
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let fm = FileManager.default
+        if let contents = try? fm.contentsOfDirectory(atPath: home.path) {
+            for name in contents.sorted() where name.hasPrefix(".codex-") {
+                let id = String(name.dropFirst(7))
+                guard !id.isEmpty, id.rangeOfCharacter(from: CharacterSet.alphanumerics.inverted) == nil else { continue }
+                if !profiles.contains(where: { $0.id == id }) {
+                    profiles.append(ProfileConfig(id: id, label: "Profile \(id)"))
+                }
+            }
+        }
+
+        if profiles.isEmpty {
+            profiles.append(ProfileConfig(id: "1", label: "Profile 1"))
         }
 
         self.config.profiles = profiles
         self.saveConfig()
+    }
+
+    func addProfile() -> ProfileConfig {
+        let existingIds = Set(self.config.profiles.map(\.id))
+        var nextId = 1
+        while existingIds.contains("\(nextId)") { nextId += 1 }
+        let profile = ProfileConfig(id: "\(nextId)", label: "Profile \(nextId)")
+        self.config.profiles.append(profile)
+        self.statuses[profile.id] = .notSetUp
+        self.saveConfig()
+        return profile
+    }
+
+    func removeProfile(_ id: String) {
+        self.config.profiles.removeAll { $0.id == id }
+        self.statuses.removeValue(forKey: id)
+        self.cache.snapshots.removeValue(forKey: id)
+        self.saveConfig()
+        self.saveCache()
     }
 
     func codexHome(for profileId: String) -> URL {
@@ -134,6 +169,8 @@ final class ProfileStore {
             self.saveCache()
         }
     }
+
+    func saveConfigPublic() { self.saveConfig() }
 
     private func saveConfig() {
         let encoder = JSONEncoder()
@@ -549,11 +586,92 @@ func planDisplayName(_ raw: String?) -> String {
     }
 }
 
+// MARK: - Toast
+
+enum ToastStyle { case success, error, info }
+
+final class ToastState: ObservableObject {
+    @Published var message: String = ""
+    @Published var style: ToastStyle = .success
+    @Published var isVisible: Bool = false
+    private var hideTask: DispatchWorkItem?
+
+    func show(_ message: String, style: ToastStyle = .success) {
+        self.hideTask?.cancel()
+        self.message = message
+        self.style = style
+        withAnimation(.easeOut(duration: 0.2)) { self.isVisible = true }
+        let item = DispatchWorkItem { [weak self] in
+            withAnimation(.easeIn(duration: 0.3)) { self?.isVisible = false }
+        }
+        self.hideTask = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+    }
+}
+
+struct ToastOverlay: View {
+    @ObservedObject var state: ToastState
+
+    var body: some View {
+        if self.state.isVisible {
+            VStack {
+                Spacer()
+
+                HStack(spacing: 6) {
+                    Image(systemName: self.iconName)
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(self.state.message)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(2)
+                }
+                .foregroundStyle(self.foregroundColor)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(self.borderColor, lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+            }
+            .padding(.bottom, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private var iconName: String {
+        switch self.state.style {
+        case .success: "checkmark.circle.fill"
+        case .error: "xmark.circle.fill"
+        case .info: "info.circle.fill"
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch self.state.style {
+        case .success: .green
+        case .error: .red
+        case .info: .blue
+        }
+    }
+
+    private var borderColor: Color {
+        switch self.state.style {
+        case .success: Color.green.opacity(0.3)
+        case .error: Color.red.opacity(0.3)
+        case .info: Color.blue.opacity(0.3)
+        }
+    }
+}
+
 // MARK: - SwiftUI Views (progress bar adapted from codexbar)
 
 struct UsageBar: View {
     let percent: Double
     let tint: Color
+
+    private static let markerPercents: [Double] = [25, 50, 75]
 
     var body: some View {
         Canvas { context, size in
@@ -570,6 +688,13 @@ struct UsageBar: View {
                 let fillPath = Path { p in p.addRoundedRect(in: fillRect, cornerSize: cornerSize) }
                 context.fill(fillPath, with: .color(self.tint))
             }
+
+            let markerWidth: CGFloat = 1.5
+            for markerPct in Self.markerPercents {
+                let x = size.width * markerPct / 100
+                let markerRect = CGRect(x: x - markerWidth / 2, y: 0, width: markerWidth, height: size.height)
+                context.fill(Path(markerRect), with: .color(.primary.opacity(0.3)))
+            }
         }
         .frame(height: 6)
     }
@@ -581,24 +706,23 @@ struct UsageRow: View {
     let resetAt: Date?
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             Text(self.label)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, alignment: .leading)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .frame(width: 16, alignment: .leading)
 
             UsageBar(percent: Double(self.percent), tint: progressColor(for: self.percent))
-                .frame(width: 160)
 
             Text("\(self.percent)%")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .trailing)
+                .frame(width: 30, alignment: .trailing)
 
             Text(resetCountdown(from: self.resetAt))
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
-                .frame(width: 40, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
         }
     }
 }
@@ -610,33 +734,28 @@ struct ProfileCardView: View {
     let onSwitch: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            self.headerRow
-            self.statusContent
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(self.isActive ? Color.blue : Color.clear)
+                .frame(width: 3)
+                .padding(.vertical, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                self.headerRow
+                self.statusContent
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(width: 310, alignment: .leading)
+        .frame(width: 290, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { self.onSwitch() }
     }
 
     private var headerRow: some View {
         HStack(spacing: 6) {
-            if self.isActive {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.primary)
-            } else {
-                Spacer().frame(width: 13)
-            }
-
-            Text("\(self.profile.id)")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-
             Text(self.profile.label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: .semibold))
                 .lineLimit(1)
 
             Spacer()
@@ -645,10 +764,6 @@ struct ProfileCardView: View {
                 Text(planName)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.gray.opacity(0.15))
-                    .cornerRadius(4)
             }
         }
     }
@@ -662,31 +777,27 @@ struct ProfileCardView: View {
             Text("Refreshing...")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-                .padding(.leading, 19)
         case .stale(let snap):
             if let snap {
                 self.usageBars(snap)
-                Text("Data may be stale")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 19)
             } else {
                 Text("No data yet")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 19)
             }
         case .reloginNeeded(let snap):
             if let snap { self.usageBars(snap) }
-            Text("Re-login needed")
-                .font(.system(size: 10))
-                .foregroundStyle(.red)
-                .padding(.leading, 19)
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                Text("Re-login needed")
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(.orange)
         case .notSetUp:
-            Text("Not set up — click to set up")
+            Text("Click to set up")
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 19)
+                .foregroundStyle(.blue)
         }
     }
 
@@ -695,7 +806,6 @@ struct ProfileCardView: View {
             UsageRow(label: "5h", percent: snap.primaryUsedPercent, resetAt: snap.primaryResetAt)
             UsageRow(label: "Wk", percent: snap.secondaryUsedPercent, resetAt: snap.secondaryResetAt)
         }
-        .padding(.leading, 19)
     }
 
     private var planType: String? {
@@ -867,6 +977,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        self.syncActiveProfile()
         self.rebuildMenu()
         self.usageProvider.refreshAll()
     }
@@ -910,7 +1021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 onSwitch: { [weak self] in self?.switchToProfile(profile.id) })
 
             let hostView = NSHostingView(rootView: cardView)
-            hostView.frame = NSRect(x: 0, y: 0, width: 310, height: self.cardHeight(for: status))
+            hostView.frame = NSRect(x: 0, y: 0, width: 290, height: self.cardHeight(for: status))
 
             let menuItem = NSMenuItem()
             menuItem.view = hostView
@@ -923,22 +1034,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         self.menu.addItem(.separator())
 
-        let refreshItem = NSMenuItem(title: "Refresh All", action: #selector(self.refreshAll), keyEquivalent: "r")
+        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(self.refreshAll), keyEquivalent: "r")
         refreshItem.target = self
+        refreshItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        refreshItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(refreshItem)
 
-        let editItem = NSMenuItem(title: "Edit Labels...", action: #selector(self.editLabels), keyEquivalent: "")
-        editItem.target = self
-        self.menu.addItem(editItem)
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(self.openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        settingsItem.image?.size = NSSize(width: 13, height: 13)
+        self.menu.addItem(settingsItem)
 
         self.menu.addItem(.separator())
 
-        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(self.toggleLaunchAtLogin), keyEquivalent: "")
-        launchItem.target = self
-        launchItem.state = LaunchAtLogin.isEnabled ? .on : .off
-        self.menu.addItem(launchItem)
-
-        let quitItem = NSMenuItem(title: "Quit CodexProfileSwitcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         self.menu.addItem(quitItem)
     }
 
@@ -949,6 +1059,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .reloginNeeded(let s) where s != nil: return 68
         default: return 42
         }
+    }
+
+    // MARK: - Profile Sync
+
+    private func syncActiveProfile() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", "for pid in $(pgrep -x Codex 2>/dev/null); do ps eww -p $pid 2>/dev/null | tr ' ' '\\n' | grep '^CODEX_HOME='; done"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let runningHome: URL
+        if output.isEmpty {
+            runningHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        } else {
+            runningHome = URL(fileURLWithPath: output.replacingOccurrences(of: "CODEX_HOME=", with: ""))
+        }
+
+        guard let runningAccountId = self.accountId(from: runningHome) else { return }
+
+        for profile in self.store.config.profiles {
+            let profileHome = self.store.codexHome(for: profile.id)
+            if let profileAccountId = self.accountId(from: profileHome),
+               profileAccountId == runningAccountId {
+                if self.store.config.activeProfile != profile.id {
+                    self.store.setActiveProfile(profile.id)
+                }
+                return
+            }
+        }
+
+        if !self.store.config.activeProfile.isEmpty {
+            self.store.setActiveProfile("")
+        }
+    }
+
+    private func accountId(from codexHome: URL) -> String? {
+        let authFile = codexHome.appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: authFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = json["tokens"] as? [String: Any],
+              let accountId = tokens["account_id"] as? String else { return nil }
+        return accountId
     }
 
     // MARK: - Actions
@@ -962,14 +1121,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch status {
         case .notSetUp, .reloginNeeded:
             CodexBridge.startLogin(profileId: id) { [weak self] success in
-                if success {
-                    self?.usageProvider.refreshAll(force: true)
-                }
+                guard let self, success else { return }
+                self.usageProvider.refreshAll(force: true)
+                self.updateIcon()
             }
             return
         default:
             if isActive { return }
         }
+
+        let profileLabel = self.store.config.profiles.first { $0.id == id }?.label ?? "Profile \(id)"
+        let alert = NSAlert()
+        alert.messageText = "Switch to \(profileLabel)?"
+        alert.informativeText = "This will quit the current Codex instance and relaunch with the selected profile."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Switch")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         Task {
             let success = await CodexBridge.switchToProfile(id)
@@ -985,18 +1155,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.usageProvider.refreshAll(force: true)
     }
 
-    @objc private func editLabels() {
-        EditLabelsWindow.show(store: self.store)
-    }
-
-    @objc private func toggleLaunchAtLogin() {
-        LaunchAtLogin.toggle()
+    @objc private func openSettings() {
+        self.menu.cancelTracking()
+        SettingsWindow.show(store: self.store)
     }
 }
 
-// MARK: - Edit Labels Window
+// MARK: - Settings Window
 
-enum EditLabelsWindow {
+enum SettingsWindow {
     private static var windowController: NSWindowController?
 
     static func show(store: ProfileStore) {
@@ -1008,15 +1175,15 @@ enum EditLabelsWindow {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 460),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
-        window.title = "Edit Profile Labels"
+        window.title = "Settings"
         window.center()
         window.isReleasedWhenClosed = false
 
-        let view = EditLabelsView(store: store, onSave: { window.close() })
+        let view = SettingsView(store: store)
         window.contentView = NSHostingView(rootView: view)
 
         let wc = NSWindowController(window: window)
@@ -1027,47 +1194,266 @@ enum EditLabelsWindow {
     }
 }
 
-struct EditLabelsView: View {
+struct SettingsView: View {
     let store: ProfileStore
-    let onSave: () -> Void
-    @State private var labels: [String: String] = [:]
+    @State private var selectedTab = 0
+    @StateObject private var toast = ToastState()
 
     var body: some View {
-        VStack(spacing: 12) {
-            ForEach(self.store.config.profiles) { profile in
-                HStack {
-                    Text(profile.id)
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .frame(width: 24)
+        ZStack {
+            VStack(spacing: 0) {
+                Picker("", selection: self.$selectedTab) {
+                    Label("Profiles", systemImage: "person.2").tag(0)
+                    Label("General", systemImage: "gearshape").tag(1)
+                    Label("About", systemImage: "info.circle").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
 
-                    TextField("Label", text: self.binding(for: profile.id, default: profile.label))
-                        .textFieldStyle(.roundedBorder)
+                Divider()
+
+                switch self.selectedTab {
+                case 0: ProfilesTab(store: self.store, toast: self.toast)
+                case 1: GeneralTab()
+                case 2: AboutTab()
+                default: EmptyView()
                 }
             }
+
+            ToastOverlay(state: self.toast)
+        }
+    }
+}
+
+struct ProfilesTab: View {
+    let store: ProfileStore
+    @ObservedObject var toast: ToastState
+    @State private var labels: [String: String] = [:]
+    @State private var profiles: [ProfileConfig] = []
+    @State private var linkedProfiles: Set<String> = []
+    @State private var pendingDeleteId: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Text("Name")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text("Share Data")
+                            .frame(width: 70)
+                            .help("Shares sessions, plugins, and memories from your default Codex installation (~/.codex). Requires a profile restart to take effect.")
+
+                        Color.clear.frame(width: 20)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                    .padding(.bottom, 6)
+
+                    ForEach(self.profiles) { profile in
+                        HStack(spacing: 8) {
+                            TextField("Label", text: self.labelBinding(for: profile.id, default: profile.label))
+                                .textFieldStyle(.roundedBorder)
+
+                            Toggle("", isOn: self.linkBinding(for: profile.id))
+                                .toggleStyle(.checkbox)
+                                .labelsHidden()
+                                .frame(width: 70)
+
+                            Button(action: { self.pendingDeleteId = profile.id }) {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 5)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
+
+            Divider()
 
             HStack {
                 Spacer()
-                Button("Save") {
-                    for (id, label) in self.labels {
-                        self.store.updateLabel(for: id, label: label)
-                    }
-                    self.onSave()
+
+                Button(action: self.addProfile) {
+                    Label("Add", systemImage: "plus")
                 }
-                .keyboardShortcut(.return)
+
+                Button("Save") { self.saveAll() }
+                    .keyboardShortcut(.return)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
         }
-        .padding()
-        .onAppear {
-            for profile in self.store.config.profiles {
-                self.labels[profile.id] = profile.label
+        .onAppear { self.reload() }
+        .alert("Delete Profile", isPresented: Binding(
+            get: { self.pendingDeleteId != nil },
+            set: { if !$0 { self.pendingDeleteId = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { self.pendingDeleteId = nil }
+            Button("Delete", role: .destructive) {
+                if let id = self.pendingDeleteId {
+                    let label = self.labels[id] ?? id
+                    self.removeProfile(id)
+                    self.toast.show("Deleted \(label)", style: .info)
+                }
+                self.pendingDeleteId = nil
+            }
+        } message: {
+            if let id = self.pendingDeleteId {
+                Text("Are you sure you want to delete \"\(self.labels[id] ?? id)\"? This cannot be undone.")
             }
         }
     }
 
-    private func binding(for id: String, default defaultValue: String) -> Binding<String> {
+    private func reload() {
+        self.profiles = self.store.config.profiles
+        self.labels = [:]
+        self.linkedProfiles = []
+        for profile in self.profiles {
+            self.labels[profile.id] = profile.label
+            let codexHome = self.store.codexHome(for: profile.id)
+            let sessionsPath = codexHome.appendingPathComponent("sessions").path
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: sessionsPath, isDirectory: &isDir)
+            if exists {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: sessionsPath)
+                if attrs?[.type] as? FileAttributeType == .typeSymbolicLink {
+                    self.linkedProfiles.insert(profile.id)
+                }
+            }
+        }
+    }
+
+    private func saveAll() {
+        for (id, label) in self.labels {
+            self.store.updateLabel(for: id, label: label)
+        }
+        self.applyLinks()
+        self.toast.show("Settings saved", style: .success)
+    }
+
+    private func addProfile() {
+        let profile = self.store.addProfile()
+        self.labels[profile.id] = profile.label
+        self.profiles = self.store.config.profiles
+        self.toast.show("Added \(profile.label)", style: .success)
+    }
+
+    private func removeProfile(_ id: String) {
+        self.store.removeProfile(id)
+        self.labels.removeValue(forKey: id)
+        self.linkedProfiles.remove(id)
+        self.profiles = self.store.config.profiles
+    }
+
+    private func applyLinks() {
+        for profile in self.profiles {
+            let isLinked = self.linkedProfiles.contains(profile.id)
+            let codexHome = self.store.codexHome(for: profile.id)
+            let sessionsPath = codexHome.appendingPathComponent("sessions").path
+            let attrs = try? FileManager.default.attributesOfItem(atPath: sessionsPath)
+            let currentlyLinked = attrs?[.type] as? FileAttributeType == .typeSymbolicLink
+
+            if isLinked && !currentlyLinked {
+                Self.runProfileCommand("link", profile.id)
+            } else if !isLinked && currentlyLinked {
+                Self.runProfileCommand("unlink", profile.id)
+            }
+        }
+    }
+
+    private static func runProfileCommand(_ command: String, _ profileId: String) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let path = home.appendingPathComponent(".local/bin/codex-profile").path
+        guard FileManager.default.isExecutableFile(atPath: path) else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = [command, profileId]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+    }
+
+    private func labelBinding(for id: String, default defaultValue: String) -> Binding<String> {
         Binding(
             get: { self.labels[id] ?? defaultValue },
             set: { self.labels[id] = $0 })
+    }
+
+    private func linkBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { self.linkedProfiles.contains(id) },
+            set: { checked in
+                if checked { self.linkedProfiles.insert(id) }
+                else { self.linkedProfiles.remove(id) }
+            })
+    }
+}
+
+struct GeneralTab: View {
+    @State private var launchAtLogin = LaunchAtLogin.isEnabled
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("STARTUP")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Toggle("Launch at Login", isOn: self.$launchAtLogin)
+                .onChange(of: self.launchAtLogin) { _ in LaunchAtLogin.toggle() }
+
+            Text("Automatically opens CodexProfileSwitcher when you start your Mac.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+
+            Spacer()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct AboutTab: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 40))
+                .foregroundStyle(.blue)
+
+            Text("CodexProfileSwitcher")
+                .font(.system(size: 16, weight: .bold))
+
+            Text("Version 0.1.0")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            Text("Switch between OpenAI Codex accounts\nfrom your menu bar.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Divider().padding(.horizontal, 40)
+
+            Text("MIT License")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+
+            Spacer()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -1114,6 +1500,21 @@ enum Main {
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editMenuItem.submenu = editMenu
+        let mainMenu = NSMenu()
+        mainMenu.addItem(editMenuItem)
+        app.mainMenu = mainMenu
+
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
