@@ -1,4 +1,5 @@
 import Cocoa
+import CryptoKit
 import SwiftUI
 
 // MARK: - Models
@@ -42,24 +43,44 @@ enum ProfileStatus {
     }
 }
 
+private func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String? {
+    for key in keys {
+        if let value = dict[key] as? String, !value.isEmpty { return value }
+    }
+    return nil
+}
+
 // MARK: - ProfileStore
 
 final class ProfileStore {
     private let configDir: URL
     private let configURL: URL
     private let cacheURL: URL
+    let authStoreDir: URL
+    let codexHome: URL
+    let codexAuthPath: URL
+    private let fileManager = FileManager.default
+    private let authMutationLock = NSLock()
+    private var authMutationInProgress = false
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
     private(set) var statuses: [String: ProfileStatus] = [:]
+    private(set) var liveProfileId: String?
 
     init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = self.fileManager.homeDirectoryForCurrentUser
         self.configDir = home.appendingPathComponent(".codex-switcher")
         self.configURL = self.configDir.appendingPathComponent("config.json")
         self.cacheURL = self.configDir.appendingPathComponent("cache.json")
+        self.authStoreDir = self.configDir.appendingPathComponent("auth", isDirectory: true)
+        self.codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        self.codexAuthPath = self.codexHome.appendingPathComponent("auth.json")
 
-        try? FileManager.default.createDirectory(at: self.configDir, withIntermediateDirectories: true)
+        try? self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
+                                              attributes: [.posixPermissions: 0o700])
+        try? self.fileManager.createDirectory(at: self.authStoreDir, withIntermediateDirectories: true,
+                                              attributes: [.posixPermissions: 0o700])
 
         if let data = try? Data(contentsOf: self.configURL),
            let loaded = try? JSONDecoder().decode(AppConfig.self, from: data) {
@@ -74,47 +95,33 @@ final class ProfileStore {
         self.cache = cacheData.flatMap { try? cacheDecoder.decode(UsageCache.self, from: $0) }
             ?? UsageCache(snapshots: [:])
 
-        if self.config.profiles.isEmpty {
-            self.discoverProfiles()
-        } else if self.config.profiles.contains(where: { $0.id == "0" }) {
-            self.config.profiles.removeAll { $0.id == "0" }
-            if self.config.activeProfile == "0" {
-                self.config.activeProfile = self.config.profiles.first?.id ?? "1"
-            }
-            self.saveConfig()
-        }
-
-        for profile in self.config.profiles {
-            if let cached = self.cache.snapshots[profile.id] {
-                self.statuses[profile.id] = .stale(cached)
-            } else if self.authFileExists(for: profile.id) {
-                self.statuses[profile.id] = .loading
-            } else {
-                self.statuses[profile.id] = .notSetUp
-            }
-        }
+        self.migrateLegacyProfiles()
+        self.discoverProfiles()
+        self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
+        self.refreshStatusesFromStoredAuth()
     }
 
     func discoverProfiles() {
-        var profiles: [ProfileConfig] = []
+        var merged: [ProfileConfig] = []
+        var seen = Set<String>()
 
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let fm = FileManager.default
-        if let contents = try? fm.contentsOfDirectory(atPath: home.path) {
-            for name in contents.sorted() where name.hasPrefix(".codex-") {
-                let id = String(name.dropFirst(7))
-                guard !id.isEmpty, id.rangeOfCharacter(from: CharacterSet.alphanumerics.inverted) == nil else { continue }
-                if !profiles.contains(where: { $0.id == id }) {
-                    profiles.append(ProfileConfig(id: id, label: "Profile \(id)"))
-                }
-            }
+        for profile in self.config.profiles where Self.isValidProfileId(profile.id) {
+            guard seen.insert(profile.id).inserted else { continue }
+            merged.append(profile)
         }
 
-        if profiles.isEmpty {
-            profiles.append(ProfileConfig(id: "1", label: "Profile 1"))
+        for id in self.savedProfileIDs() where seen.insert(id).inserted {
+            merged.append(ProfileConfig(id: id, label: "Profile \(id)"))
         }
 
-        self.config.profiles = profiles
+        if merged.isEmpty {
+            merged.append(ProfileConfig(id: "1", label: "Profile 1"))
+        }
+
+        self.config.profiles = merged
+        if self.config.activeProfile.isEmpty || !seen.contains(self.config.activeProfile) {
+            self.config.activeProfile = merged.first?.id ?? "1"
+        }
         self.saveConfig()
     }
 
@@ -133,26 +140,36 @@ final class ProfileStore {
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
+        try? self.fileManager.removeItem(at: self.authStorePath(for: id))
+        if self.config.activeProfile == id {
+            self.config.activeProfile = self.config.profiles.first?.id ?? ""
+        }
+        if self.liveProfileId == id {
+            self.liveProfileId = nil
+        }
         self.saveConfig()
         self.saveCache()
     }
 
-    func codexHome(for profileId: String) -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".codex-\(profileId)")
+    func authStorePath(for profileId: String) -> URL {
+        self.authStoreDir.appendingPathComponent("\(profileId).json")
     }
 
-    func authFilePath(for profileId: String) -> URL {
-        self.codexHome(for: profileId).appendingPathComponent("auth.json")
+    func authStoreExists(for profileId: String) -> Bool {
+        self.fileManager.fileExists(atPath: self.authStorePath(for: profileId).path)
     }
 
-    func authFileExists(for profileId: String) -> Bool {
-        FileManager.default.fileExists(atPath: self.authFilePath(for: profileId).path)
+    func authURL(for profileId: String) -> URL {
+        self.liveProfileId == profileId ? self.codexAuthPath : self.authStorePath(for: profileId)
     }
 
     func setActiveProfile(_ id: String) {
         self.config.activeProfile = id
         self.saveConfig()
+    }
+
+    func setLiveProfileId(_ id: String?) {
+        self.liveProfileId = id
     }
 
     func updateLabel(for id: String, label: String) {
@@ -170,7 +187,51 @@ final class ProfileStore {
         }
     }
 
-    func saveConfigPublic() { self.saveConfig() }
+    func beginAuthMutation() {
+        self.authMutationLock.lock()
+        self.authMutationInProgress = true
+        self.authMutationLock.unlock()
+    }
+
+    func endAuthMutation() {
+        self.authMutationLock.lock()
+        self.authMutationInProgress = false
+        self.authMutationLock.unlock()
+    }
+
+    func isAuthMutationInProgress() -> Bool {
+        self.authMutationLock.lock()
+        defer { self.authMutationLock.unlock() }
+        return self.authMutationInProgress
+    }
+
+    func authFingerprint(for url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let identity = Self.authIdentity(from: json),
+              JSONSerialization.isValidJSONObject(identity),
+              let normalized = try? JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]) else {
+            return nil
+        }
+
+        let digest = SHA256.hash(data: normalized)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func liveAuthFingerprint() -> String? {
+        self.authFingerprint(for: self.codexAuthPath)
+    }
+
+    func matchingProfilesForLiveAuth() -> [String] {
+        guard let liveFingerprint = self.liveAuthFingerprint() else { return [] }
+
+        return self.config.profiles.compactMap { profile in
+            guard self.authFingerprint(for: self.authStorePath(for: profile.id)) == liveFingerprint else {
+                return nil
+            }
+            return profile.id
+        }
+    }
 
     private func saveConfig() {
         let encoder = JSONEncoder()
@@ -185,6 +246,166 @@ final class ProfileStore {
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(self.cache) else { return }
         try? data.write(to: self.cacheURL, options: .atomic)
+    }
+
+    private func refreshStatusesFromStoredAuth() {
+        self.statuses = [:]
+        for profile in self.config.profiles {
+            if let cached = self.cache.snapshots[profile.id] {
+                self.statuses[profile.id] = .stale(cached)
+            } else if self.authStoreExists(for: profile.id) {
+                self.statuses[profile.id] = .loading
+            } else {
+                self.statuses[profile.id] = .notSetUp
+            }
+        }
+    }
+
+    private func savedProfileIDs() -> [String] {
+        guard let urls = try? self.fileManager.contentsOfDirectory(
+            at: self.authStoreDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return urls.compactMap { url in
+            guard url.pathExtension == "json" else { return nil }
+            let id = url.deletingPathExtension().lastPathComponent
+            return Self.isValidProfileId(id) ? id : nil
+        }
+        .sorted()
+    }
+
+    private func migrateLegacyProfiles() {
+        guard self.savedProfileIDs().isEmpty else { return }
+        for id in self.legacyProfileIDs() where !self.authStoreExists(for: id) {
+            let legacyPath = self.legacyAuthPath(for: id)
+            try? self.copyAuthFile(from: legacyPath, to: self.authStorePath(for: id))
+        }
+    }
+
+    private func legacyProfileIDs() -> [String] {
+        guard let contents = try? self.fileManager.contentsOfDirectory(
+            atPath: self.fileManager.homeDirectoryForCurrentUser.path
+        ) else {
+            return []
+        }
+
+        return contents.compactMap { name in
+            guard name.hasPrefix(".codex-"), name != ".codex-switcher" else { return nil }
+            let id = String(name.dropFirst(7))
+            guard Self.isValidProfileId(id) else { return nil }
+            let authPath = self.legacyAuthPath(for: id).path
+            return self.fileManager.fileExists(atPath: authPath) ? id : nil
+        }
+        .sorted()
+    }
+
+    private func legacyAuthPath(for profileId: String) -> URL {
+        self.fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex-\(profileId)", isDirectory: true)
+            .appendingPathComponent("auth.json")
+    }
+
+    private func copyAuthFile(from source: URL, to destination: URL) throws {
+        let data: Data
+        do {
+            data = try Data(contentsOf: source)
+        } catch {
+            throw AuthError.notFound
+        }
+        try self.replaceFile(at: destination, with: data)
+    }
+
+    private func replaceFile(at destination: URL, with data: Data) throws {
+        try self.fileManager.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let tempURL = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
+        try data.write(to: tempURL)
+        try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempURL.path)
+
+        do {
+            _ = try self.fileManager.replaceItemAt(destination, withItemAt: tempURL)
+        } catch {
+            try self.fileManager.moveItem(at: tempURL, to: destination)
+        }
+    }
+
+    private static func isValidProfileId(_ id: String) -> Bool {
+        let pattern = #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#
+        return id.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    // SYNC: bin/codex-profile find_matching_profiles() must produce identical fingerprints
+    private static func authIdentity(from json: [String: Any]) -> [String: Any]? {
+        if let apiKey = json["OPENAI_API_KEY"] as? String,
+           !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let digest = SHA256.hash(data: Data(apiKey.utf8))
+            return [
+                "kind": "api-key",
+                "keyHash": digest.map { String(format: "%02x", $0) }.joined(),
+            ]
+        }
+
+        guard let tokens = json["tokens"] as? [String: Any] else { return nil }
+
+        let accountId = dictStringValue(tokens, "account_id", "accountId")
+        let idToken = dictStringValue(tokens, "id_token", "idToken")
+        let claims = idToken.flatMap(Self.stableClaims(fromIDToken:)) ?? [:]
+
+        guard !claims.isEmpty else {
+            return nil
+        }
+
+        var identity: [String: Any] = [
+            "kind": "oauth",
+            "idTokenClaims": claims,
+        ]
+        if let accountId {
+            identity["accountId"] = accountId
+        }
+        return identity
+    }
+
+    private static func stableClaims(fromIDToken idToken: String) -> [String: String]? {
+        let parts = idToken.split(separator: ".")
+        guard parts.count >= 2,
+              let payloadData = Self.base64URLDecode(String(parts[1])),
+              let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else {
+            return nil
+        }
+
+        let stableKeys = [
+            "sub",
+            "email",
+            "https://api.openai.com/auth",
+            "https://api.openai.com/account_id",
+            "https://api.openai.com/user_id",
+            "https://api.openai.com/organization_id",
+        ]
+
+        var claims: [String: String] = [:]
+        for key in stableKeys {
+            if let value = payload[key] as? String, !value.isEmpty {
+                claims[key] = value
+            }
+        }
+        return claims.isEmpty ? nil : claims
+    }
+
+    private static func base64URLDecode(_ value: String) -> Data? {
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = (4 - base64.count % 4) % 4
+        base64.append(String(repeating: "=", count: padding))
+        return Data(base64Encoded: base64)
     }
 }
 
@@ -222,14 +443,14 @@ enum AuthCredentialLoader {
             throw AuthError.missingTokens
         }
 
-        guard let accessToken = stringVal(tokens, "access_token", "accessToken"),
-              let refreshToken = stringVal(tokens, "refresh_token", "refreshToken"),
+        guard let accessToken = dictStringValue(tokens, "access_token", "accessToken"),
+              let refreshToken = dictStringValue(tokens, "refresh_token", "refreshToken"),
               !accessToken.isEmpty else {
             throw AuthError.missingTokens
         }
 
-        let idToken = stringVal(tokens, "id_token", "idToken")
-        let accountId = stringVal(tokens, "account_id", "accountId")
+        let idToken = dictStringValue(tokens, "id_token", "idToken")
+        let accountId = dictStringValue(tokens, "account_id", "accountId")
         let lastRefresh = parseLastRefresh(json["last_refresh"])
 
         return AuthCredentials(
@@ -283,12 +504,6 @@ enum AuthCredentialLoader {
             }
         }
         fsync(fd)
-    }
-
-    private static func stringVal(_ dict: [String: Any], _ snake: String, _ camel: String) -> String? {
-        if let v = dict[snake] as? String, !v.isEmpty { return v }
-        if let v = dict[camel] as? String, !v.isEmpty { return v }
-        return nil
     }
 
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
@@ -496,7 +711,7 @@ final class UsageProvider {
     }
 
     func refreshActive() {
-        let id = self.store.config.activeProfile
+        guard let id = self.store.liveProfileId else { return }
         Task {
             await self.refreshProfile(id)
             await MainActor.run { self.onRefreshComplete?() }
@@ -504,7 +719,9 @@ final class UsageProvider {
     }
 
     private func refreshProfile(_ id: String) async {
-        let authURL = self.store.authFilePath(for: id)
+        guard !self.store.isAuthMutationInProgress() else { return }
+
+        let authURL = self.store.authURL(for: id)
         let cached = self.store.cache.snapshots[id]
 
         func setStatus(_ status: ProfileStatus) async {
@@ -514,7 +731,7 @@ final class UsageProvider {
         do {
             let creds = try await AuthRefresher.refreshIfNeeded(
                 profileId: id,
-                activeProfileId: self.store.config.activeProfile,
+                activeProfileId: self.store.liveProfileId ?? "",
                 authFileURL: authURL)
 
             let response = try await UsageFetcher.fetch(
@@ -878,6 +1095,26 @@ enum IconRenderer {
 
 // MARK: - CodexBridge (shells out to codex-profile wrapper)
 
+enum CodexBridgeError: LocalizedError {
+    case cliNotFound
+    case loginAlreadyRunning
+    case launchFailed(String)
+    case commandFailed(Int32, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cliNotFound:
+            return "codex-profile helper not found"
+        case .loginAlreadyRunning:
+            return "Login is already running for this profile"
+        case .launchFailed(let message):
+            return message
+        case .commandFailed(_, let output):
+            return output.isEmpty ? "codex-profile command failed" : output
+        }
+    }
+}
+
 enum CodexBridge {
     private static var activeLogins: Set<String> = []
 
@@ -895,55 +1132,68 @@ enum CodexBridge {
         }
     }
 
-    static func switchToProfile(_ profileId: String) async -> Bool {
-        await withCheckedContinuation { continuation in
-            guard let path = Self.codexProfilePath() else {
-                continuation.resume(returning: false)
-                return
-            }
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: path)
-            proc.arguments = ["app", profileId]
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-            proc.terminationHandler = { p in
-                continuation.resume(returning: p.terminationStatus == 0)
-            }
-            do {
-                try proc.run()
-            } catch {
-                continuation.resume(returning: false)
-            }
-        }
-    }
-
-    static func startLogin(profileId: String, completion: @escaping (Bool) -> Void) {
-        guard !Self.activeLogins.contains(profileId) else { return }
-        guard let path = Self.codexProfilePath() else {
-            completion(false)
-            return
-        }
-
-        Self.activeLogins.insert(profileId)
-
+    private static func runCommand(
+        path: String,
+        arguments: [String],
+        completion: @escaping (Result<Void, CodexBridgeError>) -> Void
+    ) {
         let proc = Process()
+        let pipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: path)
-        proc.arguments = ["login", profileId]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-
+        proc.arguments = arguments
+        proc.standardOutput = pipe
+        proc.standardError = pipe
         proc.terminationHandler = { p in
-            DispatchQueue.main.async {
-                Self.activeLogins.remove(profileId)
-                completion(p.terminationStatus == 0)
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if p.terminationStatus == 0 {
+                completion(.success(()))
+            } else {
+                completion(.failure(.commandFailed(p.terminationStatus, output)))
             }
         }
 
         do {
             try proc.run()
         } catch {
-            Self.activeLogins.remove(profileId)
-            completion(false)
+            completion(.failure(.launchFailed(error.localizedDescription)))
+        }
+    }
+
+    static func switchToProfile(_ profileId: String) async -> Result<Void, CodexBridgeError> {
+        await withCheckedContinuation { continuation in
+            guard let path = Self.codexProfilePath() else {
+                continuation.resume(returning: .failure(.cliNotFound))
+                return
+            }
+            Self.runCommand(path: path, arguments: ["app", profileId]) { result in
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    static func startLogin(
+        profileId: String,
+        completion: @escaping (Result<Void, CodexBridgeError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !Self.activeLogins.contains(profileId) else {
+            completion(.failure(.loginAlreadyRunning))
+            return
+        }
+        guard let path = Self.codexProfilePath() else {
+            completion(.failure(.cliNotFound))
+            return
+        }
+
+        Self.activeLogins.insert(profileId)
+        Self.runCommand(path: path, arguments: ["login", profileId]) { result in
+            DispatchQueue.main.async {
+                Self.activeLogins.remove(profileId)
+                completion(result)
+            }
         }
     }
 }
@@ -956,10 +1206,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var usageProvider: UsageProvider!
     private var activeRefreshTimer: Timer?
     private var menu: NSMenu!
+    private var liveProfileMessage: String?
+    private var lastLiveAuthMtime: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         self.store = ProfileStore()
         self.usageProvider = UsageProvider(store: self.store)
+        self.syncActiveProfile(force: true)
 
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.statusItem.button?.image = IconRenderer.renderEmpty()
@@ -987,6 +1240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startActiveProfileTimer() {
         self.activeRefreshTimer?.invalidate()
         self.activeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            self?.syncActiveProfile()
             self?.usageProvider.refreshActive()
             self?.updateIcon()
         }
@@ -995,7 +1249,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Icon
 
     func updateIcon() {
-        let activeId = self.store.config.activeProfile
+        guard let activeId = self.store.liveProfileId else {
+            self.statusItem.button?.image = IconRenderer.renderEmpty()
+            return
+        }
+
         if let snap = self.store.statuses[activeId]?.snapshot {
             self.statusItem.button?.image = IconRenderer.render(
                 primaryPercent: snap.primaryUsedPercent,
@@ -1010,8 +1268,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         self.menu.removeAllItems()
 
+        if let liveProfileMessage = self.liveProfileMessage {
+            let warningItem = NSMenuItem(title: liveProfileMessage, action: nil, keyEquivalent: "")
+            warningItem.isEnabled = false
+            warningItem.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill",
+                accessibilityDescription: nil)
+            self.menu.addItem(warningItem)
+            self.menu.addItem(.separator())
+        }
+
         for profile in self.store.config.profiles {
-            let isActive = profile.id == self.store.config.activeProfile
+            let isActive = profile.id == self.store.liveProfileId
             let status = self.store.statuses[profile.id] ?? .notSetUp
 
             let cardView = ProfileCardView(
@@ -1063,51 +1331,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Profile Sync
 
-    private func syncActiveProfile() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", "for pid in $(pgrep -x Codex 2>/dev/null); do ps eww -p $pid 2>/dev/null | tr ' ' '\\n' | grep '^CODEX_HOME='; done"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+    private func syncActiveProfile(force: Bool = false) {
+        guard !self.store.isAuthMutationInProgress() else { return }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        let runningHome: URL
-        if output.isEmpty {
-            runningHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        if !force {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: self.store.codexAuthPath.path)
+            let mtime = attrs?[.modificationDate] as? Date
+            if mtime == self.lastLiveAuthMtime { return }
+            self.lastLiveAuthMtime = mtime
         } else {
-            runningHome = URL(fileURLWithPath: output.replacingOccurrences(of: "CODEX_HOME=", with: ""))
+            self.lastLiveAuthMtime = nil
         }
 
-        guard let runningAccountId = self.accountId(from: runningHome) else { return }
-
-        for profile in self.store.config.profiles {
-            let profileHome = self.store.codexHome(for: profile.id)
-            if let profileAccountId = self.accountId(from: profileHome),
-               profileAccountId == runningAccountId {
-                if self.store.config.activeProfile != profile.id {
-                    self.store.setActiveProfile(profile.id)
-                }
-                return
+        let matches = self.store.matchingProfilesForLiveAuth()
+        if matches.count == 1, let match = matches.first {
+            self.store.setLiveProfileId(match)
+            self.liveProfileMessage = nil
+            if self.store.config.activeProfile != match {
+                self.store.setActiveProfile(match)
             }
+            return
         }
 
-        if !self.store.config.activeProfile.isEmpty {
-            self.store.setActiveProfile("")
+        if matches.count > 1 {
+            let preferred = self.store.liveProfileId ?? self.store.config.activeProfile
+            if !preferred.isEmpty, matches.contains(preferred) {
+                self.store.setLiveProfileId(preferred)
+                self.liveProfileMessage = nil
+            } else {
+                self.store.setLiveProfileId(nil)
+                self.liveProfileMessage = "Live Codex auth matches multiple saved profiles"
+            }
+            return
         }
-    }
 
-    private func accountId(from codexHome: URL) -> String? {
-        let authFile = codexHome.appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: authFile),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = json["tokens"] as? [String: Any],
-              let accountId = tokens["account_id"] as? String else { return nil }
-        return accountId
+        self.store.setLiveProfileId(nil)
+        if FileManager.default.fileExists(atPath: self.store.codexAuthPath.path) {
+            self.liveProfileMessage = "Live Codex auth is unmanaged"
+        } else {
+            self.liveProfileMessage = nil
+        }
     }
 
     // MARK: - Actions
@@ -1115,15 +1378,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func switchToProfile(_ id: String) {
         self.menu.cancelTracking()
 
-        let isActive = id == self.store.config.activeProfile
+        let isActive = id == self.store.liveProfileId
         let status = self.store.statuses[id]
 
         switch status {
         case .notSetUp, .reloginNeeded:
-            CodexBridge.startLogin(profileId: id) { [weak self] success in
-                guard let self, success else { return }
-                self.usageProvider.refreshAll(force: true)
-                self.updateIcon()
+            self.store.beginAuthMutation()
+            CodexBridge.startLogin(profileId: id) { [weak self] result in
+                guard let self else { return }
+                self.store.endAuthMutation()
+                switch result {
+                case .success:
+                    self.syncActiveProfile(force: true)
+                    self.usageProvider.refreshAll(force: true)
+                    self.updateIcon()
+                case .failure(let error):
+                    self.presentBridgeError(title: "Login failed", message: error.localizedDescription)
+                }
             }
             return
         default:
@@ -1141,12 +1412,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        self.store.beginAuthMutation()
         Task {
-            let success = await CodexBridge.switchToProfile(id)
-            if success {
+            let result = await CodexBridge.switchToProfile(id)
+            self.store.endAuthMutation()
+            switch result {
+            case .success:
                 self.store.setActiveProfile(id)
-                self.usageProvider.refreshActive()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.updateIcon() }
+                self.store.setLiveProfileId(id)
+                self.liveProfileMessage = nil
+                self.usageProvider.refreshAll(force: true)
+                self.updateIcon()
+            case .failure(let error):
+                self.syncActiveProfile(force: true)
+                self.updateIcon()
+                self.presentBridgeError(title: "Switch failed", message: error.localizedDescription)
             }
         }
     }
@@ -1158,6 +1438,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() {
         self.menu.cancelTracking()
         SettingsWindow.show(store: self.store)
+    }
+
+    private func presentBridgeError(title: String, message: String?) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message ?? "Unknown error"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 }
 
@@ -1232,7 +1522,6 @@ struct ProfilesTab: View {
     @ObservedObject var toast: ToastState
     @State private var labels: [String: String] = [:]
     @State private var profiles: [ProfileConfig] = []
-    @State private var linkedProfiles: Set<String> = []
     @State private var pendingDeleteId: String?
 
     var body: some View {
@@ -1242,11 +1531,6 @@ struct ProfilesTab: View {
                     HStack(spacing: 8) {
                         Text("Name")
                             .frame(maxWidth: .infinity, alignment: .leading)
-
-                        Text("Share Data")
-                            .frame(width: 70)
-                            .help("Shares sessions, plugins, and memories from your default Codex installation (~/.codex). Requires a profile restart to take effect.")
-
                         Color.clear.frame(width: 20)
                     }
                     .font(.system(size: 11, weight: .medium))
@@ -1259,11 +1543,6 @@ struct ProfilesTab: View {
                         HStack(spacing: 8) {
                             TextField("Label", text: self.labelBinding(for: profile.id, default: profile.label))
                                 .textFieldStyle(.roundedBorder)
-
-                            Toggle("", isOn: self.linkBinding(for: profile.id))
-                                .toggleStyle(.checkbox)
-                                .labelsHidden()
-                                .frame(width: 70)
 
                             Button(action: { self.pendingDeleteId = profile.id }) {
                                 Image(systemName: "minus.circle.fill")
@@ -1317,19 +1596,8 @@ struct ProfilesTab: View {
     private func reload() {
         self.profiles = self.store.config.profiles
         self.labels = [:]
-        self.linkedProfiles = []
         for profile in self.profiles {
             self.labels[profile.id] = profile.label
-            let codexHome = self.store.codexHome(for: profile.id)
-            let sessionsPath = codexHome.appendingPathComponent("sessions").path
-            var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: sessionsPath, isDirectory: &isDir)
-            if exists {
-                let attrs = try? FileManager.default.attributesOfItem(atPath: sessionsPath)
-                if attrs?[.type] as? FileAttributeType == .typeSymbolicLink {
-                    self.linkedProfiles.insert(profile.id)
-                }
-            }
         }
     }
 
@@ -1337,7 +1605,7 @@ struct ProfilesTab: View {
         for (id, label) in self.labels {
             self.store.updateLabel(for: id, label: label)
         }
-        self.applyLinks()
+        self.profiles = self.store.config.profiles
         self.toast.show("Settings saved", style: .success)
     }
 
@@ -1351,52 +1619,13 @@ struct ProfilesTab: View {
     private func removeProfile(_ id: String) {
         self.store.removeProfile(id)
         self.labels.removeValue(forKey: id)
-        self.linkedProfiles.remove(id)
         self.profiles = self.store.config.profiles
-    }
-
-    private func applyLinks() {
-        for profile in self.profiles {
-            let isLinked = self.linkedProfiles.contains(profile.id)
-            let codexHome = self.store.codexHome(for: profile.id)
-            let sessionsPath = codexHome.appendingPathComponent("sessions").path
-            let attrs = try? FileManager.default.attributesOfItem(atPath: sessionsPath)
-            let currentlyLinked = attrs?[.type] as? FileAttributeType == .typeSymbolicLink
-
-            if isLinked && !currentlyLinked {
-                Self.runProfileCommand("link", profile.id)
-            } else if !isLinked && currentlyLinked {
-                Self.runProfileCommand("unlink", profile.id)
-            }
-        }
-    }
-
-    private static func runProfileCommand(_ command: String, _ profileId: String) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(".local/bin/codex-profile").path
-        guard FileManager.default.isExecutableFile(atPath: path) else { return }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: path)
-        proc.arguments = [command, profileId]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
     }
 
     private func labelBinding(for id: String, default defaultValue: String) -> Binding<String> {
         Binding(
             get: { self.labels[id] ?? defaultValue },
             set: { self.labels[id] = $0 })
-    }
-
-    private func linkBinding(for id: String) -> Binding<Bool> {
-        Binding(
-            get: { self.linkedProfiles.contains(id) },
-            set: { checked in
-                if checked { self.linkedProfiles.insert(id) }
-                else { self.linkedProfiles.remove(id) }
-            })
     }
 }
 
@@ -1410,7 +1639,7 @@ struct GeneralTab: View {
                 .foregroundStyle(.secondary)
 
             Toggle("Launch at Login", isOn: self.$launchAtLogin)
-                .onChange(of: self.launchAtLogin) { _ in LaunchAtLogin.toggle() }
+                .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
 
             Text("Automatically opens CodexProfileSwitcher when you start your Mac.")
                 .font(.system(size: 11))
