@@ -21,6 +21,22 @@ A macOS menu bar app for switching between OpenAI Codex accounts and checking us
 
 ## Install
 
+### GitHub Releases
+
+Download the latest signed and notarized DMG from
+[GitHub Releases](https://github.com/4LAU/codex-profile-switcher/releases), open
+it, and drag `CodexProfileSwitcher.app` to Applications.
+
+### Homebrew
+
+After the first public DMG is published and the Homebrew tap is updated:
+
+```bash
+brew install --cask 4lau/tap/codex-profile-switcher
+```
+
+### Build from Source
+
 ```bash
 git clone https://github.com/4LAU/codex-profile-switcher.git
 cd codex-profile-switcher
@@ -36,6 +52,24 @@ matching Swift CLI helper is installed to `~/.local/bin/codex-profile`.
 
 If Codex is not installed at `/Applications/Codex.app`, set `CODEX_APP` or
 `CODEX_CLI` before using the helper.
+
+To build a signed app bundle instead of loose binaries:
+
+```bash
+Scripts/package_app.sh
+
+# Optional Developer ID / Apple Development identity.
+APP_IDENTITY="Developer ID Application: Your Name (TEAMID)" Scripts/package_app.sh
+```
+
+The bundle is written to `CodexProfileSwitcher.app`, with the app executable in
+`Contents/MacOS` and the `codex-profile` helper in `Contents/Helpers`. When
+`APP_IDENTITY` is unset or unavailable, the package script falls back to ad-hoc
+signing.
+
+Maintainer releases should use the DMG release flow in [RELEASE.md](RELEASE.md).
+That path requires Developer ID signing and Apple notarization, and it generates
+the Homebrew cask file for a tap.
 
 ## Setting Up Profiles
 
@@ -65,7 +99,11 @@ stores per-profile auth in macOS Keychain and swaps the selected profile into
 legacy disk auth directory is removed only after successful verification.
 
 Local unsigned builds may trigger a macOS Keychain access prompt the first time
-the app or helper reads or writes saved profile auth.
+the app or helper reads or writes saved profile auth. Saved auth items are
+created with trusted access for the companion app/helper binaries so normal
+switching should not repeatedly prompt after the initial approval. The app
+attempts to repair older items the next time profile auth is saved, but it will
+preserve the existing Keychain item if macOS refuses the access-control update.
 
 When you switch profiles, the helper:
 
@@ -90,6 +128,18 @@ Open `Settings...` → `General` for built-in support tools:
 The log redacts emails, bearer tokens, cookies, OpenAI API keys, and OAuth token
 fields before writing. From the terminal, `codex-profile doctor` also prints a
 small environment and saved-profile check.
+
+For manual Keychain validation of the signed bundle, run
+`Scripts/keychain_signed_smoke.sh`. It uses fake Codex binaries, a temporary
+home, and a disposable Keychain service. It is intentionally not part of
+`make check` because macOS may show interactive Keychain prompts.
+
+For isolated manual runs, both the app and helper honor `CODEX_PROFILE_HOME`
+and `CODEX_PROFILE_KEYCHAIN_SERVICE`.
+
+On a public signed and notarized release, macOS may still ask for Keychain
+approval during initial setup. After approval, normal profile switching should
+not repeatedly ask for your password.
 
 ## Contributing and Security
 

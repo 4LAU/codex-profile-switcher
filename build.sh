@@ -42,6 +42,7 @@ swiftc -O \
   -module-cache-path "$MODULE_CACHE"
 
 chmod +x "$OUT_TMP"
+codesign -s - --force "$OUT_TMP"
 mv -f "$OUT_TMP" "$OUT"
 
 if [[ -f "$HELPER_SRC" ]]; then
@@ -53,6 +54,7 @@ if [[ -f "$HELPER_SRC" ]]; then
     -framework Security \
     -module-cache-path "$MODULE_CACHE"
   chmod +x "$HELPER_TMP"
+  codesign -s - --force "$HELPER_TMP"
   mv -f "$HELPER_TMP" "$HELPER_OUT"
   echo "Installed helper: $HELPER_OUT"
 else
