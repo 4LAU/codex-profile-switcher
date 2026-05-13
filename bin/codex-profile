@@ -85,6 +85,12 @@ auth_store_path() {
   printf '%s/%s.json\n' "$(auth_store_dir)" "$profile"
 }
 
+auth_cleared_marker_path() {
+  local profile="$1"
+  validate_profile "$profile"
+  printf '%s/.%s.cleared\n' "$(auth_store_dir)" "$profile"
+}
+
 make_temp_home() {
   local profile="$1"
   validate_profile "$profile"
@@ -280,10 +286,11 @@ snapshot_auth_to_store() {
   local profile="$1"
   local auth_path="$2"
   atomic_copy_file "$auth_path" "$(auth_store_path "$profile")"
+  rm -f "$(auth_cleared_marker_path "$profile")"
 }
 
 migrate_legacy_profiles() {
-  local legacy_dir profile legacy_auth destination
+  local legacy_dir profile legacy_auth destination cleared_marker
   for legacy_dir in "$HOME"/.codex-*; do
     [[ -d "$legacy_dir" ]] || continue
     [[ "${legacy_dir##*/}" != ".codex-switcher" ]] || continue
@@ -295,6 +302,8 @@ migrate_legacy_profiles() {
 
     destination="$(auth_store_path "$profile")"
     [[ ! -f "$destination" ]] || continue
+    cleared_marker="$(auth_cleared_marker_path "$profile")"
+    [[ ! -f "$cleared_marker" ]] || continue
 
     atomic_copy_file "$legacy_auth" "$destination"
     note "Migrated legacy auth for profile '$profile' to $destination"

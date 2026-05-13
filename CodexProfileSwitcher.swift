@@ -174,6 +174,71 @@ struct UsageCache: Codable {
     var snapshots: [String: UsageSnapshot]
 }
 
+struct AuthIdentityDetails {
+    enum Kind {
+        case oauth
+        case apiKey
+    }
+
+    let kind: Kind
+    let email: String?
+    let accountId: String?
+    let userId: String?
+    let organizationId: String?
+    let subject: String?
+    let lastRefresh: Date?
+    let keyHash: String?
+
+    var menuSummary: String {
+        switch self.kind {
+        case .oauth:
+            if let email, !email.isEmpty { return email }
+            if let accountId, !accountId.isEmpty { return shortIdentifier(accountId) }
+            if let userId, !userId.isEmpty { return shortIdentifier(userId) }
+            return "Saved OAuth account"
+        case .apiKey:
+            if let keyHash, !keyHash.isEmpty {
+                return "API key \(shortHash(keyHash))"
+            }
+            return "Saved API key"
+        }
+    }
+
+    var settingsTitle: String {
+        switch self.kind {
+        case .oauth:
+            return self.email ?? "OAuth account"
+        case .apiKey:
+            return "API key login"
+        }
+    }
+
+    var settingsDetails: String {
+        var parts: [String] = []
+
+        if let accountId, !accountId.isEmpty {
+            parts.append("Account \(shortIdentifier(accountId))")
+        }
+        if let userId, !userId.isEmpty {
+            parts.append("User \(shortIdentifier(userId))")
+        }
+        if let organizationId, !organizationId.isEmpty {
+            parts.append("Org \(shortIdentifier(organizationId))")
+        }
+        if let subject, !subject.isEmpty, self.email == nil {
+            parts.append("Sub \(shortIdentifier(subject))")
+        }
+        if let lastRefresh {
+            parts.append("Refreshed \(DateFormatter.profileDetailTimestamp.string(from: lastRefresh))")
+        }
+        if self.kind == .apiKey, let keyHash, !keyHash.isEmpty {
+            parts.append("Fingerprint \(shortHash(keyHash))")
+        }
+
+        return parts.isEmpty ? "No additional identity details" : parts.joined(separator: "  •  ")
+    }
+}
+
 enum ProfileStatus {
     case available(UsageSnapshot)
     case loading
@@ -218,6 +283,35 @@ private func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String
         if let value = dict[key] as? String, !value.isEmpty { return value }
     }
     return nil
+}
+
+private func parseISO8601Date(_ raw: Any?) -> Date? {
+    guard let value = raw as? String, !value.isEmpty else { return nil }
+    let fmt = ISO8601DateFormatter()
+    fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = fmt.date(from: value) { return d }
+    fmt.formatOptions = [.withInternetDateTime]
+    return fmt.date(from: value)
+}
+
+private func shortIdentifier(_ value: String, head: Int = 10, tail: Int = 6) -> String {
+    guard value.count > head + tail + 1 else { return value }
+    let start = value.prefix(head)
+    let end = value.suffix(tail)
+    return "\(start)…\(end)"
+}
+
+private func shortHash(_ value: String, head: Int = 6, tail: Int = 4) -> String {
+    shortIdentifier(value, head: head, tail: tail)
+}
+
+extension DateFormatter {
+    static let profileDetailTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 private func atomicWriteData(_ data: Data, to destination: URL) throws {
@@ -265,6 +359,23 @@ enum LiveAuthWarning: Equatable {
         case .ambiguous: return "Live Codex auth matches multiple saved profiles"
         }
     }
+}
+
+enum ProfileMutationError: LocalizedError {
+    case cannotClearActiveProfile
+
+    var errorDescription: String? {
+        switch self {
+        case .cannotClearActiveProfile:
+            return "Switch away from the active profile before clearing its saved auth."
+        }
+    }
+}
+
+struct SettingsActionError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { self.message }
 }
 
 // MARK: - ProfileStore
@@ -380,6 +491,12 @@ final class ProfileStore {
             AppLogger.warning("Failed to remove saved profile auth",
                               metadata: ["profile": id, "error": error.localizedDescription])
         }
+        do {
+            try atomicWriteData(Data(), to: self.authClearedMarkerPath(for: id))
+        } catch {
+            AppLogger.warning("Failed to write cleared auth marker",
+                              metadata: ["profile": id, "error": error.localizedDescription])
+        }
         if self.config.activeProfile == id {
             self.config.activeProfile = self.config.profiles.first?.id ?? ""
         }
@@ -394,12 +511,33 @@ final class ProfileStore {
         self.authStoreDir.appendingPathComponent("\(profileId).json")
     }
 
+    func authClearedMarkerExists(for profileId: String) -> Bool {
+        self.fileManager.fileExists(atPath: self.authClearedMarkerPath(for: profileId).path)
+    }
+
     func authStoreURL(for profileId: String) -> URL {
         self.authStorePath(for: profileId)
     }
 
     func authStoreExists(for profileId: String) -> Bool {
         self.fileManager.fileExists(atPath: self.authStorePath(for: profileId).path)
+    }
+
+    func syncSavedAuthToLive(for profileId: String) throws {
+        try self.copyAuthFile(from: self.authStorePath(for: profileId), to: self.codexAuthPath)
+    }
+
+    func authDetails(for profileId: String) -> AuthIdentityDetails? {
+        let savedURL = self.authStorePath(for: profileId)
+        if let details = Self.authDetails(at: savedURL) {
+            return details
+        }
+
+        if self.liveProfileId == profileId {
+            return Self.authDetails(at: self.codexAuthPath)
+        }
+
+        return nil
     }
 
     func authURL(for profileId: String) -> URL {
@@ -499,6 +637,46 @@ final class ProfileStore {
 
     func updateRefreshDiagnostics(_ id: String, _ diagnostics: ProfileRefreshDiagnostics) {
         self.refreshDiagnostics[id] = diagnostics
+    }
+
+    func duplicateProfileIDs(for profileId: String) -> [String] {
+        let groups = self.duplicateProfileGroups()
+        guard let match = groups.first(where: { $0.contains(profileId) }) else { return [] }
+        return match.filter { $0 != profileId }
+    }
+
+    func duplicateProfileGroups() -> [[String]] {
+        var idsByFingerprint: [String: [String]] = [:]
+
+        for profile in self.config.profiles {
+            let savedURL = self.authStorePath(for: profile.id)
+            guard let fingerprint = self.authFingerprint(for: savedURL) else { continue }
+            idsByFingerprint[fingerprint, default: []].append(profile.id)
+        }
+
+        return idsByFingerprint.values
+            .filter { $0.count > 1 }
+            .map { $0.sorted() }
+            .sorted { lhs, rhs in
+                (lhs.first ?? "") < (rhs.first ?? "")
+            }
+    }
+
+    func clearSavedAuth(for id: String) throws {
+        if self.liveProfileId == id {
+            throw ProfileMutationError.cannotClearActiveProfile
+        }
+
+        do {
+            try self.fileManager.removeItem(at: self.authStorePath(for: id))
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+        }
+
+        try atomicWriteData(Data(), to: self.authClearedMarkerPath(for: id))
+        self.cache.snapshots.removeValue(forKey: id)
+        self.refreshDiagnostics.removeValue(forKey: id)
+        self.statuses[id] = .notSetUp
+        self.saveCache()
     }
 
     func flushCacheIfDirty() {
@@ -626,7 +804,9 @@ final class ProfileStore {
     }
 
     private func migrateLegacyProfiles() {
-        for id in self.legacyProfileIDs() where !self.authStoreExists(for: id) {
+        for id in self.legacyProfileIDs()
+            where !self.authStoreExists(for: id) && !self.authClearedMarkerExists(for: id)
+        {
             let legacyPath = self.legacyAuthPath(for: id)
             do {
                 try self.copyAuthFile(from: legacyPath, to: self.authStorePath(for: id))
@@ -659,6 +839,10 @@ final class ProfileStore {
         self.fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex-\(profileId)", isDirectory: true)
             .appendingPathComponent("auth.json")
+    }
+
+    private func authClearedMarkerPath(for profileId: String) -> URL {
+        self.authStoreDir.appendingPathComponent(".\(profileId).cleared")
     }
 
     private func copyAuthFile(from source: URL, to destination: URL) throws {
@@ -747,6 +931,43 @@ final class ProfileStore {
             }
         }
         return claims.isEmpty ? nil : claims
+    }
+
+    private static func authDetails(at url: URL) -> AuthIdentityDetails? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        if let apiKey = json["OPENAI_API_KEY"] as? String,
+           !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let digest = SHA256.hash(data: Data(apiKey.utf8)).map { String(format: "%02x", $0) }.joined()
+            return AuthIdentityDetails(
+                kind: .apiKey,
+                email: nil,
+                accountId: nil,
+                userId: nil,
+                organizationId: nil,
+                subject: nil,
+                lastRefresh: parseISO8601Date(json["last_refresh"]),
+                keyHash: digest)
+        }
+
+        guard let tokens = json["tokens"] as? [String: Any] else { return nil }
+
+        let accountId = dictStringValue(tokens, "account_id", "accountId")
+        let idToken = dictStringValue(tokens, "id_token", "idToken")
+        let claims = idToken.flatMap(Self.stableClaims(fromIDToken:)) ?? [:]
+
+        return AuthIdentityDetails(
+            kind: .oauth,
+            email: claims["email"],
+            accountId: accountId ?? claims["https://api.openai.com/account_id"],
+            userId: claims["https://api.openai.com/user_id"],
+            organizationId: claims["https://api.openai.com/organization_id"],
+            subject: claims["sub"],
+            lastRefresh: parseISO8601Date(json["last_refresh"]),
+            keyHash: nil)
     }
 
     private static func base64URLDecode(_ value: String) -> Data? {
@@ -889,6 +1110,7 @@ enum AuthRefresher {
         guard profileId != activeProfileId else { return creds }
         guard creds.needsRefresh else { return creds }
         guard !creds.refreshToken.isEmpty else { return creds }
+        try Task.checkCancellation()
         AppLogger.info("Refreshing inactive OAuth token", metadata: ["profile": profileId])
 
         var request = URLRequest(url: Self.endpoint)
@@ -905,6 +1127,7 @@ enum AuthRefresher {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             throw AuthError.invalidResponse("No HTTP response")
         }
@@ -924,6 +1147,13 @@ enum AuthRefresher {
             accountId: creds.accountId,
             lastRefresh: Date())
 
+        let current = try AuthCredentialLoader.load(from: authFileURL)
+        guard current.refreshToken == creds.refreshToken else {
+            AppLogger.warning("Skipped OAuth token refresh save because auth changed",
+                              metadata: ["profile": profileId])
+            return current
+        }
+        try Task.checkCancellation()
         try AuthCredentialLoader.save(refreshed, to: authFileURL)
         AppLogger.info("OAuth token refresh succeeded", metadata: ["profile": profileId])
         return refreshed
@@ -1495,6 +1725,11 @@ final class UsageProvider {
         self.store = store
     }
 
+    func cancelRefreshes() {
+        self.activeRefreshTask?.cancel()
+        self.activeRefreshTask = nil
+    }
+
     func refreshAll(force: Bool = false) {
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
         self.lastRefreshAll = Date()
@@ -1553,6 +1788,11 @@ final class UsageProvider {
             diagnostics.lastDecision = decision
             let snapshot = diagnostics
             await MainActor.run {
+                if !self.canUseAuthFile(for: id, authURL: authURL, activeProfileId: activeProfileId) {
+                    self.store.updateRefreshDiagnostics(id, snapshot)
+                    self.store.updateStatus(id, .notSetUp)
+                    return
+                }
                 self.store.updateRefreshDiagnostics(id, snapshot)
                 self.store.updateStatus(id, status)
             }
@@ -1638,6 +1878,11 @@ final class UsageProvider {
         }
 
         do {
+            guard self.canUseAuthFile(for: id, authURL: authURL, activeProfileId: activeProfileId) else {
+                await finalize(.notSetUp, decision: "not-set-up")
+                return
+            }
+
             diagnostics.lastAttemptedSource = .oauth
             await setDiagnostics()
 
@@ -1682,6 +1927,14 @@ final class UsageProvider {
             diagnostics.lastError = error.localizedDescription
             await finalize(.stale(cached), decision: "stale")
         }
+    }
+
+    private func canUseAuthFile(for id: String, authURL: URL, activeProfileId: String) -> Bool {
+        if id == activeProfileId {
+            return FileManager.default.fileExists(atPath: authURL.path)
+        }
+        return self.store.authStoreExists(for: id)
+            && FileManager.default.fileExists(atPath: authURL.path)
     }
 }
 
@@ -1883,6 +2136,7 @@ struct ProfileCardView: View {
     let profile: ProfileConfig
     let status: ProfileStatus
     let isActive: Bool
+    let duplicateLine: String?
     let onSwitch: () -> Void
 
     var body: some View {
@@ -1894,6 +2148,12 @@ struct ProfileCardView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 self.headerRow
+                if let duplicateLine, !duplicateLine.isEmpty {
+                    Label(duplicateLine, systemImage: "square.stack.3d.up.trianglebadge.exclamationmark")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Palette.warning)
+                        .lineLimit(1)
+                }
                 self.statusContent
             }
             .padding(.horizontal, 12)
@@ -2048,6 +2308,7 @@ enum CodexBridgeError: LocalizedError {
     case loginAlreadyRunning
     case launchFailed(String)
     case commandFailed(Int32, String)
+    case stateUpdateFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -2059,6 +2320,8 @@ enum CodexBridgeError: LocalizedError {
             return message
         case .commandFailed(_, let output):
             return output.isEmpty ? "codex-profile command failed" : output
+        case .stateUpdateFailed(let message):
+            return message
         }
     }
 }
@@ -2317,15 +2580,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for profile in self.store.config.profiles {
             let isActive = profile.id == self.store.liveProfileId
             let status = self.store.statuses[profile.id] ?? .notSetUp
+            let duplicateLine = self.duplicateSummary(for: profile.id)
 
             let cardView = ProfileCardView(
                 profile: profile,
                 status: status,
                 isActive: isActive,
+                duplicateLine: duplicateLine,
                 onSwitch: { [weak self] in self?.switchToProfile(profile.id) })
 
             let hostView = NSHostingView(rootView: cardView)
-            hostView.frame = NSRect(x: 0, y: 0, width: 290, height: self.cardHeight(for: status))
+            hostView.frame = NSRect(
+                x: 0,
+                y: 0,
+                width: 290,
+                height: self.cardHeight(for: status, hasDuplicate: duplicateLine != nil))
 
             let menuItem = NSMenuItem()
             menuItem.view = hostView
@@ -2353,16 +2622,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.image = nil
         self.menu.addItem(quitItem)
     }
 
-    private func cardHeight(for status: ProfileStatus) -> CGFloat {
+    private func cardHeight(for status: ProfileStatus, hasDuplicate: Bool) -> CGFloat {
+        var height: CGFloat
         switch status {
-        case .available: return 58
-        case .stale(let s) where s != nil: return 68
-        case .reloginNeeded(let s) where s != nil: return 68
-        default: return 42
+        case .available: height = 58
+        case .stale(let s) where s != nil: height = 68
+        case .reloginNeeded(let s) where s != nil: height = 68
+        default: height = 42
         }
+
+        if hasDuplicate { height += 14 }
+        return height
+    }
+
+    private func duplicateSummary(for profileId: String) -> String? {
+        let duplicates = self.store.duplicateProfileIDs(for: profileId)
+        guard !duplicates.isEmpty else { return nil }
+        let names = duplicates.map { duplicateId in
+            self.store.config.profiles.first(where: { $0.id == duplicateId })?.label ?? "Profile \(duplicateId)"
+        }
+        if names.count == 1, let name = names.first {
+            return "Same account as \(name)"
+        }
+        return "Same account as \(names.joined(separator: ", "))"
     }
 
     // MARK: - Profile Sync
@@ -2419,20 +2705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let status = self.store.statuses[id]
 
         func startLogin() {
-            let store = self.store!
-            store.beginAuthMutation()
-            CodexBridge.startLogin(profileId: id) { [weak self] result in
-                store.endAuthMutation()
-                guard let self else { return }
-                switch result {
-                case .success:
-                    AppLogger.info("Login succeeded", metadata: ["profile": id])
-                    self.syncActiveProfile(force: true)
-                    self.usageProvider.refreshAll(force: true)
-                    self.updateIcon()
-                case .failure(let error):
-                    self.presentBridgeError(title: "Login failed", message: error.localizedDescription)
-                }
+            self.startLogin(for: id, presentFailureAlert: true) { _ in
             }
         }
 
@@ -2497,7 +2770,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openSettings() {
         self.menu.cancelTracking()
-        SettingsWindow.show(store: self.store)
+        SettingsWindow.show(
+            store: self.store,
+            actions: SettingsActions(
+                reauthenticateProfile: { [weak self] (id: String, completion: @escaping (Result<Void, SettingsActionError>) -> Void) in
+                    self?.startLogin(for: id, presentFailureAlert: false) { result in
+                        completion(result.mapError { SettingsActionError(message: $0.localizedDescription) })
+                    }
+                },
+                clearSavedAuth: { [weak self] (id: String) in
+                    guard let self else {
+                        return .failure(SettingsActionError(message: "Settings window is unavailable."))
+                    }
+                    return self.clearSavedAuth(for: id)
+                }))
     }
 
     private func presentBridgeError(title: String, message: String?) {
@@ -2510,15 +2796,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
+
+    private func startLogin(
+        for profileId: String,
+        presentFailureAlert: Bool,
+        completion: ((Result<Void, CodexBridgeError>) -> Void)? = nil
+    ) {
+        let store = self.store!
+        store.beginAuthMutation()
+        CodexBridge.startLogin(profileId: profileId) { [weak self] result in
+            guard let self else {
+                store.endAuthMutation()
+                return
+            }
+
+            let finalResult: Result<Void, CodexBridgeError>
+
+            switch result {
+            case .success:
+                AppLogger.info("Login succeeded", metadata: ["profile": profileId])
+                if self.store.liveProfileId == profileId {
+                    do {
+                        try self.store.syncSavedAuthToLive(for: profileId)
+                    } catch {
+                        AppLogger.error("Failed to update live auth after login",
+                                        metadata: ["profile": profileId, "error": error.localizedDescription])
+                        store.endAuthMutation()
+                        let failure = CodexBridgeError.stateUpdateFailed(
+                            "Login succeeded but the active profile could not update live auth: \(error.localizedDescription)")
+                        if presentFailureAlert {
+                            self.presentBridgeError(title: "Login failed", message: failure.localizedDescription)
+                        }
+                        completion?(.failure(failure))
+                        return
+                    }
+                }
+                store.endAuthMutation()
+                self.syncActiveProfile(force: true)
+                self.usageProvider.refreshAll(force: true)
+                self.updateIcon()
+                finalResult = .success(())
+            case .failure(let error):
+                store.endAuthMutation()
+                if presentFailureAlert {
+                    self.presentBridgeError(title: "Login failed", message: error.localizedDescription)
+                }
+                finalResult = .failure(error)
+            }
+
+            completion?(finalResult)
+        }
+    }
+
+    private func clearSavedAuth(for profileId: String) -> Result<Void, SettingsActionError> {
+        do {
+            self.usageProvider.cancelRefreshes()
+            try self.store.clearSavedAuth(for: profileId)
+            self.syncActiveProfile(force: true)
+            self.usageProvider.refreshAll(force: true)
+            self.updateIcon()
+            return .success(())
+        } catch {
+            return .failure(SettingsActionError(message: error.localizedDescription))
+        }
+    }
 }
 
 // MARK: - Settings Window
 
+struct SettingsActions {
+    let reauthenticateProfile: (String, @escaping (Result<Void, SettingsActionError>) -> Void) -> Void
+    let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
+}
+
 enum SettingsWindow {
     private static var windowController: NSWindowController?
 
-    static func show(store: ProfileStore) {
+    static func show(store: ProfileStore, actions: SettingsActions) {
         if let wc = Self.windowController {
+            wc.window?.contentView = NSHostingView(rootView: SettingsView(store: store, actions: actions))
             wc.showWindow(nil)
             wc.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -2526,7 +2882,7 @@ enum SettingsWindow {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -2534,7 +2890,7 @@ enum SettingsWindow {
         window.center()
         window.isReleasedWhenClosed = false
 
-        let view = SettingsView(store: store)
+        let view = SettingsView(store: store, actions: actions)
         window.contentView = NSHostingView(rootView: view)
 
         let wc = NSWindowController(window: window)
@@ -2547,6 +2903,7 @@ enum SettingsWindow {
 
 struct SettingsView: View {
     let store: ProfileStore
+    let actions: SettingsActions
     @State private var selectedTab = 0
     @StateObject private var toast = ToastState()
 
@@ -2566,7 +2923,7 @@ struct SettingsView: View {
                 Divider()
 
                 switch self.selectedTab {
-                case 0: ProfilesTab(store: self.store, toast: self.toast)
+                case 0: ProfilesTab(store: self.store, actions: self.actions, toast: self.toast)
                 case 1: GeneralTab(store: self.store, toast: self.toast)
                 case 2: AboutTab()
                 default: EmptyView()
@@ -2580,42 +2937,41 @@ struct SettingsView: View {
 
 struct ProfilesTab: View {
     let store: ProfileStore
+    let actions: SettingsActions
     @ObservedObject var toast: ToastState
     @State private var labels: [String: String] = [:]
     @State private var profiles: [ProfileConfig] = []
     @State private var pendingDeleteId: String?
+    @State private var pendingClearAuthId: String?
+    @State private var actionInFlight: Set<String> = []
+    @State private var refreshTick = 0
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 0) {
-                    HStack(spacing: 8) {
-                        Text("Name")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Color.clear.frame(width: 20)
+                VStack(alignment: .leading, spacing: 14) {
+                    if !self.store.duplicateProfileGroups().isEmpty {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "square.stack.3d.up.trianglebadge.exclamationmark")
+                                .foregroundStyle(Palette.warning)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Shared account detected")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Profiles marked below appear to use the same underlying OpenAI account. Re-auth or clear one of them to remove duplicates.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(12)
+                        .background(Palette.warning.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 12)
-                    .padding(.bottom, 6)
 
                     ForEach(self.profiles) { profile in
-                        HStack(spacing: 8) {
-                            TextField("Label", text: self.labelBinding(for: profile.id, default: profile.label))
-                                .textFieldStyle(.roundedBorder)
-
-                            Button(action: { self.pendingDeleteId = profile.id }) {
-                                Image(systemName: "minus.circle.fill")
-                                    .foregroundStyle(Palette.danger.opacity(0.8))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 5)
+                        self.profileRow(profile)
                     }
                 }
-                .padding(.bottom, 8)
+                .padding(20)
             }
 
             Divider()
@@ -2650,6 +3006,18 @@ struct ProfilesTab: View {
         } message: {
             if let id = self.pendingDeleteId {
                 Text("Are you sure you want to delete \"\(self.labels[id] ?? id)\"? This cannot be undone.")
+            }
+        }
+        .confirmationDialog("Clear Saved Auth", isPresented: Binding(
+            get: { self.pendingClearAuthId != nil },
+            set: { if !$0 { self.pendingClearAuthId = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { self.pendingClearAuthId = nil }
+            Button("Clear", role: .destructive) {
+                if let id = self.pendingClearAuthId {
+                    self.clearSavedAuth(id)
+                }
+                self.pendingClearAuthId = nil
             }
         }
     }
@@ -2687,6 +3055,156 @@ struct ProfilesTab: View {
         Binding(
             get: { self.labels[id] ?? defaultValue },
             set: { self.labels[id] = $0 })
+    }
+
+    @ViewBuilder
+    private func profileRow(_ profile: ProfileConfig) -> some View {
+        let details = self.store.authDetails(for: profile.id)
+        let duplicates = self.store.duplicateProfileIDs(for: profile.id)
+        let isActive = self.store.liveProfileId == profile.id
+        let hasSavedAuth = self.store.authStoreExists(for: profile.id)
+        let status = self.store.statuses[profile.id] ?? .notSetUp
+        let inFlight = self.actionInFlight.contains(profile.id)
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                Text("Profile \(profile.id)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 58, alignment: .leading)
+
+                TextField("Label", text: self.labelBinding(for: profile.id, default: profile.label))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(inFlight)
+
+                if isActive {
+                    Text("Active")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Palette.accent.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+
+                Text(self.statusLabel(for: status))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.07))
+                    .clipShape(Capsule())
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(details?.settingsTitle ?? "No saved auth")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+
+                Text(details?.settingsDetails ?? "No saved auth snapshot yet. Use Re-auth to log this profile in.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+
+                if !duplicates.isEmpty {
+                    Text(self.duplicateDetails(for: duplicates))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.warning)
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button {
+                    self.reauthenticate(profile.id)
+                } label: {
+                    Label(hasSavedAuth ? "Re-auth" : "Set Up", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(inFlight)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    self.pendingClearAuthId = profile.id
+                } label: {
+                    Label("Clear Auth", systemImage: "xmark.circle")
+                }
+                .disabled(inFlight || !hasSavedAuth || isActive)
+
+                Button(role: .destructive, action: {
+                    self.pendingDeleteId = profile.id
+                }) {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(inFlight)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.035))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(duplicates.isEmpty ? Color.primary.opacity(0.08) : Palette.warning.opacity(0.35), lineWidth: 1)
+        )
+        .id("\(profile.id)-\(self.refreshTick)")
+    }
+
+    private func duplicateDetails(for duplicates: [String]) -> String {
+        let names = duplicates.map { id in
+            self.labels[id] ?? self.store.config.profiles.first(where: { $0.id == id })?.label ?? "Profile \(id)"
+        }
+
+        if names.count == 1, let name = names.first {
+            return "Same account as \(name)"
+        }
+        return "Same account as \(names.joined(separator: ", "))"
+    }
+
+    private func statusLabel(for status: ProfileStatus) -> String {
+        switch status {
+        case .available:
+            return "Ready"
+        case .loading:
+            return "Refreshing"
+        case .stale:
+            return "Cached"
+        case .reloginNeeded:
+            return "Re-login needed"
+        case .notSetUp:
+            return "Not set up"
+        }
+    }
+
+    private func reauthenticate(_ profileId: String) {
+        self.actionInFlight.insert(profileId)
+        self.actions.reauthenticateProfile(profileId) { result in
+            DispatchQueue.main.async(execute: {
+                self.actionInFlight.remove(profileId)
+                self.refreshTick += 1
+                self.reload()
+                switch result {
+                case .success:
+                    self.toast.show("Updated auth for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .success)
+                case .failure(let error):
+                    self.toast.show(error.localizedDescription, style: .error)
+                }
+            })
+        }
+    }
+
+    private func clearSavedAuth(_ profileId: String) {
+        switch self.actions.clearSavedAuth(profileId) {
+        case .success:
+            self.refreshTick += 1
+            self.reload()
+            self.toast.show("Cleared saved auth for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .info)
+        case .failure(let error):
+            self.toast.show(error.localizedDescription, style: .error)
+        }
     }
 }
 
@@ -2840,6 +3358,14 @@ enum Main {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(
+            withTitle: "Close Window",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: "w")
+        let fileMenuItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        fileMenuItem.submenu = fileMenu
+
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
@@ -2851,6 +3377,7 @@ enum Main {
         let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
         editMenuItem.submenu = editMenu
         let mainMenu = NSMenu()
+        mainMenu.addItem(fileMenuItem)
         mainMenu.addItem(editMenuItem)
         app.mainMenu = mainMenu
 
