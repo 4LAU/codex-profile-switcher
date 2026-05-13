@@ -2,24 +2,26 @@
 
 ## Supported Versions
 
-Security fixes are provided for the latest code on the default branch. Older commits and unpublished local builds are not supported.
+Security fixes are only made against the latest code on the default branch.
 
 ## Reporting a Vulnerability
 
 Do not report security vulnerabilities in public GitHub issues.
 
-Use GitHub's private vulnerability reporting for this repository if it is enabled. If private reporting is unavailable, contact the maintainer privately through GitHub and include:
+Use GitHub's private vulnerability reporting for this repository when it is
+available. If private reporting is unavailable, contact the maintainer privately
+through GitHub.
+
+Include:
 
 - a clear description of the issue
 - steps to reproduce it
 - impact assessment
 - any suggested remediation
 
-You should receive an initial response within 7 days.
-
 ## Sensitive Areas
 
-Please be especially careful with reports involving:
+Reports are especially helpful when they cover:
 
 - auth token storage or swapping
 - profile isolation boundaries

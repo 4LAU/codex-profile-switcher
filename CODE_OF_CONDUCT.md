@@ -1,14 +1,14 @@
 # Code of Conduct
 
-This project aims to be straightforward, respectful, and useful to contributors and users.
+Be respectful. Be clear. Keep the focus on the work.
 
-## Expected Behavior
+## What This Means
 
 - Be respectful and constructive.
-- Assume good intent, but be clear and specific in technical disagreement.
-- Focus on improving the software, documentation, and contributor experience.
+- Be specific when you disagree.
+- Focus on improving the code, docs, and issue discussion.
 
-## Unacceptable Behavior
+## What Is Not OK
 
 - Harassment, hate speech, threats, or personal attacks
 - Doxxing or sharing private information without consent
@@ -16,6 +16,8 @@ This project aims to be straightforward, respectful, and useful to contributors 
 
 ## Enforcement
 
-The maintainer may remove comments, close discussions, reject contributions, or block participants who violate these standards.
+The maintainer may remove comments, close discussions, reject contributions, or
+block participants who violate these standards.
 
-For conduct concerns, contact the maintainer privately through GitHub instead of opening a public issue.
+If you need to report a conduct issue, contact the maintainer privately through
+GitHub instead of opening a public issue.

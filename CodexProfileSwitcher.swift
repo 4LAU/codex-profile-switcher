@@ -7,7 +7,7 @@ import SwiftUI
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
     static let version = "0.1.0"
-    static let issueURL = URL(string: "https://github.com/aaronlau/codex-profile-switcher/issues/new")!
+    static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
 // MARK: - Logging (adapted from CodexBar)
