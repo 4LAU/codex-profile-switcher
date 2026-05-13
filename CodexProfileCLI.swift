@@ -28,7 +28,9 @@ private struct CLIProfileConfig: Codable {
 enum CodexProfileCLI {
     private static let program = URL(fileURLWithPath: CommandLine.arguments.first ?? "codex-profile").lastPathComponent
     private static let fileManager = FileManager.default
-    private static let vault = KeychainAuthVault()
+    private static let keychainService = Self.environment("CODEX_PROFILE_KEYCHAIN_SERVICE")
+        ?? KeychainAuthVault.defaultService
+    private static let vault = Self.makeVault()
     private static let storageVersion = 2
 
     static func main() {
@@ -169,7 +171,7 @@ enum CodexProfileCLI {
             return
         }
         for profile in profiles {
-            print("  \(profile) -> keychain://\(KeychainAuthVault.defaultService)/\(profile)")
+            print("  \(profile) -> \(self.vaultLocation(profile: profile))")
         }
     }
 
@@ -178,7 +180,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) path <profile>")
         }
         try self.validateProfile(profile)
-        print("keychain://\(KeychainAuthVault.defaultService)/\(profile)")
+        print(self.vaultLocation(profile: profile))
     }
 
     private static func commandDoctor() throws {
@@ -335,7 +337,10 @@ enum CodexProfileCLI {
     }
 
     private static func codexDesktopRunning() -> Bool {
-        self.runAndWait("/usr/bin/pgrep", arguments: ["-x", "Codex"], quiet: true) == 0
+        if self.environment("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
+            return false
+        }
+        return self.runAndWait("/usr/bin/pgrep", arguments: ["-x", "Codex"], quiet: true) == 0
             || self.runAndWait("/usr/bin/pgrep", arguments: ["-f", "\(self.codexBundledCLI()) app-server"], quiet: true) == 0
     }
 
@@ -445,7 +450,7 @@ enum CodexProfileCLI {
     }
 
     private static func effectivePATH() -> String {
-        let home = self.fileManager.homeDirectoryForCurrentUser.path
+        let home = self.userHome().path
         let chunks = [
             self.environment("PATH"),
             "\(home)/.local/bin",
@@ -478,11 +483,11 @@ enum CodexProfileCLI {
     }
 
     private static func switcherHome() -> URL {
-        self.fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex-switcher", isDirectory: true)
+        self.userHome().appendingPathComponent(".codex-switcher", isDirectory: true)
     }
 
     private static func liveCodexHome() -> URL {
-        self.fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        self.userHome().appendingPathComponent(".codex", isDirectory: true)
     }
 
     private static func configPath() -> URL {
@@ -499,6 +504,33 @@ enum CodexProfileCLI {
 
     private static func environment(_ key: String) -> String? {
         ProcessInfo.processInfo.environment[key]
+    }
+
+    private static func makeVault() -> AuthVault {
+        if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
+            return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        return KeychainAuthVault(service: self.keychainService)
+    }
+
+    private static func vaultLocation(profile: String) -> String {
+        if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
+            return URL(fileURLWithPath: path)
+                .appendingPathComponent("\(profile).json")
+                .standardizedFileURL
+                .path
+        }
+        return "keychain://\(self.keychainService)/\(profile)"
+    }
+
+    private static func userHome() -> URL {
+        if let path = self.environment("CODEX_PROFILE_HOME"), !path.isEmpty {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        if let path = self.environment("CODEX_PROFILE_TEST_HOME"), !path.isEmpty {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        return self.fileManager.homeDirectoryForCurrentUser
     }
 
     private static func note(_ text: String) {

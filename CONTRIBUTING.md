@@ -23,6 +23,12 @@ make test-unit
 make check
 ```
 
+The integration tests are hermetic: they use a temporary home directory, fake
+Codex binaries, and a file-backed auth vault. Do not add automated tests that
+read or write the real macOS Keychain. Real Keychain checks should stay manual
+and use a stable signed build, because rebuilding ad-hoc binaries can make
+macOS ask for Keychain access again.
+
 Run:
 
 ```bash

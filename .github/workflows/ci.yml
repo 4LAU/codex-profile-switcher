@@ -23,8 +23,8 @@ jobs:
           swift --version
           xcodebuild -version
 
-      - name: Unit tests
-        run: make test-unit
+      - name: Tests
+        run: make test
 
       - name: Build
         run: make build BUILD_OUT=/tmp/codex-profile-switcher-build-check

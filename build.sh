@@ -14,6 +14,7 @@ HELPER_SOURCES=(
   "$SCRIPT_DIR/AuthBlob.swift"
   "$SCRIPT_DIR/AuthVault.swift"
   "$SCRIPT_DIR/KeychainAuthVault.swift"
+  "$SCRIPT_DIR/FileAuthVault.swift"
 )
 ICON_SRC="$SCRIPT_DIR/assets/codex-profile-switcher-menu-icon.png"
 ICON_EMPTY_SRC="$SCRIPT_DIR/assets/codex-profile-switcher-menu-icon-empty.png"

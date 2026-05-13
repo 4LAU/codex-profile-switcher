@@ -7,17 +7,12 @@ BUILD_OUT ?= /tmp/codex-profile-switcher-build-check
 build:
 	./build.sh "$(BUILD_OUT)"
 
-test: test-unit
+test: test-unit test-integration
 
 test-unit:
 	./Tests/run-swift-tests.sh
 
 test-integration:
-	@if [[ -x ./Tests/run-integration-tests.sh ]]; then \
-		./Tests/run-integration-tests.sh; \
-	else \
-		echo "No integration test runner exists yet."; \
-		echo "Add ./Tests/run-integration-tests.sh when helper integration tests are Keychain-safe."; \
-	fi
+	./Tests/run-integration-tests.sh
 
 check: test build

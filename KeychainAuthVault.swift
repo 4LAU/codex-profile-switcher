@@ -12,7 +12,7 @@ struct KeychainAuthVault: AuthVault {
 
     func listProfileIDs() throws -> [String] {
         var result: CFTypeRef?
-        let status = self.copyMatching(self.listQuery(useDataProtectionKeychain: true), result: &result)
+        let status = SecItemCopyMatching(self.listQuery() as CFDictionary, &result)
 
         if status == errSecItemNotFound {
             return []
@@ -42,8 +42,7 @@ struct KeychainAuthVault: AuthVault {
 
     func loadAuthBlob(profileID: String) throws -> Data? {
         var result: CFTypeRef?
-        let status = self.copyMatching(self.loadQuery(profileID: profileID, useDataProtectionKeychain: true),
-                                       result: &result)
+        let status = SecItemCopyMatching(self.loadQuery(profileID: profileID) as CFDictionary, &result)
 
         if status == errSecItemNotFound {
             return nil
@@ -65,29 +64,25 @@ struct KeychainAuthVault: AuthVault {
     }
 
     func saveAuthBlob(_ data: Data, profileID: String) throws {
-        let addStatus = self.addItem(self.itemAttributes(
-            data: data,
-            profileID: profileID,
-            useDataProtectionKeychain: true))
+        let attributes = self.itemAttributes(data: data, profileID: profileID)
+        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
 
         if addStatus == errSecSuccess {
             return
         }
 
         if addStatus == errSecDuplicateItem {
-            let update: [CFString: Any] = [
-                kSecAttrLabel: self.label(profileID: profileID),
-                kSecValueData: data,
-            ]
-            let updateStatus = self.updateItem(
-                self.itemQuery(profileID: profileID, useDataProtectionKeychain: true),
-                update: update)
+            let updateStatus = self.updateExistingItem(data: data, profileID: profileID)
+            if updateStatus == errSecSuccess {
+                return
+            }
 
-            guard updateStatus == errSecSuccess else {
+            let recreateStatus = self.recreateItem(attributes, profileID: profileID)
+            guard recreateStatus == errSecSuccess else {
                 throw KeychainAuthVaultError.operationFailed(
-                    operation: "update auth blob",
+                    operation: "repair auth blob access",
                     profileID: profileID,
-                    status: updateStatus
+                    status: recreateStatus
                 )
             }
             return
@@ -101,7 +96,7 @@ struct KeychainAuthVault: AuthVault {
     }
 
     func deleteAuthBlob(profileID: String) throws {
-        let status = self.deleteItem(self.itemQuery(profileID: profileID, useDataProtectionKeychain: true))
+        let status = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
 
         if status == errSecSuccess || status == errSecItemNotFound {
             return
@@ -115,12 +110,12 @@ struct KeychainAuthVault: AuthVault {
     }
 
     func hasAuthBlob(profileID: String) throws -> Bool {
-        var query = self.itemQuery(profileID: profileID, useDataProtectionKeychain: true)
+        var query = self.itemQuery(profileID: profileID)
         query[kSecReturnData] = kCFBooleanFalse
         query[kSecReturnAttributes] = kCFBooleanFalse
         query[kSecMatchLimit] = kSecMatchLimitOne
 
-        let status = self.copyMatching(query, result: nil)
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
 
         if status == errSecSuccess {
             return true
@@ -137,43 +132,41 @@ struct KeychainAuthVault: AuthVault {
         )
     }
 
-    private func listQuery(useDataProtectionKeychain: Bool) -> [CFString: Any] {
-        var query = self.baseServiceQuery(useDataProtectionKeychain: useDataProtectionKeychain)
+    private func listQuery() -> [CFString: Any] {
+        var query = self.baseServiceQuery()
         query[kSecReturnAttributes] = kCFBooleanTrue
         query[kSecMatchLimit] = kSecMatchLimitAll
         return query
     }
 
-    private func loadQuery(profileID: String, useDataProtectionKeychain: Bool) -> [CFString: Any] {
-        var query = self.itemQuery(profileID: profileID, useDataProtectionKeychain: useDataProtectionKeychain)
+    private func loadQuery(profileID: String) -> [CFString: Any] {
+        var query = self.itemQuery(profileID: profileID)
         query[kSecReturnData] = kCFBooleanTrue
         query[kSecMatchLimit] = kSecMatchLimitOne
         return query
     }
 
-    private func baseServiceQuery(useDataProtectionKeychain: Bool) -> [CFString: Any] {
-        var query: [CFString: Any] = [
+    private func baseServiceQuery() -> [CFString: Any] {
+        [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: self.service,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
         ]
-        if useDataProtectionKeychain {
-            self.addDataProtectionKeychainAttribute(to: &query)
-        }
-        return query
     }
 
-    private func itemQuery(profileID: String, useDataProtectionKeychain: Bool) -> [CFString: Any] {
-        var query = self.baseServiceQuery(useDataProtectionKeychain: useDataProtectionKeychain)
+    private func itemQuery(profileID: String) -> [CFString: Any] {
+        var query = self.baseServiceQuery()
         query[kSecAttrAccount] = profileID
         return query
     }
 
-    private func itemAttributes(data: Data, profileID: String, useDataProtectionKeychain: Bool) -> [CFString: Any] {
-        var attributes = self.itemQuery(
-            profileID: profileID,
-            useDataProtectionKeychain: useDataProtectionKeychain)
+    private func itemAttributes(data: Data, profileID: String) -> [CFString: Any] {
+        var attributes = self.itemQuery(profileID: profileID)
         attributes[kSecAttrLabel] = self.label(profileID: profileID)
+        attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        if let access = self.authAccessControl() {
+            attributes[kSecAttrAccess] = access
+        }
         attributes[kSecValueData] = data
         return attributes
     }
@@ -182,53 +175,96 @@ struct KeychainAuthVault: AuthVault {
         "Codex Profile Switcher: \(profileID)"
     }
 
-    private func addDataProtectionKeychainAttribute(to query: inout [CFString: Any]) {
-        if #available(macOS 10.15, *) {
-            query[kSecUseDataProtectionKeychain] = kCFBooleanTrue as Any
+    private func authAccessControl() -> SecAccess? {
+        // These legacy ACL APIs are still the practical way to let both the app
+        // and helper access one login-keychain item without repeated prompts.
+        // Keep automated tests on FileAuthVault so CI never exercises them.
+        let trustedPaths = self.trustedApplicationPaths()
+        guard !trustedPaths.isEmpty else { return nil }
+
+        var trustedApplications: [SecTrustedApplication] = []
+        for path in trustedPaths {
+            var application: SecTrustedApplication?
+            let status = path.withCString { cPath in
+                SecTrustedApplicationCreateFromPath(cPath, &application)
+            }
+            if status == errSecSuccess, let application {
+                trustedApplications.append(application)
+            }
         }
+        guard !trustedApplications.isEmpty else { return nil }
+
+        var access: SecAccess?
+        let status = SecAccessCreate("Codex Profile Switcher Auth" as CFString,
+                                     trustedApplications as CFArray,
+                                     &access)
+        return status == errSecSuccess ? access : nil
     }
 
-    private func copyMatching(_ query: [CFString: Any], result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
-        let status = SecItemCopyMatching(query as CFDictionary, result)
-        guard (status == errSecMissingEntitlement || status == errSecItemNotFound),
-              let fallback = self.withoutDataProtectionKeychain(query) else {
-            return status
+    private func updateExistingItem(data: Data, profileID: String) -> OSStatus {
+        var update: [CFString: Any] = [
+            kSecAttrLabel: self.label(profileID: profileID),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData: data,
+        ]
+        if let access = self.authAccessControl() {
+            update[kSecAttrAccess] = access
         }
-        return SecItemCopyMatching(fallback as CFDictionary, result)
+
+        return self.updateItem(self.itemQuery(profileID: profileID), update: update)
     }
 
-    private func addItem(_ attributes: [CFString: Any]) -> OSStatus {
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        guard status == errSecMissingEntitlement,
-              let fallback = self.withoutDataProtectionKeychain(attributes) else {
-            return status
+    private func recreateItem(_ attributes: [CFString: Any], profileID: String) -> OSStatus {
+        let query = self.itemQuery(profileID: profileID)
+        let deleteStatus = SecItemDelete(query as CFDictionary)
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+            return deleteStatus
         }
-        return SecItemAdd(fallback as CFDictionary, nil)
+        return SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    private func trustedApplicationPaths(
+        executableURL: URL? = Bundle.main.executableURL,
+        bundleURL: URL = Bundle.main.bundleURL
+    ) -> [String] {
+        var paths: [String] = []
+        func append(_ path: String) {
+            guard !path.isEmpty,
+                  FileManager.default.fileExists(atPath: path),
+                  !paths.contains(path) else { return }
+            paths.append(path)
+        }
+
+        if let appBundle = self.appBundleURL(containing: bundleURL)
+            ?? executableURL.flatMap(self.appBundleURL(containing:)) {
+            append(appBundle.path)
+            append(appBundle.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher").path)
+            append(appBundle.appendingPathComponent("Contents/Helpers/codex-profile").path)
+        }
+
+        if let executableURL {
+            append(executableURL.path)
+            let siblingName = executableURL.lastPathComponent == "codex-profile"
+                ? "codex-profile-switcher"
+                : "codex-profile"
+            append(executableURL.deletingLastPathComponent().appendingPathComponent(siblingName).path)
+        }
+        return paths
+    }
+
+    private func appBundleURL(containing url: URL) -> URL? {
+        var current = url.standardizedFileURL
+        while current.path != "/" {
+            if current.pathExtension == "app" {
+                return current
+            }
+            current.deleteLastPathComponent()
+        }
+        return nil
     }
 
     private func updateItem(_ query: [CFString: Any], update: [CFString: Any]) -> OSStatus {
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        guard (status == errSecMissingEntitlement || status == errSecItemNotFound),
-              let fallback = self.withoutDataProtectionKeychain(query) else {
-            return status
-        }
-        return SecItemUpdate(fallback as CFDictionary, update as CFDictionary)
-    }
-
-    private func deleteItem(_ query: [CFString: Any]) -> OSStatus {
-        let status = SecItemDelete(query as CFDictionary)
-        guard (status == errSecMissingEntitlement || status == errSecItemNotFound),
-              let fallback = self.withoutDataProtectionKeychain(query) else {
-            return status
-        }
-        return SecItemDelete(fallback as CFDictionary)
-    }
-
-    private func withoutDataProtectionKeychain(_ query: [CFString: Any]) -> [CFString: Any]? {
-        guard query[kSecUseDataProtectionKeychain] != nil else { return nil }
-        var fallback = query
-        fallback.removeValue(forKey: kSecUseDataProtectionKeychain)
-        return fallback
+        SecItemUpdate(query as CFDictionary, update as CFDictionary)
     }
 }
 
