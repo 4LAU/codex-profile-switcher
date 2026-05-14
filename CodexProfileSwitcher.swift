@@ -141,10 +141,14 @@ enum AppLogger {
         }
     }
 
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     private static func timestamp() -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: Date())
+        return timestampFormatter.string(from: Date())
     }
 }
 
@@ -283,13 +287,22 @@ private func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String
     return nil
 }
 
+private let iso8601WithFractional: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+
+private let iso8601Plain: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
 private func parseISO8601Date(_ raw: Any?) -> Date? {
     guard let value = raw as? String, !value.isEmpty else { return nil }
-    let fmt = ISO8601DateFormatter()
-    fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = fmt.date(from: value) { return d }
-    fmt.formatOptions = [.withInternetDateTime]
-    return fmt.date(from: value)
+    if let d = iso8601WithFractional.date(from: value) { return d }
+    return iso8601Plain.date(from: value)
 }
 
 private func shortIdentifier(_ value: String, head: Int = 10, tail: Int = 6) -> String {
@@ -1060,6 +1073,7 @@ enum AuthRefresher {
     ) async throws -> AuthCredentials {
         let creds = try AuthCredentialLoader.load(from: authData)
 
+        // Skip refresh for the active profile — Codex CLI manages its own auth.json at runtime.
         guard profileId != activeProfileId else { return creds }
         guard creds.needsRefresh else { return creds }
         guard !creds.refreshToken.isEmpty else { return creds }
@@ -1420,6 +1434,7 @@ private final class CodexRPCClient {
     private let initializeTimeoutSeconds: TimeInterval
     private let requestTimeoutSeconds: TimeInterval
     private var nextID = 1
+    private var stdoutLineIterator: AsyncStream<Data>.Iterator
 
     init(
         executablePath: String,
@@ -1433,6 +1448,7 @@ private final class CodexRPCClient {
         var continuation: AsyncStream<Data>.Continuation!
         self.stdoutLineStream = AsyncStream<Data> { continuation = $0 }
         self.stdoutLineContinuation = continuation
+        self.stdoutLineIterator = self.stdoutLineStream.makeAsyncIterator()
 
         self.process.executableURL = URL(fileURLWithPath: executablePath)
         self.process.arguments = ["-s", "read-only", "-a", "untrusted", "app-server"]
@@ -1572,7 +1588,7 @@ private final class CodexRPCClient {
     }
 
     private func readNextMessage() async throws -> [String: Any] {
-        for await lineData in self.stdoutLineStream {
+        while let lineData = await self.stdoutLineIterator.next() {
             if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
                 return json
             }
@@ -2498,10 +2514,17 @@ enum CodexBridge {
         proc.arguments = arguments
         proc.standardOutput = pipe
         proc.standardError = pipe
+
+        // Drain the pipe on a background thread so all output is captured
+        // before the terminationHandler consumes it. readDataToEndOfFile()
+        // blocks until the write-end closes (after the process exits), so
+        // the group is guaranteed to be fulfilled when the handler fires.
+        let outputGroup = DispatchGroup()
+        var capturedOutput = ""
+
         proc.terminationHandler = { p in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            outputGroup.wait()
+            let output = capturedOutput
 
             if p.terminationStatus == 0 {
                 AppLogger.info("Helper command succeeded",
@@ -2520,6 +2543,15 @@ enum CodexBridge {
 
         do {
             try proc.run()
+            // Start background pipe read only after the process launches
+            // successfully, so readDataToEndOfFile() won't block forever.
+            outputGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                capturedOutput = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                outputGroup.leave()
+            }
         } catch {
             AppLogger.error("Failed to launch helper command",
                             metadata: [
@@ -2582,6 +2614,7 @@ enum CodexBridge {
         profileId: String,
         completion: @escaping (Result<Void, CodexBridgeError>) -> Void
     ) {
+        dispatchPrecondition(condition: .onQueue(.main))
         let arguments = ["login", profileId]
         AppLogger.info("Running helper command",
                        metadata: ["path": path, "arguments": arguments.joined(separator: " ")])
@@ -2596,10 +2629,14 @@ enum CodexBridge {
         let active = ActiveLogin(process: proc)
         Self.activeLogins[profileId] = active
 
+        // Drain the pipe on a background thread so all output is captured
+        // before the terminationHandler consumes it.
+        let outputGroup = DispatchGroup()
+        var capturedOutput = ""
+
         proc.terminationHandler = { p in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            outputGroup.wait()
+            let output = capturedOutput
 
             DispatchQueue.main.async {
                 active.timeoutWorkItem?.cancel()
@@ -2639,6 +2676,15 @@ enum CodexBridge {
 
         do {
             try proc.run()
+            // Start background pipe read only after the process launches
+            // successfully, so readDataToEndOfFile() won't block forever.
+            outputGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                capturedOutput = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                outputGroup.leave()
+            }
             let timeout = Self.loginTimeoutSeconds()
             let timeoutWorkItem = DispatchWorkItem {
                 DispatchQueue.main.async {

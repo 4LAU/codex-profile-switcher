@@ -35,11 +35,16 @@ struct FileAuthVault: AuthVault {
         let url = self.authURL(profileID: profileID)
         let temp = self.root.appendingPathComponent(".\(profileID).json.tmp-\(UUID().uuidString)")
         try data.write(to: temp, options: .withoutOverwriting)
-        try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
-        if self.fileManager.fileExists(atPath: url.path) {
-            _ = try self.fileManager.replaceItemAt(url, withItemAt: temp)
-        } else {
-            try self.fileManager.moveItem(at: temp, to: url)
+        do {
+            try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
+            if self.fileManager.fileExists(atPath: url.path) {
+                _ = try self.fileManager.replaceItemAt(url, withItemAt: temp)
+            } else {
+                try self.fileManager.moveItem(at: temp, to: url)
+            }
+        } catch {
+            try? self.fileManager.removeItem(at: temp)
+            throw error
         }
     }
 

@@ -117,7 +117,7 @@ struct ProfileStoreEnvironmentTests {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let version = json?["authStorageVersion"] as? Int
 
-        try envExpect(version != 3, "Failed legacy migration was incorrectly marked as access-repaired")
+        try envExpect(version == nil || version == 0, "Failed legacy migration was incorrectly marked as access-repaired")
         try envExpect(
             FileManager.default.fileExists(atPath: legacyAuth.path),
             "Failed legacy migration removed the legacy auth file")

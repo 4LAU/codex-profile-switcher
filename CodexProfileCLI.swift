@@ -119,7 +119,8 @@ enum CodexProfileCLI {
         try self.ensurePrivateDir(self.liveCodexHome())
 
         var outgoingProfile: String?
-        if let liveData = try? Data(contentsOf: self.liveAuthPath()) {
+        let outgoingLiveData = try? Data(contentsOf: self.liveAuthPath())
+        if let liveData = outgoingLiveData {
             let matches = try self.matchingProfiles(for: liveData)
             if matches.count == 1 {
                 outgoingProfile = matches[0]
@@ -141,7 +142,7 @@ enum CodexProfileCLI {
 
         try self.quitCodexApp()
         if let outgoingProfile,
-           let liveData = try? Data(contentsOf: self.liveAuthPath()) {
+           let liveData = outgoingLiveData {
             try self.vault.saveAuthBlob(liveData, profileID: outgoingProfile)
         }
 
@@ -341,6 +342,7 @@ enum CodexProfileCLI {
         process.standardOutput = handle
         process.standardError = handle
         try process.run()
+        try? handle.close()
     }
 
     private static func quitCodexApp() throws {

@@ -161,7 +161,7 @@ enum AuthBlob {
     private static func nonEmptyString(_ raw: Any?) -> String? {
         guard let value = raw as? String else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : value
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
