@@ -13,10 +13,11 @@ echo ""
 "$ROOT_DIR/Scripts/fetch_sparkle.sh"
 SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
 
-if "$SPARKLE_DIR/bin/generate_keys" -p >/dev/null 2>&1; then
+pubkey="$("$SPARKLE_DIR/bin/generate_keys" -p 2>/dev/null)" || true
+if [[ -n "$pubkey" ]]; then
   echo "EdDSA key already exists in Keychain. Public key:"
   echo ""
-  echo "  $("$SPARKLE_DIR/bin/generate_keys" -p)"
+  echo "  $pubkey"
   echo ""
   echo "To rotate the key (breaks existing installs), delete the Keychain item"
   echo "at service 'https://sparkle-project.org' account 'ed25519' first."
