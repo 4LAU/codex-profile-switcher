@@ -26,7 +26,7 @@ Scripts/setup_sparkle_keys.sh
 The private key is stored in your macOS Keychain. Export the public key to your shell profile:
 
 ```bash
-export SPARKLE_ED_PUBLIC_KEY="$(./build/sparkle/bin/generate_keys -p)"
+export SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)"
 ```
 
 This key is required for release builds — `package_app.sh` will fail if `SPARKLE_ED_PUBLIC_KEY` is unset when `CODEX_PROFILE_REQUIRE_SIGNING=1`.
@@ -53,7 +53,7 @@ NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher
 ```bash
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher \
-SPARKLE_ED_PUBLIC_KEY="$(./build/sparkle/bin/generate_keys -p)" \
+SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
 Scripts/release_app.sh
 ```
 
@@ -74,6 +74,12 @@ The output is written under `.build/release/`.
 
 After the release, commit and push the updated `appcast.xml` so the feed URL
 serves the new version:
+
+```bash
+git add appcast.xml
+git commit -m "docs: update appcast for v<version>"
+git push
+```
 
 The release also generates a Homebrew cask at
 `.build/release/codex-profile-switcher.rb`. Publish the DMG to a GitHub release

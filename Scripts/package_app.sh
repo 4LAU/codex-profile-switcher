@@ -65,7 +65,8 @@ SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
 
 if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
   if [[ "${CODEX_PROFILE_REQUIRE_SIGNING:-0}" == "1" ]]; then
-    fail "SPARKLE_ED_PUBLIC_KEY is required for signed release builds."
+    printf 'ERROR: SPARKLE_ED_PUBLIC_KEY is required for signed release builds.\n' >&2
+    exit 1
   fi
   log "WARN: SPARKLE_ED_PUBLIC_KEY is not set — Sparkle update verification will not work."
 fi
