@@ -14,7 +14,7 @@ echo ""
 SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
 
 pubkey="$("$SPARKLE_DIR/bin/generate_keys" -p 2>/dev/null)" || true
-if [[ -n "$pubkey" ]]; then
+if [[ -n "$pubkey" && "$pubkey" != *"ERROR"* ]]; then
   echo "EdDSA key already exists in Keychain. Public key:"
   echo ""
   echo "  $pubkey"
