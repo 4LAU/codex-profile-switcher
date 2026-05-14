@@ -72,7 +72,7 @@ enum AuthBlob {
         json["tokens"] = updatedTokens(
             preserving: json["tokens"] as? [String: Any],
             with: credentials)
-        json["last_refresh"] = ISO8601DateFormatter().string(from: lastRefresh)
+        json["last_refresh"] = iso8601Fractional.string(from: lastRefresh)
 
         guard isPlausibleAuthBlob(json) else {
             throw AuthError.missingTokens
@@ -164,13 +164,22 @@ enum AuthBlob {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static let iso8601Fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let iso8601Plain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
         guard let value = nonEmptyString(raw) else { return nil }
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fmt.date(from: value) { return date }
-        fmt.formatOptions = [.withInternetDateTime]
-        return fmt.date(from: value)
+        if let date = iso8601Fractional.date(from: value) { return date }
+        return iso8601Plain.date(from: value)
     }
 
     private static func authIdentity(from json: [String: Any]) -> [String: Any]? {

@@ -2460,6 +2460,25 @@ enum CodexBridge {
     private static var activeLogins: [String: ActiveLogin] = [:]
     private static let staleLoginRetryInterval: TimeInterval = 5
 
+    private static func pipeDrain(for pipe: Pipe) -> (start: @Sendable () -> Void, awaitOutput: @Sendable () -> String) {
+        let group = DispatchGroup()
+        nonisolated(unsafe) var captured = ""
+        let start: @Sendable () -> Void = {
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                captured = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                group.leave()
+            }
+        }
+        let awaitOutput: @Sendable () -> String = {
+            group.wait()
+            return captured
+        }
+        return (start, awaitOutput)
+    }
+
     private static func codexProfilePath() -> String? {
         let candidates: [String?] = [
             Bundle.main.bundleURL.pathExtension == "app"
@@ -2515,16 +2534,10 @@ enum CodexBridge {
         proc.standardOutput = pipe
         proc.standardError = pipe
 
-        // Drain the pipe on a background thread so all output is captured
-        // before the terminationHandler consumes it. readDataToEndOfFile()
-        // blocks until the write-end closes (after the process exits), so
-        // the group is guaranteed to be fulfilled when the handler fires.
-        let outputGroup = DispatchGroup()
-        var capturedOutput = ""
+        let drain = pipeDrain(for: pipe)
 
         proc.terminationHandler = { p in
-            outputGroup.wait()
-            let output = capturedOutput
+            let output = drain.awaitOutput()
 
             if p.terminationStatus == 0 {
                 AppLogger.info("Helper command succeeded",
@@ -2543,15 +2556,7 @@ enum CodexBridge {
 
         do {
             try proc.run()
-            // Start background pipe read only after the process launches
-            // successfully, so readDataToEndOfFile() won't block forever.
-            outputGroup.enter()
-            DispatchQueue.global(qos: .utility).async {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                capturedOutput = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                outputGroup.leave()
-            }
+            drain.start()
         } catch {
             AppLogger.error("Failed to launch helper command",
                             metadata: [
@@ -2629,14 +2634,10 @@ enum CodexBridge {
         let active = ActiveLogin(process: proc)
         Self.activeLogins[profileId] = active
 
-        // Drain the pipe on a background thread so all output is captured
-        // before the terminationHandler consumes it.
-        let outputGroup = DispatchGroup()
-        var capturedOutput = ""
+        let drain = pipeDrain(for: pipe)
 
         proc.terminationHandler = { p in
-            outputGroup.wait()
-            let output = capturedOutput
+            let output = drain.awaitOutput()
 
             DispatchQueue.main.async {
                 active.timeoutWorkItem?.cancel()
@@ -2676,15 +2677,7 @@ enum CodexBridge {
 
         do {
             try proc.run()
-            // Start background pipe read only after the process launches
-            // successfully, so readDataToEndOfFile() won't block forever.
-            outputGroup.enter()
-            DispatchQueue.global(qos: .utility).async {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                capturedOutput = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                outputGroup.leave()
-            }
+            drain.start()
             let timeout = Self.loginTimeoutSeconds()
             let timeoutWorkItem = DispatchWorkItem {
                 DispatchQueue.main.async {
