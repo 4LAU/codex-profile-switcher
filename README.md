@@ -1,13 +1,13 @@
 # codex-profile-switcher
 
-A macOS menu bar app for switching between OpenAI Codex accounts and checking usage without leaving the menu bar.
+Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and shows per-profile usage. Switch profiles without logging in again, track 5-hour and weekly limits with reset countdowns. Auth stored in macOS Keychain. No Dock icon, no main window, just a menu bar dropdown.
 
 [![Latest release](https://img.shields.io/github/v/release/4LAU/codex-profile-switcher?style=flat-square&color=0a0a0c)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-0a0a0c?style=flat-square)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
 [![Homebrew](https://img.shields.io/badge/brew-4lau%2Ftap%2Fcodex--profile--switcher-orange?style=flat-square)](https://github.com/4LAU/homebrew-tap)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6e5aff?style=flat-square)](LICENSE)
 
-<img src="assets/screenshot-menu.png" width="300" alt="Codex Profile Switcher menu bar dropdown showing 12 profiles with usage bars">
+<img src="assets/screenshot-menu.png" width="300" alt="Codex Profile Switcher menu bar dropdown showing profiles with usage bars">
 
 ## Features
 
@@ -15,17 +15,18 @@ A macOS menu bar app for switching between OpenAI Codex accounts and checking us
 - See 5-hour and weekly usage for each saved profile
 - Show credit balance when Codex exposes it
 - Switch accounts without logging in every time
-- Refresh inactive OAuth profiles so usage data stays usable
+- Refresh inactive OAuth profiles so usage data stays current
 - Keep the last known usage snapshot in the menu
 - Launch at login
 - Copy redacted debug info, open the log file, and jump to the GitHub issue form
 
-## Requirements
+## Privacy
 
-- macOS 14+
-- [Codex desktop app](https://openai.com/codex/) installed
+The app reads and writes macOS Keychain items it creates, `~/.codex/auth.json`, and its own config at `~/.codex-switcher/config.json`. It does not read browser data, does not access files outside those paths, and does not send telemetry or phone home. All data stays on your machine.
 
 ## Install
+
+Requires macOS 14+ and the [Codex desktop app](https://openai.com/codex/).
 
 ### GitHub Releases
 
@@ -70,50 +71,28 @@ Scripts/package_app.sh
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID)" Scripts/package_app.sh
 ```
 
-The bundle is written to `CodexProfileSwitcher.app`, with the app executable in
-`Contents/MacOS` and the `codex-profile` helper in `Contents/Helpers`. When
-`APP_IDENTITY` is unset or unavailable, the package script falls back to ad-hoc
-signing.
-
 Maintainer releases should use the DMG release flow in [docs/RELEASING.md](docs/RELEASING.md).
-That path requires Developer ID signing and Apple notarization, and it generates
-the Homebrew cask file for a tap.
 
-## Setting Up Profiles
+## Getting Started
 
-Each profile needs one login before the app can switch to it. Use the bundled
-`codex-profile` helper:
+Each profile needs one login before the app can switch to it.
+
+Open Settings from the menu bar icon, select a profile, and click **Set Up**.
+This opens Codex's normal browser login flow and saves the resulting auth in
+macOS Keychain. After that, switching does not require logging in again.
+
+You can also set up profiles from the terminal:
 
 ```bash
 codex-profile login 1
 codex-profile login 2
-# add more profiles as needed
 ```
-
-The helper runs Codex's normal browser login flow in a temporary `CODEX_HOME`
-and saves the resulting auth blob in macOS Keychain. After that, switching does
-not require logging in again.
-
-If you installed from the DMG manually and `codex-profile` is not on your PATH,
-you can also start login from the menu bar app by selecting a profile that is
-not set up yet.
-
-If your workspace enables Codex device code authentication, you can still pass
-device-auth options through the helper manually. The app uses the normal CLI login
-flow because it works across workspaces without admin changes.
 
 ## How It Works
 
 Codex Desktop still runs against its normal `~/.codex/` directory. This project
 stores per-profile auth in macOS Keychain and swaps the selected profile into
-`~/.codex/auth.json` when you switch. Existing saved auth from
-`~/.codex-switcher/auth/*.json` is migrated into Keychain on startup and the
-legacy disk auth directory is removed only after successful verification.
-
-Local unsigned builds may trigger a macOS Keychain access prompt when the app or
-helper reads or writes saved profile auth. Public signed releases store items
-with current Keychain accessibility settings and automatically rewrite older
-items that were created with per-binary access rules.
+`~/.codex/auth.json` when you switch.
 
 When you switch profiles, the helper:
 
@@ -122,44 +101,33 @@ When you switch profiles, the helper:
 3. Restores the selected profile's saved auth to `~/.codex/auth.json`
 4. Relaunches Codex normally
 
-For usage data, the app tries the OAuth-backed usage API first. If that fails for
-a profile, it can fall back to `codex app-server` in a temporary profile-scoped
-environment before showing a re-login warning. Inactive OAuth profiles are
-refreshed automatically so saved usage data does not go stale as quickly.
+For usage data, the app tries the OAuth-backed usage API first. If that fails,
+it can fall back to `codex app-server` in a temporary profile-scoped environment.
+Inactive OAuth profiles are refreshed automatically so saved usage data stays
+current.
 
-## Debugging and Bug Reports
+## macOS Permissions
 
-Open `Settings...` → `General` for built-in support tools:
+The app stores auth tokens in macOS Keychain. On signed releases (DMG or Homebrew), macOS asks for Keychain approval once during initial setup. After that, profile switching should not prompt again.
+
+Local unsigned builds may trigger a Keychain prompt each time a different binary reads or writes saved auth. Install the signed release to avoid repeated prompts.
+
+If upgrading from an older unsigned build, run `codex-profile keychain-repair` once to rewrite saved auth with current access settings.
+
+## Troubleshooting
+
+Open `Settings...` > `General` for built-in support tools:
 
 - **Copy Debug Info** copies app state plus recent redacted logs to the clipboard.
 - **Open Log** opens `~/Library/Logs/CodexProfileSwitcher/CodexProfileSwitcher.log`.
 - **Report Bug** opens the GitHub issue form.
 
-The log redacts emails, bearer tokens, cookies, OpenAI API keys, and OAuth token
-fields before writing. From the terminal, `codex-profile doctor` also prints a
-small environment and saved-profile check.
-
-If you used an older build that created Keychain items with per-binary access
-rules, install the signed release and run `codex-profile keychain-repair` once
-to rewrite saved auth with the current Keychain access settings.
-
-For manual Keychain validation of the signed bundle, run
-`Scripts/keychain_signed_smoke.sh`. It uses fake Codex binaries, a temporary
-home, and a disposable Keychain service. It is intentionally not part of
-`make check` because macOS may show interactive Keychain prompts.
-
-For isolated manual runs, both the app and helper honor `CODEX_PROFILE_HOME`
-and `CODEX_PROFILE_KEYCHAIN_SERVICE`.
-
-On a public signed and notarized release, macOS may still ask for Keychain
-approval during initial setup. After approval, normal profile switching should
-not repeatedly ask for your password.
+Logs redact emails, bearer tokens, cookies, API keys, and OAuth fields before writing. From the terminal, `codex-profile doctor` prints a quick environment and saved-profile check.
 
 ## Contributing and Security
 
 - Read [AGENTS.md](AGENTS.md) for project structure, build commands, and contribution guidelines.
 - Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
-- Community expectations are in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Credits
 
