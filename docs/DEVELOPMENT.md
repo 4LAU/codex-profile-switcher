@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - macOS 14+
-- Xcode Command Line Tools (`xcode-select --install`)
+- Xcode.app. The test runner uses SwiftPM and Swift Testing; the scripts set `DEVELOPER_DIR=/Applications/Xcode.app` when available.
 - [Codex Desktop](https://openai.com/codex/) installed (or `CODEX_APP` / `CODEX_CLI` overrides)
 
 ## Build

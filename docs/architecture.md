@@ -20,25 +20,33 @@ macOS Keychain
 
 ## Components
 
-| File | Role |
+| Target or path | Role |
 |---|---|
-| `CodexProfileSwitcher.swift` | SwiftUI menu bar app, usage polling, settings UI |
-| `CodexProfileCLI.swift` | CLI helper for login, logout, switch, diagnostics |
-| `AuthBlob.swift` | Auth token model supporting OAuth and API key flows |
-| `AuthVault.swift` | Protocol for auth storage backends |
-| `KeychainAuthVault.swift` | macOS Keychain implementation |
-| `FileAuthVault.swift` | File-based implementation (tests, migration) |
+| `CodexProfileSwitcherApp` | SwiftUI menu bar app, usage polling, settings UI |
+| `CodexProfileCLI` | CLI helper for login, app switching, status, and diagnostics |
+| `CodexProfileCore/Auth` | Auth token parsing plus Keychain and file-backed vaults |
+| `CodexProfileCore/Profiles` | Shared config, paths, validation, and profile switch transactions |
+| `CodexProfileCore/Usage` | UI-independent usage API, OAuth refresh, Codex CLI resolver, and JSON-RPC fallback |
+| `CodexProfileCore/Support` | Shared low-level helpers such as atomic file writes, redaction, and core log forwarding |
+| `CodexProfileSwitcherApp/AppDelegate.swift` | Menu bar lifecycle, status item ownership, refresh timers, and action dispatch |
+| `CodexProfileSwitcherApp/MenuViews.swift` | Menu card views and usage display helpers |
+| `CodexProfileSwitcherApp/SettingsViews.swift` | Settings window and profile management UI |
 
 ## Profile Switch Flow
 
-1. Quit running Codex instance
-2. Save outgoing profile's live auth back to Keychain
-3. Restore selected profile's auth to `~/.codex/auth.json`
-4. Relaunch Codex
+`ProfileTransactionService` owns the auth transaction used by the helper:
+
+1. Read and classify the current live auth.
+2. Refuse unreadable, unmanaged, or ambiguous live auth.
+3. Quit the running Codex instance at the CLI boundary.
+4. Save outgoing profile auth back to the vault.
+5. Restore selected profile auth to `~/.codex/auth.json`.
+6. Update `~/.codex-switcher/config.json`.
+7. Relaunch Codex.
 
 ## Usage Polling
 
-The app polls the OpenAI usage API for each profile. OAuth profiles are refreshed automatically to keep usage data current. Falls back to `codex app-server` in a temporary environment if the API is unavailable.
+The app coordinates refresh state through an app-local `UsageProvider`. UI-independent clients live in `CodexProfileCore/Usage`: OAuth profiles can refresh their tokens, the direct usage API fetcher reads OpenAI usage data, and the Codex JSON-RPC fallback runs `codex app-server` in a temporary environment when needed.
 
 ## Security
 

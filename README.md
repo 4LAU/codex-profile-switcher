@@ -50,7 +50,7 @@ brew install --cask 4lau/tap/codex-profile-switcher
 
 ### Build from Source
 
-Building from source requires Xcode Command Line Tools (`xcode-select --install`).
+Building from source requires Xcode.app. The test and package scripts use SwiftPM targets under `Sources/` and set `DEVELOPER_DIR=/Applications/Xcode.app` when available.
 
 ```bash
 git clone https://github.com/4LAU/codex-profile-switcher.git
@@ -139,6 +139,7 @@ Logs redact emails, bearer tokens, cookies, API keys, and OAuth fields before wr
 - [SECURITY.md](SECURITY.md) — vulnerability reporting
 - [docs/architecture.md](docs/architecture.md) — system design overview
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — development setup and workflow
+- [docs/repo-boundaries.md](docs/repo-boundaries.md) — source ownership and generated-path boundaries
 - [docs/RELEASING.md](docs/RELEASING.md) — maintainer release process
 
 ## Credits
