@@ -154,13 +154,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>$GIT_COMMIT</string>
   <key>SUFeedURL</key>
   <string>https://raw.githubusercontent.com/4LAU/codex-profile-switcher/main/appcast.xml</string>
-  <key>SUPublicEDKey</key>
-  <string>${SPARKLE_ED_PUBLIC_KEY:-}</string>
   <key>SUEnableAutomaticChecks</key>
   <true/>
 </dict>
 </plist>
 PLIST
+
+if [[ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+  plutil -insert SUPublicEDKey -string "$SPARKLE_ED_PUBLIC_KEY" "$APP_BUNDLE/Contents/Info.plist"
+fi
 
 chmod -R u+w "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"

@@ -13,8 +13,16 @@ echo ""
 "$ROOT_DIR/Scripts/fetch_sparkle.sh"
 SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
 
-# generate_keys stores the private key in the login keychain
-# and prints the public key to stdout
+if "$SPARKLE_DIR/bin/generate_keys" -p >/dev/null 2>&1; then
+  echo "EdDSA key already exists in Keychain. Public key:"
+  echo ""
+  echo "  $("$SPARKLE_DIR/bin/generate_keys" -p)"
+  echo ""
+  echo "To rotate the key (breaks existing installs), delete the Keychain item"
+  echo "at service 'https://sparkle-project.org' account 'ed25519' first."
+  exit 0
+fi
+
 "$SPARKLE_DIR/bin/generate_keys"
 
 echo ""
