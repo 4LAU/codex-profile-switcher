@@ -112,6 +112,7 @@ run_helper() {
 
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_A" "$HELPER" login SmokeA >/dev/null
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_B" "$HELPER" login SmokeB >/dev/null
+run_helper "$HELPER" keychain-repair >/dev/null
 
 cp "$AUTH_A" "$TEST_HOME/.codex/auth.json"
 

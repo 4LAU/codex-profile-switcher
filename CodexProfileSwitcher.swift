@@ -380,6 +380,7 @@ struct SettingsActionError: LocalizedError {
 
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
+    private static let keychainAccessRepairVersion = 3
 
     private let configDir: URL
     private let configURL: URL
@@ -448,6 +449,7 @@ final class ProfileStore {
         }
 
         self.migrateLegacyProfiles()
+        self.repairKeychainAccessIfNeeded()
         self.discoverProfiles()
         self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
         self.refreshStatusesFromStoredAuth()
@@ -807,7 +809,8 @@ final class ProfileStore {
     }
 
     private func migrateLegacyProfiles() {
-        guard self.config.authStorageVersion != Self.keychainAuthStorageVersion else {
+        let currentVersion = self.config.authStorageVersion ?? 0
+        guard currentVersion < Self.keychainAuthStorageVersion else {
             self.cleanupLegacyAuthStoreIfMigrated()
             return
         }
@@ -870,6 +873,25 @@ final class ProfileStore {
         }
     }
 
+    private func repairKeychainAccessIfNeeded() {
+        let currentVersion = self.config.authStorageVersion ?? 0
+        guard currentVersion >= Self.keychainAuthStorageVersion,
+              currentVersion < Self.keychainAccessRepairVersion else { return }
+
+        do {
+            let repaired = try self.authVault.repairStoredAuthAccess()
+            self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            try self.saveConfigThrowing()
+            if repaired > 0 {
+                AppLogger.info("Repaired saved auth Keychain access",
+                               metadata: ["profile_count": "\(repaired)"])
+            }
+        } catch {
+            AppLogger.error("Failed to repair saved auth Keychain access",
+                            metadata: ["error": error.localizedDescription])
+        }
+    }
+
     private func legacyAuthStoreFiles() -> [(String, URL)] {
         guard let urls = try? self.fileManager.contentsOfDirectory(
             at: self.authStoreDir,
@@ -904,7 +926,7 @@ final class ProfileStore {
     }
 
     private func cleanupLegacyAuthStoreIfMigrated() {
-        guard self.config.authStorageVersion == Self.keychainAuthStorageVersion else { return }
+        guard (self.config.authStorageVersion ?? 0) >= Self.keychainAuthStorageVersion else { return }
         guard self.fileManager.fileExists(atPath: self.authStoreDir.path) else { return }
 
         do {

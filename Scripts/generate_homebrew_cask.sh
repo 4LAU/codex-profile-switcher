@@ -37,6 +37,7 @@ cask "$CASK_TOKEN" do
   depends_on macos: ">= :sonoma"
 
   app "CodexProfileSwitcher.app"
+  binary "#{appdir}/CodexProfileSwitcher.app/Contents/Helpers/codex-profile"
 
   zap trash: [
     "~/Library/Logs/CodexProfileSwitcher",

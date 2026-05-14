@@ -16,7 +16,6 @@ A macOS menu bar app for switching between OpenAI Codex accounts and checking us
 ## Requirements
 
 - macOS 14+
-- Xcode Command Line Tools (`xcode-select --install`)
 - [Codex desktop app](https://openai.com/codex/) installed
 
 ## Install
@@ -36,6 +35,8 @@ brew install --cask 4lau/tap/codex-profile-switcher
 ```
 
 ### Build from Source
+
+Building from source requires Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/4LAU/codex-profile-switcher.git
@@ -86,6 +87,10 @@ The helper runs Codex's normal browser login flow in a temporary `CODEX_HOME`
 and saves the resulting auth blob in macOS Keychain. After that, switching does
 not require logging in again.
 
+If you installed from the DMG manually and `codex-profile` is not on your PATH,
+you can also start login from the menu bar app by selecting a profile that is
+not set up yet.
+
 If your workspace enables Codex device code authentication, you can still pass
 device-auth options through the helper manually. The app uses the normal CLI login
 flow because it works across workspaces without admin changes.
@@ -98,12 +103,10 @@ stores per-profile auth in macOS Keychain and swaps the selected profile into
 `~/.codex-switcher/auth/*.json` is migrated into Keychain on startup and the
 legacy disk auth directory is removed only after successful verification.
 
-Local unsigned builds may trigger a macOS Keychain access prompt the first time
-the app or helper reads or writes saved profile auth. Saved auth items are
-created with trusted access for the companion app/helper binaries so normal
-switching should not repeatedly prompt after the initial approval. The app
-attempts to repair older items the next time profile auth is saved, but it will
-preserve the existing Keychain item if macOS refuses the access-control update.
+Local unsigned builds may trigger a macOS Keychain access prompt when the app or
+helper reads or writes saved profile auth. Public signed releases store items
+with current Keychain accessibility settings and automatically rewrite older
+items that were created with per-binary access rules.
 
 When you switch profiles, the helper:
 
@@ -128,6 +131,10 @@ Open `Settings...` → `General` for built-in support tools:
 The log redacts emails, bearer tokens, cookies, OpenAI API keys, and OAuth token
 fields before writing. From the terminal, `codex-profile doctor` also prints a
 small environment and saved-profile check.
+
+If you used an older build that created Keychain items with per-binary access
+rules, install the signed release and run `codex-profile keychain-repair` once
+to rewrite saved auth with the current Keychain access settings.
 
 For manual Keychain validation of the signed bundle, run
 `Scripts/keychain_signed_smoke.sh`. It uses fake Codex binaries, a temporary

@@ -204,12 +204,14 @@ test_switch_uses_active_profile_to_disambiguate_live_auth() {
   save_auth "PreferredB" "$saved_b"
   cp "$live_duplicate" "$TEST_HOME/.codex/auth.json"
   mkdir -p "$TEST_HOME/.codex-switcher"
-  printf '{\n  "activeProfile" : "PreferredClone",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "PreferredA", "label" : "Preferred A"},\n    {"id" : "PreferredClone", "label" : "Preferred Clone"},\n    {"id" : "PreferredB", "label" : "Preferred B"}\n  ]\n}\n' \
+  printf '{\n  "activeProfile" : "PreferredClone",\n  "authStorageVersion" : 3,\n  "profiles" : [\n    {"id" : "PreferredA", "label" : "Preferred A"},\n    {"id" : "PreferredClone", "label" : "Preferred Clone"},\n    {"id" : "PreferredB", "label" : "Preferred B"}\n  ]\n}\n' \
     > "$TEST_HOME/.codex-switcher/config.json"
 
   run_helper app PreferredB "$WORK_DIR" >/dev/null
 
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected profile auth was not restored after disambiguated switch"
+  grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "profile switch downgraded authStorageVersion"
   export_auth "PreferredA" "$exported_a"
   export_auth "PreferredClone" "$exported_clone"
   assert_same_file "$exported_a" "$duplicate_a" "non-active duplicate was overwritten during disambiguated switch"
@@ -335,6 +337,32 @@ test_login_prefers_bundled_codex_over_path() {
   assert_same_file "$exported" "$bundled_auth" "login did not prefer bundled Codex CLI over PATH"
 }
 
+test_keychain_repair_preserves_saved_auth() {
+  reset_home
+  local saved_a="$WORK_DIR/repair-a.json"
+  local saved_b="$WORK_DIR/repair-b.json"
+  local exported_a="$WORK_DIR/exported-repair-a.json"
+  local exported_b="$WORK_DIR/exported-repair-b.json"
+  make_api_auth "$saved_a" "sk-test-repair-a-1111111111" "repair-a"
+  make_api_auth "$saved_b" "sk-test-repair-b-2222222222" "repair-b"
+  save_auth "RepairA" "$saved_a"
+  save_auth "RepairB" "$saved_b"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "RepairA",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "RepairA", "label" : "Repair A"},\n    {"id" : "RepairB", "label" : "Repair B"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+
+  run_helper keychain-repair >"$WORK_DIR/keychain-repair.out"
+
+  grep -Fq "Rewrote 2 saved auth item(s)" "$WORK_DIR/keychain-repair.out" \
+    || fail "keychain-repair did not report rewritten auth items"
+  grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "keychain-repair did not mark authStorageVersion 3"
+  export_auth "RepairA" "$exported_a"
+  export_auth "RepairB" "$exported_b"
+  assert_same_file "$exported_a" "$saved_a" "keychain-repair modified RepairA auth"
+  assert_same_file "$exported_b" "$saved_b" "keychain-repair modified RepairB auth"
+}
+
 test_switch_preserves_outgoing_auth
 test_switch_refuses_unmanaged_live_auth
 test_switch_refuses_ambiguous_live_auth
@@ -344,5 +372,6 @@ test_login_uses_isolated_home_and_preserves_live_auth
 test_login_fails_when_codex_exits_nonzero
 test_login_fails_when_codex_writes_no_auth
 test_login_prefers_bundled_codex_over_path
+test_keychain_repair_preserves_saved_auth
 
 printf 'Integration tests: all tests passed\n'

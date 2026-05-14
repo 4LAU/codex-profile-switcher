@@ -118,6 +118,7 @@ Scripts/keychain_signed_smoke.sh
 Expected behavior:
 
 - macOS may ask for Keychain approval during the initial profile saves.
+- `codex-profile keychain-repair` should complete against the signed helper.
 - Repeat profile switches should complete without repeated prompts after
   approval.
 

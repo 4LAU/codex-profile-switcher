@@ -72,20 +72,32 @@ struct KeychainAuthVault: AuthVault {
         }
 
         if addStatus == errSecDuplicateItem {
-            let updateStatus = self.updateExistingItem(data: data, profileID: profileID)
+            if let existingData = try? self.loadAuthBlob(profileID: profileID) {
+                let replaceStatus = self.replaceExistingItem(
+                    data: data,
+                    profileID: profileID,
+                    rollbackData: existingData
+                )
+                if replaceStatus == errSecSuccess {
+                    return
+                }
+            }
+
+            let updateStatus = self.updateExistingItem(data: data, profileID: profileID, repairAccess: true)
             if updateStatus == errSecSuccess {
                 return
             }
 
-            let recreateStatus = self.recreateItem(attributes, profileID: profileID)
-            guard recreateStatus == errSecSuccess else {
-                throw KeychainAuthVaultError.operationFailed(
-                    operation: "repair auth blob access",
-                    profileID: profileID,
-                    status: recreateStatus
-                )
+            let valueOnlyStatus = self.updateExistingItem(data: data, profileID: profileID, repairAccess: false)
+            if valueOnlyStatus == errSecSuccess {
+                return
             }
-            return
+
+            throw KeychainAuthVaultError.operationFailed(
+                operation: "update auth blob",
+                profileID: profileID,
+                status: valueOnlyStatus
+            )
         }
 
         throw KeychainAuthVaultError.operationFailed(
@@ -93,6 +105,23 @@ struct KeychainAuthVault: AuthVault {
             profileID: profileID,
             status: addStatus
         )
+    }
+
+    func repairStoredAuthAccess() throws -> Int {
+        var repaired = 0
+        for profileID in try self.listProfileIDs() {
+            guard let data = try self.loadAuthBlob(profileID: profileID) else { continue }
+            let status = self.replaceExistingItem(data: data, profileID: profileID, rollbackData: data)
+            guard status == errSecSuccess else {
+                throw KeychainAuthVaultError.operationFailed(
+                    operation: "repair auth blob access",
+                    profileID: profileID,
+                    status: status
+                )
+            }
+            repaired += 1
+        }
+        return repaired
     }
 
     func deleteAuthBlob(profileID: String) throws {
@@ -164,9 +193,6 @@ struct KeychainAuthVault: AuthVault {
         var attributes = self.itemQuery(profileID: profileID)
         attributes[kSecAttrLabel] = self.label(profileID: profileID)
         attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        if let access = self.authAccessControl() {
-            attributes[kSecAttrAccess] = access
-        }
         attributes[kSecValueData] = data
         return attributes
     }
@@ -175,96 +201,38 @@ struct KeychainAuthVault: AuthVault {
         "Codex Profile Switcher: \(profileID)"
     }
 
-    private func authAccessControl() -> SecAccess? {
-        // These legacy ACL APIs are still the practical way to let both the app
-        // and helper access one login-keychain item without repeated prompts.
-        // Keep automated tests on FileAuthVault so CI never exercises them.
-        let trustedPaths = self.trustedApplicationPaths()
-        guard !trustedPaths.isEmpty else { return nil }
-
-        var trustedApplications: [SecTrustedApplication] = []
-        for path in trustedPaths {
-            var application: SecTrustedApplication?
-            let status = path.withCString { cPath in
-                SecTrustedApplicationCreateFromPath(cPath, &application)
-            }
-            if status == errSecSuccess, let application {
-                trustedApplications.append(application)
-            }
-        }
-        guard !trustedApplications.isEmpty else { return nil }
-
-        var access: SecAccess?
-        let status = SecAccessCreate("Codex Profile Switcher Auth" as CFString,
-                                     trustedApplications as CFArray,
-                                     &access)
-        return status == errSecSuccess ? access : nil
-    }
-
-    private func updateExistingItem(data: Data, profileID: String) -> OSStatus {
+    private func updateExistingItem(data: Data, profileID: String, repairAccess: Bool) -> OSStatus {
         var update: [CFString: Any] = [
             kSecAttrLabel: self.label(profileID: profileID),
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData: data,
         ]
-        if let access = self.authAccessControl() {
-            update[kSecAttrAccess] = access
+        if repairAccess {
+            update[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
 
         return self.updateItem(self.itemQuery(profileID: profileID), update: update)
     }
 
-    private func recreateItem(_ attributes: [CFString: Any], profileID: String) -> OSStatus {
-        let query = self.itemQuery(profileID: profileID)
-        let deleteStatus = SecItemDelete(query as CFDictionary)
+    private func updateItem(_ query: [CFString: Any], update: [CFString: Any]) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, update as CFDictionary)
+    }
+
+    private func replaceExistingItem(data: Data, profileID: String, rollbackData: Data) -> OSStatus {
+        let deleteStatus = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
         guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
             return deleteStatus
         }
-        return SecItemAdd(attributes as CFDictionary, nil)
-    }
 
-    private func trustedApplicationPaths(
-        executableURL: URL? = Bundle.main.executableURL,
-        bundleURL: URL = Bundle.main.bundleURL
-    ) -> [String] {
-        var paths: [String] = []
-        func append(_ path: String) {
-            guard !path.isEmpty,
-                  FileManager.default.fileExists(atPath: path),
-                  !paths.contains(path) else { return }
-            paths.append(path)
+        let addStatus = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
+        if addStatus == errSecSuccess {
+            return errSecSuccess
         }
 
-        if let appBundle = self.appBundleURL(containing: bundleURL)
-            ?? executableURL.flatMap(self.appBundleURL(containing:)) {
-            append(appBundle.path)
-            append(appBundle.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher").path)
-            append(appBundle.appendingPathComponent("Contents/Helpers/codex-profile").path)
+        if deleteStatus == errSecSuccess {
+            _ = SecItemAdd(self.itemAttributes(data: rollbackData, profileID: profileID) as CFDictionary, nil)
         }
 
-        if let executableURL {
-            append(executableURL.path)
-            let siblingName = executableURL.lastPathComponent == "codex-profile"
-                ? "codex-profile-switcher"
-                : "codex-profile"
-            append(executableURL.deletingLastPathComponent().appendingPathComponent(siblingName).path)
-        }
-        return paths
-    }
-
-    private func appBundleURL(containing url: URL) -> URL? {
-        var current = url.standardizedFileURL
-        while current.path != "/" {
-            if current.pathExtension == "app" {
-                return current
-            }
-            current.deleteLastPathComponent()
-        }
-        return nil
-    }
-
-    private func updateItem(_ query: [CFString: Any], update: [CFString: Any]) -> OSStatus {
-        SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        return addStatus
     }
 }
 

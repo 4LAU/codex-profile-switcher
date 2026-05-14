@@ -31,7 +31,8 @@ enum CodexProfileCLI {
     private static let keychainService = Self.environment("CODEX_PROFILE_KEYCHAIN_SERVICE")
         ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
-    private static let storageVersion = 2
+    private static let keychainAuthStorageVersion = 2
+    private static let keychainAccessRepairVersion = 3
 
     static func main() {
         do {
@@ -44,6 +45,7 @@ enum CodexProfileCLI {
             case "list": try self.commandList()
             case "path": try self.commandPath(args)
             case "doctor": try self.commandDoctor()
+            case "keychain-repair": try self.commandKeychainRepair()
             case "help", "-h", "--help": self.usage()
             default: throw CLIError.message("Unknown command '\(command)'. See \(self.program) help.")
             }
@@ -66,6 +68,7 @@ enum CodexProfileCLI {
           \(self.program) list
           \(self.program) path <profile>
           \(self.program) doctor
+          \(self.program) keychain-repair
         """)
     }
 
@@ -207,6 +210,12 @@ enum CodexProfileCLI {
         try self.commandStatus([])
     }
 
+    private static func commandKeychainRepair() throws {
+        let repaired = try self.vault.repairStoredAuthAccess()
+        try self.markAuthStorageVersion(Self.keychainAccessRepairVersion)
+        self.note("Rewrote \(repaired) saved auth item(s) with current Keychain access settings.")
+    }
+
     private static func printStatus(_ profile: String) throws {
         guard let data = try self.vault.loadAuthBlob(profileID: profile) else {
             print("  \(profile): Not set up")
@@ -284,12 +293,24 @@ enum CodexProfileCLI {
 
     private static func saveActiveProfile(_ profile: String) throws {
         try self.ensurePrivateDir(self.switcherHome())
-        var config = self.loadConfig() ?? CLIConfig(profiles: [], activeProfile: profile, authStorageVersion: self.storageVersion)
+        var config = self.loadConfig() ?? CLIConfig(
+            profiles: [],
+            activeProfile: profile,
+            authStorageVersion: Self.keychainAuthStorageVersion)
         config.activeProfile = profile
-        config.authStorageVersion = self.storageVersion
+        config.authStorageVersion = max(
+            config.authStorageVersion ?? Self.keychainAuthStorageVersion,
+            Self.keychainAuthStorageVersion)
         if !config.profiles.contains(where: { $0.id == profile }) {
             config.profiles.append(CLIProfileConfig(id: profile, label: "Profile \(profile)"))
         }
+        let data = try JSONEncoder.prettySorted.encode(config)
+        try self.atomicWrite(data, to: self.configPath())
+    }
+
+    private static func markAuthStorageVersion(_ version: Int) throws {
+        guard var config = self.loadConfig() else { return }
+        config.authStorageVersion = max(config.authStorageVersion ?? version, version)
         let data = try JSONEncoder.prettySorted.encode(config)
         try self.atomicWrite(data, to: self.configPath())
     }
