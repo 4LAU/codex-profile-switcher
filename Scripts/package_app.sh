@@ -96,7 +96,6 @@ rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices
 rm -f "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/XPCServices"
 
 for icon in \
-  codex-profile-switcher-menu-icon.png \
   codex-profile-switcher-menu-icon-empty.png \
   AppIcon.icns
 do
