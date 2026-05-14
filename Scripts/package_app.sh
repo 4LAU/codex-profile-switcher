@@ -7,27 +7,14 @@ if [[ -f "$ROOT_DIR/version.env" ]]; then
 fi
 APP_BUNDLE="${APP_BUNDLE:-$ROOT_DIR/CodexProfileSwitcher.app}"
 BUILD_DIR="${CODEX_PROFILE_PACKAGE_BUILD_DIR:-$ROOT_DIR/.build/package-app}"
-MODULE_CACHE="${CODEX_PROFILE_SWIFT_MODULE_CACHE:-${TMPDIR:-/tmp}/codex-profile-switcher-module-cache}"
+PACKAGE_SCRATCH="$BUILD_DIR/swiftpm"
 BUNDLE_ID="${BUNDLE_ID:-com.4lau.codex-profile-switcher}"
 MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '1')}"
 
-APP_BINARY="$BUILD_DIR/CodexProfileSwitcher"
-HELPER_BINARY="$BUILD_DIR/codex-profile"
-
-SWIFT_SOURCES=(
-  "$ROOT_DIR/CodexProfileSwitcher.swift"
-  "$ROOT_DIR/AuthBlob.swift"
-  "$ROOT_DIR/AuthVault.swift"
-  "$ROOT_DIR/KeychainAuthVault.swift"
-)
-HELPER_SOURCES=(
-  "$ROOT_DIR/CodexProfileCLI.swift"
-  "$ROOT_DIR/AuthBlob.swift"
-  "$ROOT_DIR/AuthVault.swift"
-  "$ROOT_DIR/KeychainAuthVault.swift"
-  "$ROOT_DIR/FileAuthVault.swift"
-)
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app
+fi
 
 log() {
   printf '%s\n' "$*"
@@ -57,7 +44,7 @@ else
   codesign_args=(--force --sign -)
 fi
 
-mkdir -p "$BUILD_DIR" "$MODULE_CACHE"
+mkdir -p "$BUILD_DIR" "$PACKAGE_SCRATCH"
 
 log "Ensuring Sparkle framework is available..."
 "$ROOT_DIR/Scripts/fetch_sparkle.sh"
@@ -72,25 +59,25 @@ if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
 fi
 
 log "Building CodexProfileSwitcher..."
-swiftc -O \
-  -o "$APP_BINARY" \
-  "${SWIFT_SOURCES[@]}" \
-  -framework Cocoa \
-  -framework SwiftUI \
-  -framework Security \
-  -F "$SPARKLE_DIR" \
-  -framework Sparkle \
-  -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-  -parse-as-library \
-  -module-cache-path "$MODULE_CACHE"
+swift build \
+  --package-path "$ROOT_DIR" \
+  -c release \
+  --product CodexProfileSwitcher \
+  --scratch-path "$PACKAGE_SCRATCH" \
+  -Xswiftc -F -Xswiftc "$SPARKLE_DIR" \
+  -Xlinker -F -Xlinker "$SPARKLE_DIR" \
+  -Xlinker -framework -Xlinker Sparkle \
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 
 log "Building codex-profile helper..."
-swiftc -O \
-  -o "$HELPER_BINARY" \
-  "${HELPER_SOURCES[@]}" \
-  -framework Foundation \
-  -framework Security \
-  -module-cache-path "$MODULE_CACHE"
+swift build \
+  --package-path "$ROOT_DIR" \
+  -c release \
+  --product codex-profile \
+  --scratch-path "$PACKAGE_SCRATCH"
+BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c release --scratch-path "$PACKAGE_SCRATCH" --show-bin-path)"
+APP_BINARY="$BIN_DIR/CodexProfileSwitcher"
+HELPER_BINARY="$BIN_DIR/codex-profile"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p \

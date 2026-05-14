@@ -1,4 +1,7 @@
+@testable import CodexProfileCore
+@testable import CodexProfileSwitcherApp
 import Foundation
+import Testing
 
 enum ProfileStoreEnvironmentTestFailure: Error, CustomStringConvertible {
     case failed(String)
@@ -36,32 +39,13 @@ func envExpectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
     }
 }
 
-@main
-struct ProfileStoreEnvironmentTests {
-    static func main() throws {
-        try self.run("uses app environment overrides") {
-            try self.testUsesAppEnvironmentOverrides()
-        }
-        try self.run("does not mark access repair complete after failed legacy migration") {
-            try self.testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration()
-        }
-        try self.run("refuses to remove active profile") {
-            try self.testRefusesToRemoveActiveProfile()
-        }
-
-        print("ProfileStoreEnvironmentTests: all tests passed")
-    }
-
-    private static func run(_ name: String, _ body: () throws -> Void) throws {
-        do {
-            try body()
-        } catch {
-            fputs("FAIL [\(name)]: \(error)\n", stderr)
-            throw error
-        }
-    }
-
-    private static func testUsesAppEnvironmentOverrides() throws {
+final class ProfileStoreEnvironmentTests {
+    
+    
+    @Test
+    
+    
+    func testUsesAppEnvironmentOverrides() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-env-tests-\(UUID().uuidString)", isDirectory: true)
         let home = workDir.appendingPathComponent("home", isDirectory: true)
@@ -96,7 +80,13 @@ struct ProfileStoreEnvironmentTests {
             "Debug summary did not report CODEX_PROFILE_HOME codex path")
     }
 
-    private static func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
+    
+    
+    @Test
+
+    
+    
+    func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-migration-tests-\(UUID().uuidString)", isDirectory: true)
         let home = workDir.appendingPathComponent("home", isDirectory: true)
@@ -126,7 +116,13 @@ struct ProfileStoreEnvironmentTests {
             "Failed legacy migration removed the legacy auth file")
     }
 
-    private static func testRefusesToRemoveActiveProfile() throws {
+    
+    
+    @Test
+
+    
+    
+    func testRefusesToRemoveActiveProfile() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-remove-tests-\(UUID().uuidString)", isDirectory: true)
         let home = workDir.appendingPathComponent("home", isDirectory: true)
@@ -152,5 +148,46 @@ struct ProfileStoreEnvironmentTests {
         }
 
         try envFail("Removing the active profile unexpectedly succeeded")
+    }
+
+    @Test
+    func testPreparesSharedProfileSwitchTransaction() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-switch-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let authRoot = workDir.appendingPathComponent("auth", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let store = ProfileStore(
+            authVault: FileAuthVault(root: authRoot),
+            environment: ["CODEX_PROFILE_HOME": home.path])
+        let firstAuth = Data(#"{"OPENAI_API_KEY":"sk-test-switch-first-1111111111"}"#.utf8)
+        let secondAuth = Data(#"{"OPENAI_API_KEY":"sk-test-switch-second-2222222222"}"#.utf8)
+        try store.saveAuthDataToVault(firstAuth, for: "1")
+        try store.saveAuthDataToVault(secondAuth, for: "2")
+        store.setActiveProfile("1")
+
+        let liveAuthURL = home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: liveAuthURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try firstAuth.write(to: liveAuthURL)
+
+        let transaction = try store.prepareProfileSwitch(to: "2", isCodexDesktopRunning: { false })
+        try transaction.commit()
+
+        try envExpectEqual(
+            try Data(contentsOf: liveAuthURL),
+            secondAuth,
+            "Prepared switch did not restore target auth to live auth")
+        try envExpectEqual(
+            try FileAuthVault(root: authRoot).loadAuthBlob(profileID: "1"),
+            firstAuth,
+            "Prepared switch did not preserve outgoing active auth")
+
+        let configURL = home.appendingPathComponent(".codex-switcher/config.json")
+        let config = try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: configURL))
+        try envExpectEqual(config.activeProfile, "2", "Prepared switch did not persist active profile")
     }
 }

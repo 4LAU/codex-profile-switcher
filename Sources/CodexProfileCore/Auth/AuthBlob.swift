@@ -1,26 +1,40 @@
 import CryptoKit
 import Foundation
 
-struct AuthCredentials {
-    let accessToken: String
-    let refreshToken: String
-    let idToken: String?
-    let accountId: String?
-    let lastRefresh: Date?
+public struct AuthCredentials {
+    public let accessToken: String
+    public let refreshToken: String
+    public let idToken: String?
+    public let accountId: String?
+    public let lastRefresh: Date?
 
-    var needsRefresh: Bool {
+    public init(
+        accessToken: String,
+        refreshToken: String,
+        idToken: String?,
+        accountId: String?,
+        lastRefresh: Date?
+    ) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.idToken = idToken
+        self.accountId = accountId
+        self.lastRefresh = lastRefresh
+    }
+
+    public var needsRefresh: Bool {
         guard let lastRefresh else { return true }
         let eightDays: TimeInterval = 8 * 24 * 60 * 60
         return Date().timeIntervalSince(lastRefresh) > eightDays
     }
 }
 
-enum AuthError: LocalizedError {
+public enum AuthError: LocalizedError {
     case notFound, decodeFailed, missingTokens, writeFailed
     case refreshExpired, refreshReused, refreshRevoked
     case networkError(Error), invalidResponse(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .notFound: return "auth.json not found"
         case .decodeFailed: return "Failed to decode auth.json"
@@ -35,8 +49,8 @@ enum AuthError: LocalizedError {
     }
 }
 
-enum AuthBlob {
-    static func load(from data: Data) throws -> AuthCredentials {
+public enum AuthBlob {
+    public static func load(from data: Data) throws -> AuthCredentials {
         let json = try parseTopLevelObject(from: data)
 
         if let apiKey = nonEmptyString(json["OPENAI_API_KEY"]) {
@@ -63,7 +77,7 @@ enum AuthBlob {
             lastRefresh: parseLastRefresh(json["last_refresh"]))
     }
 
-    static func updatedData(
+    public static func updatedData(
         from existingData: Data,
         with credentials: AuthCredentials,
         lastRefresh: Date = Date()
@@ -83,12 +97,12 @@ enum AuthBlob {
             options: [.prettyPrinted, .sortedKeys])
     }
 
-    static func isPlausibleAuthBlob(_ data: Data) -> Bool {
+    public static func isPlausibleAuthBlob(_ data: Data) -> Bool {
         guard let json = try? parseTopLevelObject(from: data) else { return false }
         return isPlausibleAuthBlob(json)
     }
 
-    static func identityFingerprint(from data: Data) -> String? {
+    public static func identityFingerprint(from data: Data) -> String? {
         guard let json = try? parseTopLevelObject(from: data),
               let identity = authIdentity(from: json),
               JSONSerialization.isValidJSONObject(identity),

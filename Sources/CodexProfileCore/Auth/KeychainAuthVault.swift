@@ -1,16 +1,16 @@
 import Foundation
 import Security
 
-struct KeychainAuthVault: AuthVault {
-    static let defaultService = "com.4lau.codex-profile-switcher.auth"
+public struct KeychainAuthVault: AuthVault {
+    public static let defaultService = "com.4lau.codex-profile-switcher.auth"
 
-    let service: String
+    public let service: String
 
-    init(service: String = Self.defaultService) {
+    public init(service: String = Self.defaultService) {
         self.service = service
     }
 
-    func listProfileIDs() throws -> [String] {
+    public func listProfileIDs() throws -> [String] {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(self.listQuery() as CFDictionary, &result)
 
@@ -40,7 +40,7 @@ struct KeychainAuthVault: AuthVault {
         return Array(Set(profileIDs)).sorted()
     }
 
-    func loadAuthBlob(profileID: String) throws -> Data? {
+    public func loadAuthBlob(profileID: String) throws -> Data? {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(self.loadQuery(profileID: profileID) as CFDictionary, &result)
 
@@ -63,7 +63,7 @@ struct KeychainAuthVault: AuthVault {
         return data
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    public func saveAuthBlob(_ data: Data, profileID: String) throws {
         let attributes = self.itemAttributes(data: data, profileID: profileID)
         let addStatus = SecItemAdd(attributes as CFDictionary, nil)
 
@@ -107,7 +107,7 @@ struct KeychainAuthVault: AuthVault {
         )
     }
 
-    func repairStoredAuthAccess() throws -> Int {
+    public func repairStoredAuthAccess() throws -> Int {
         var repaired = 0
         for profileID in try self.listProfileIDs() {
             guard let data = try self.loadAuthBlob(profileID: profileID) else { continue }
@@ -124,7 +124,7 @@ struct KeychainAuthVault: AuthVault {
         return repaired
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    public func deleteAuthBlob(profileID: String) throws {
         let status = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
 
         if status == errSecSuccess || status == errSecItemNotFound {
@@ -138,7 +138,7 @@ struct KeychainAuthVault: AuthVault {
         )
     }
 
-    func hasAuthBlob(profileID: String) throws -> Bool {
+    public func hasAuthBlob(profileID: String) throws -> Bool {
         var query = self.itemQuery(profileID: profileID)
         query[kSecReturnData] = kCFBooleanFalse
         query[kSecReturnAttributes] = kCFBooleanFalse
@@ -303,11 +303,11 @@ struct KeychainAuthVault: AuthVault {
     }
 }
 
-enum KeychainAuthVaultError: LocalizedError {
+public enum KeychainAuthVaultError: LocalizedError {
     case operationFailed(operation: String, profileID: String?, status: OSStatus)
     case unexpectedResult(operation: String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case let .operationFailed(operation, profileID, status):
             let profile = profileID.map { " for profile '\($0)'" } ?? ""
@@ -317,7 +317,7 @@ enum KeychainAuthVaultError: LocalizedError {
         }
     }
 
-    var failureReason: String? {
+    public var failureReason: String? {
         switch self {
         case let .operationFailed(_, _, status):
             return Self.statusName(status)
@@ -326,7 +326,7 @@ enum KeychainAuthVaultError: LocalizedError {
         }
     }
 
-    var recoverySuggestion: String? {
+    public var recoverySuggestion: String? {
         switch self {
         case let .operationFailed(_, _, status):
             switch status {
@@ -344,7 +344,7 @@ enum KeychainAuthVaultError: LocalizedError {
         }
     }
 
-    static func statusDescription(_ status: OSStatus) -> String {
+    public static func statusDescription(_ status: OSStatus) -> String {
         let name = self.statusName(status)
         let message = SecCopyErrorMessageString(status, nil) as String?
 
@@ -355,7 +355,7 @@ enum KeychainAuthVaultError: LocalizedError {
         return "\(name) (\(status))"
     }
 
-    static func statusName(_ status: OSStatus) -> String {
+    public static func statusName(_ status: OSStatus) -> String {
         switch status {
         case errSecSuccess:
             return "errSecSuccess"

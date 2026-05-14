@@ -1,3 +1,4 @@
+import CodexProfileCore
 import CryptoKit
 import Foundation
 
@@ -13,25 +14,15 @@ private enum CLIError: LocalizedError {
     }
 }
 
-private struct CLIConfig: Codable {
-    var profiles: [CLIProfileConfig]
-    var activeProfile: String
-    var authStorageVersion: Int?
-}
-
-private struct CLIProfileConfig: Codable {
-    var id: String
-    var label: String
-}
-
 @main
 enum CodexProfileCLI {
     private static let program = URL(fileURLWithPath: CommandLine.arguments.first ?? "codex-profile").lastPathComponent
     private static let fileManager = FileManager.default
+    private static let paths = AppPaths()
+    private static let configStore = ProfileConfigStore(paths: Self.paths)
     private static let keychainService = Self.environment("CODEX_PROFILE_KEYCHAIN_SERVICE")
         ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
-    private static let keychainAuthStorageVersion = 2
     private static let keychainAccessRepairVersion = 3
 
     static func main() {
@@ -98,7 +89,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Login produced an auth.json that does not look like Codex auth")
         }
         try self.vault.saveAuthBlob(data, profileID: profile)
-        try self.saveActiveProfileIfMissing(profile)
+        try self.configStore.saveActiveProfileIfMissing(profile)
         self.note("Saved auth for profile '\(profile)' in macOS Keychain")
     }
 
@@ -108,58 +99,21 @@ enum CodexProfileCLI {
         }
         try self.validateProfile(profile)
 
-        let targetData = try self.vault.loadAuthBlob(profileID: profile)
-        guard let targetData else {
-            throw CLIError.message("No saved auth for profile '\(profile)'. Run '\(self.program) login \(profile)' first.")
-        }
-
         let requestedWorkspace = args.dropFirst().first
         let workspace = try self.resolveWorkspace(requestedWorkspace)
         let codexAppBin = try self.codexAppBinary()
-        try self.ensurePrivateDir(self.liveCodexHome())
-
-        var outgoingProfile: String?
-        let outgoingLiveData: Data?
-        let liveAuthPath = self.liveAuthPath()
-        if self.fileManager.fileExists(atPath: liveAuthPath.path) {
-            do {
-                outgoingLiveData = try Data(contentsOf: liveAuthPath)
-            } catch {
-                throw CLIError.message(
-                    "Could not read live auth at \(liveAuthPath.path). Refusing to overwrite it: \(error.localizedDescription)"
-                )
-            }
-        } else {
-            outgoingLiveData = nil
-        }
-        if let liveData = outgoingLiveData {
-            let matches = try self.matchingProfiles(for: liveData)
-            if matches.count == 1 {
-                outgoingProfile = matches[0]
-                if outgoingProfile == profile, self.codexDesktopRunning() {
-                    self.note("Profile '\(profile)' is already active.")
-                    return
-                }
-            } else if matches.count > 1 {
-                let active = self.loadConfig()?.activeProfile ?? ""
-                if matches.contains(active) {
-                    outgoingProfile = active
-                } else {
-                    throw CLIError.message("Live auth matches multiple saved profiles and config.activeProfile is not one of them.")
-                }
-            } else {
-                throw CLIError.message("Live auth does not match any saved profile. Refusing to overwrite ~/.codex/auth.json until the current account is saved in the switcher.")
-            }
+        let transaction = try ProfileTransactionService(
+            vault: self.vault,
+            paths: self.paths,
+            isCodexDesktopRunning: self.codexDesktopRunning
+        ).prepareSwitch(to: profile)
+        if transaction.alreadyActive {
+            self.note("Profile '\(profile)' is already active.")
+            return
         }
 
         try self.quitCodexApp()
-        if let outgoingProfile,
-           let liveData = outgoingLiveData {
-            try self.vault.saveAuthBlob(liveData, profileID: outgoingProfile)
-        }
-
-        try self.atomicWrite(targetData, to: self.liveAuthPath())
-        try self.saveActiveProfile(profile)
+        try transaction.commit()
         try self.launchCodexApp(codexAppBin, workspace: workspace)
     }
 
@@ -170,7 +124,7 @@ enum CodexProfileCLI {
             return
         }
 
-        let profiles = try self.vault.listProfileIDs().filter(self.isValidProfile).sorted()
+        let profiles = try self.vault.listProfileIDs().filter(ProfileValidator.isValid).sorted()
         if profiles.isEmpty {
             self.note("No saved auth profiles. Create one with: \(self.program) login <profile>")
             return
@@ -181,7 +135,7 @@ enum CodexProfileCLI {
     }
 
     private static func commandList() throws {
-        let profiles = try self.vault.listProfileIDs().filter(self.isValidProfile).sorted()
+        let profiles = try self.vault.listProfileIDs().filter(ProfileValidator.isValid).sorted()
         if profiles.isEmpty {
             self.note("No saved auth profiles. Create one with: \(self.program) login <profile>")
             return
@@ -225,7 +179,7 @@ enum CodexProfileCLI {
 
     private static func commandKeychainRepair() throws {
         let repaired = try self.vault.repairStoredAuthAccess()
-        try self.markAuthStorageVersion(Self.keychainAccessRepairVersion)
+        try self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
         self.note("Rewrote \(repaired) saved auth item(s) with current Keychain access settings.")
     }
 
@@ -243,17 +197,6 @@ enum CodexProfileCLI {
         } else {
             print("  \(profile): Saved auth (account unknown)")
         }
-    }
-
-    private static func matchingProfiles(for liveData: Data) throws -> [String] {
-        guard let liveFingerprint = AuthBlob.identityFingerprint(from: liveData) else { return [] }
-        return try self.vault.listProfileIDs()
-            .filter(self.isValidProfile)
-            .filter { profile in
-                guard let data = try? self.vault.loadAuthBlob(profileID: profile) else { return false }
-                return AuthBlob.identityFingerprint(from: data) == liveFingerprint
-            }
-            .sorted()
     }
 
     private static func readAccountID(from data: Data) -> String? {
@@ -281,7 +224,7 @@ enum CodexProfileCLI {
     }
 
     private static func resolveWorkspaceFromGlobalState() -> String? {
-        guard let data = try? Data(contentsOf: self.codexGlobalStatePath()),
+        guard let data = try? Data(contentsOf: self.paths.globalStateURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -298,43 +241,8 @@ enum CodexProfileCLI {
         return nil
     }
 
-    private static func saveActiveProfileIfMissing(_ profile: String) throws {
-        if self.loadConfig()?.activeProfile == nil {
-            try self.saveActiveProfile(profile)
-        }
-    }
-
-    private static func saveActiveProfile(_ profile: String) throws {
-        try self.ensurePrivateDir(self.switcherHome())
-        var config = self.loadConfig() ?? CLIConfig(
-            profiles: [],
-            activeProfile: profile,
-            authStorageVersion: Self.keychainAuthStorageVersion)
-        config.activeProfile = profile
-        config.authStorageVersion = max(
-            config.authStorageVersion ?? Self.keychainAuthStorageVersion,
-            Self.keychainAuthStorageVersion)
-        if !config.profiles.contains(where: { $0.id == profile }) {
-            config.profiles.append(CLIProfileConfig(id: profile, label: "Profile \(profile)"))
-        }
-        let data = try JSONEncoder.prettySorted.encode(config)
-        try self.atomicWrite(data, to: self.configPath())
-    }
-
-    private static func markAuthStorageVersion(_ version: Int) throws {
-        guard var config = self.loadConfig() else { return }
-        config.authStorageVersion = max(config.authStorageVersion ?? version, version)
-        let data = try JSONEncoder.prettySorted.encode(config)
-        try self.atomicWrite(data, to: self.configPath())
-    }
-
-    private static func loadConfig() -> CLIConfig? {
-        guard let data = try? Data(contentsOf: self.configPath()) else { return nil }
-        return try? JSONDecoder().decode(CLIConfig.self, from: data)
-    }
-
     private static func launchCodexApp(_ path: String, workspace: String?) throws {
-        let logDir = self.liveCodexHome().appendingPathComponent("logs", isDirectory: true)
+        let logDir = self.paths.liveCodexHome.appendingPathComponent("logs", isDirectory: true)
         try self.ensurePrivateDir(logDir)
         let logFile = logDir.appendingPathComponent("desktop.log")
         self.fileManager.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -447,7 +355,7 @@ enum CodexProfileCLI {
     }
 
     private static func makeTempHome(profile: String) throws -> URL {
-        let tmpRoot = self.switcherHome().appendingPathComponent("tmp", isDirectory: true)
+        let tmpRoot = self.paths.tempRoot
         try self.ensurePrivateDir(tmpRoot)
         let url = tmpRoot.appendingPathComponent("\(profile)-\(UUID().uuidString)", isDirectory: true)
         try self.ensurePrivateDir(url)
@@ -461,31 +369,12 @@ enum CodexProfileCLI {
             attributes: [.posixPermissions: 0o700])
     }
 
-    private static func atomicWrite(_ data: Data, to destination: URL) throws {
-        try self.ensurePrivateDir(destination.deletingLastPathComponent())
-        let temp = destination.deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
-        try data.write(to: temp, options: .withoutOverwriting)
-        try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
-        if self.fileManager.fileExists(atPath: destination.path) {
-            _ = try self.fileManager.replaceItemAt(destination, withItemAt: temp)
-        } else {
-            try self.fileManager.moveItem(at: temp, to: destination)
-        }
-    }
-
     private static func validateProfile(_ profile: String) throws {
-        guard self.isValidProfile(profile) else {
-            throw CLIError.message("Invalid profile '\(profile)'. Use letters, numbers, dots, dashes, or underscores.")
-        }
-    }
-
-    private static func isValidProfile(_ profile: String) -> Bool {
-        profile.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil
+        try ProfileValidator.validate(profile)
     }
 
     private static func effectivePATH() -> String {
-        let home = self.userHome().path
+        let home = self.paths.userHome.path
         let chunks = [
             self.environment("PATH"),
             "\(home)/.local/bin",
@@ -517,26 +406,6 @@ enum CodexProfileCLI {
         self.environment("CODEX_BUNDLED_CLI") ?? "\(self.codexAppPath())/Contents/Resources/codex"
     }
 
-    private static func switcherHome() -> URL {
-        self.userHome().appendingPathComponent(".codex-switcher", isDirectory: true)
-    }
-
-    private static func liveCodexHome() -> URL {
-        self.userHome().appendingPathComponent(".codex", isDirectory: true)
-    }
-
-    private static func configPath() -> URL {
-        self.switcherHome().appendingPathComponent("config.json")
-    }
-
-    private static func liveAuthPath() -> URL {
-        self.liveCodexHome().appendingPathComponent("auth.json")
-    }
-
-    private static func codexGlobalStatePath() -> URL {
-        self.liveCodexHome().appendingPathComponent(".codex-global-state.json")
-    }
-
     private static func environment(_ key: String) -> String? {
         ProcessInfo.processInfo.environment[key]
     }
@@ -558,25 +427,7 @@ enum CodexProfileCLI {
         return "keychain://\(self.keychainService)/\(profile)"
     }
 
-    private static func userHome() -> URL {
-        if let path = self.environment("CODEX_PROFILE_HOME"), !path.isEmpty {
-            return URL(fileURLWithPath: path).standardizedFileURL
-        }
-        if let path = self.environment("CODEX_PROFILE_TEST_HOME"), !path.isEmpty {
-            return URL(fileURLWithPath: path).standardizedFileURL
-        }
-        return self.fileManager.homeDirectoryForCurrentUser
-    }
-
     private static func note(_ text: String) {
         print(text)
     }
-}
-
-private extension JSONEncoder {
-    static let prettySorted: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
-    }()
 }

@@ -33,8 +33,8 @@ jobs:
         run: |
           set -euo pipefail
           source version.env
-          swift_ver=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' CodexProfileSwitcher.swift | head -1)
+          swift_ver=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' Sources/CodexProfileSwitcherApp/CodexProfileSwitcher.swift | head -1)
           if [[ "$swift_ver" != "$MARKETING_VERSION" ]]; then
-            echo "ERROR: version.env ($MARKETING_VERSION) != CodexProfileSwitcher.swift ($swift_ver)"
+            echo "ERROR: version.env ($MARKETING_VERSION) != Sources/CodexProfileSwitcherApp/CodexProfileSwitcher.swift ($swift_ver)"
             exit 1
           fi

@@ -1,10 +1,14 @@
 import Foundation
 
-struct FileAuthVault: AuthVault {
-    let root: URL
+public struct FileAuthVault: AuthVault {
+    public let root: URL
     private let fileManager = FileManager.default
 
-    func listProfileIDs() throws -> [String] {
+    public init(root: URL) {
+        self.root = root
+    }
+
+    public func listProfileIDs() throws -> [String] {
         guard self.fileManager.fileExists(atPath: self.root.path) else {
             return []
         }
@@ -22,7 +26,7 @@ struct FileAuthVault: AuthVault {
         .sorted()
     }
 
-    func loadAuthBlob(profileID: String) throws -> Data? {
+    public func loadAuthBlob(profileID: String) throws -> Data? {
         let url = self.authURL(profileID: profileID)
         guard self.fileManager.fileExists(atPath: url.path) else {
             return nil
@@ -30,7 +34,7 @@ struct FileAuthVault: AuthVault {
         return try Data(contentsOf: url)
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    public func saveAuthBlob(_ data: Data, profileID: String) throws {
         try self.ensureRoot()
         let url = self.authURL(profileID: profileID)
         let temp = self.root.appendingPathComponent(".\(profileID).json.tmp-\(UUID().uuidString)")
@@ -48,14 +52,14 @@ struct FileAuthVault: AuthVault {
         }
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    public func deleteAuthBlob(profileID: String) throws {
         let url = self.authURL(profileID: profileID)
         if self.fileManager.fileExists(atPath: url.path) {
             try self.fileManager.removeItem(at: url)
         }
     }
 
-    func hasAuthBlob(profileID: String) throws -> Bool {
+    public func hasAuthBlob(profileID: String) throws -> Bool {
         self.fileManager.fileExists(atPath: self.authURL(profileID: profileID).path)
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-protocol AuthVault {
+public protocol AuthVault {
     func listProfileIDs() throws -> [String]
     func loadAuthBlob(profileID: String) throws -> Data?
     func saveAuthBlob(_ data: Data, profileID: String) throws
@@ -9,7 +9,7 @@ protocol AuthVault {
     func repairStoredAuthAccess() throws -> Int
 }
 
-extension AuthVault {
+public extension AuthVault {
     func repairStoredAuthAccess() throws -> Int {
         var repaired = 0
         for profileID in try self.listProfileIDs() {

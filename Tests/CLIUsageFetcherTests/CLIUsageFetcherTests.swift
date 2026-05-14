@@ -1,4 +1,7 @@
+@testable import CodexProfileSwitcherApp
+@testable import CodexProfileCore
 import Foundation
+import Testing
 
 enum CLIUsageFetcherTestFailure: Error, CustomStringConvertible {
     case failed(String)
@@ -26,26 +29,13 @@ func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) th
     }
 }
 
-@main
-struct CLIUsageFetcherTests {
-    static func main() async throws {
-        try await self.run("fetches usage through isolated Codex RPC home") {
-            try await self.testFetchesUsageThroughIsolatedCodexRPCHome()
-        }
-
-        print("CLIUsageFetcherTests: all tests passed")
-    }
-
-    private static func run(_ name: String, _ body: () async throws -> Void) async throws {
-        do {
-            try await body()
-        } catch {
-            fputs("FAIL [\(name)]: \(error)\n", stderr)
-            throw error
-        }
-    }
-
-    private static func testFetchesUsageThroughIsolatedCodexRPCHome() async throws {
+final class CLIUsageFetcherTests {
+    
+    
+    @Test
+    
+    
+    func testFetchesUsageThroughIsolatedCodexRPCHome() async throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-cli-usage-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)

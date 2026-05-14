@@ -10,6 +10,7 @@ LAUNCH_LOG="$WORK_DIR/fake-app-launch.log"
 LOGIN_HOME_LOG="$WORK_DIR/fake-codex-login-home.log"
 TEST_HOME="$WORK_DIR/home"
 AUTH_STORE="$WORK_DIR/auth-store"
+BUILD_DIR="$WORK_DIR/build"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -21,15 +22,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-swiftc \
-  "$ROOT_DIR/CodexProfileCLI.swift" \
-  "$ROOT_DIR/AuthBlob.swift" \
-  "$ROOT_DIR/AuthVault.swift" \
-  "$ROOT_DIR/KeychainAuthVault.swift" \
-  "$ROOT_DIR/FileAuthVault.swift" \
-  -framework Foundation \
-  -framework Security \
-  -o "$HELPER"
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app
+fi
+
+swift build \
+  --package-path "$ROOT_DIR" \
+  -c release \
+  --product codex-profile \
+  --scratch-path "$BUILD_DIR" \
+  >/dev/null
+BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c release --scratch-path "$BUILD_DIR" --show-bin-path)"
+cp "$BIN_DIR/codex-profile" "$HELPER"
+chmod +x "$HELPER"
 
 printf '%s\n' \
   '#!/usr/bin/env bash' \

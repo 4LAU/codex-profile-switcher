@@ -1,4 +1,6 @@
+@testable import CodexProfileCore
 import Foundation
+import Testing
 
 enum TestFailure: Error, CustomStringConvertible {
     case failed(String)
@@ -92,47 +94,13 @@ func oauthAuthData(
     ])
 }
 
-@main
-struct AuthBlobTests {
-    static func main() throws {
-        try self.run("loads snake_case OAuth auth") {
-            try self.testLoadsSnakeCaseOAuthAuth()
-        }
-        try self.run("loads camelCase legacy OAuth auth") {
-            try self.testLoadsCamelCaseLegacyOAuthAuth()
-        }
-        try self.run("loads API key auth") {
-            try self.testLoadsAPIKeyAuth()
-        }
-        try self.run("rejects malformed auth that would look set up") {
-            try self.testRejectsMalformedAuth()
-        }
-        try self.run("preserves unrelated fields while normalizing saved OAuth tokens") {
-            try self.testUpdatedDataPreservesUnrelatedFields()
-        }
-        try self.run("fingerprint ignores rotating OAuth token values") {
-            try self.testFingerprintIgnoresRotatingOAuthTokenValues()
-        }
-        try self.run("fingerprint can use OAuth account ID without ID token") {
-            try self.testFingerprintUsesAccountIDWithoutIDToken()
-        }
-        try self.run("API key fingerprint distinguishes keys") {
-            try self.testAPIKeyFingerprintDistinguishesKeys()
-        }
-
-        print("AuthBlobTests: all tests passed")
-    }
-
-    private static func run(_ name: String, _ body: () throws -> Void) throws {
-        do {
-            try body()
-        } catch {
-            fputs("FAIL [\(name)]: \(error)\n", stderr)
-            throw error
-        }
-    }
-
-    private static func testLoadsSnakeCaseOAuthAuth() throws {
+final class AuthBlobTests {
+    
+    
+    @Test
+    
+    
+    func testLoadsSnakeCaseOAuthAuth() throws {
         let token = try idToken()
         let data = try oauthAuthData(idToken: token)
         let creds = try AuthBlob.load(from: data)
@@ -144,7 +112,13 @@ struct AuthBlobTests {
         try expect(creds.lastRefresh != nil, "Expected last_refresh to parse")
     }
 
-    private static func testLoadsCamelCaseLegacyOAuthAuth() throws {
+    
+    
+    @Test
+
+    
+    
+    func testLoadsCamelCaseLegacyOAuthAuth() throws {
         let token = try idToken(accountID: "acct-legacy")
         let data = try jsonData([
             "tokens": [
@@ -164,7 +138,13 @@ struct AuthBlobTests {
         try expect(creds.lastRefresh != nil, "Expected fractional last_refresh to parse")
     }
 
-    private static func testLoadsAPIKeyAuth() throws {
+    
+    
+    @Test
+
+    
+    
+    func testLoadsAPIKeyAuth() throws {
         let fakeKey = ["sk", "test", "key", "1234567890"].joined(separator: "-")
         let data = try jsonData(["OPENAI_API_KEY": fakeKey])
         let creds = try AuthBlob.load(from: data)
@@ -175,7 +155,13 @@ struct AuthBlobTests {
         try expect(creds.accountId == nil, "API key auth should not have account ID")
     }
 
-    private static func testRejectsMalformedAuth() throws {
+    
+    
+    @Test
+
+    
+    
+    func testRejectsMalformedAuth() throws {
         try expectMissingTokens {
             _ = try AuthBlob.load(from: try jsonData(["tokens": ["access_token": "access-only"]]))
         }
@@ -186,7 +172,13 @@ struct AuthBlobTests {
                    "Invalid JSON should not produce a fingerprint")
     }
 
-    private static func testUpdatedDataPreservesUnrelatedFields() throws {
+    
+    
+    @Test
+
+    
+    
+    func testUpdatedDataPreservesUnrelatedFields() throws {
         let oldToken = try idToken(accountID: "acct-old")
         let existing = try jsonData([
             "tokens": [
@@ -221,7 +213,13 @@ struct AuthBlobTests {
         try expect(object["last_refresh"] as? String != nil, "Missing last_refresh after update")
     }
 
-    private static func testFingerprintIgnoresRotatingOAuthTokenValues() throws {
+    
+    
+    @Test
+
+    
+    
+    func testFingerprintIgnoresRotatingOAuthTokenValues() throws {
         let token = try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-same")
         let first = try oauthAuthData(accessToken: "access-1", refreshToken: "refresh-1", idToken: token)
         let second = try oauthAuthData(accessToken: "access-2", refreshToken: "refresh-2", idToken: token)
@@ -232,7 +230,13 @@ struct AuthBlobTests {
             "OAuth fingerprint changed when only rotating token values changed")
     }
 
-    private static func testFingerprintUsesAccountIDWithoutIDToken() throws {
+    
+    
+    @Test
+
+    
+    
+    func testFingerprintUsesAccountIDWithoutIDToken() throws {
         let first = try jsonData([
             "tokens": [
                 "access_token": "access-1",
@@ -265,7 +269,13 @@ struct AuthBlobTests {
             "Different OAuth account IDs should not share a fingerprint")
     }
 
-    private static func testAPIKeyFingerprintDistinguishesKeys() throws {
+    
+    
+    @Test
+
+    
+    
+    func testAPIKeyFingerprintDistinguishesKeys() throws {
         let first = try jsonData(["OPENAI_API_KEY": "sk-test-key-1111111111111111"])
         let second = try jsonData(["OPENAI_API_KEY": "sk-test-key-2222222222222222"])
 
