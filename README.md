@@ -9,6 +9,12 @@ Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and 
 
 <img src="assets/screenshot-menu.png" width="300" alt="Codex Profile Switcher menu bar dropdown showing profiles with usage bars">
 
+## Why
+
+- You have multiple Codex accounts (personal, work, client). Logging out and back in every time is painful. This app makes switching instant.
+- Usage limits reset on rolling windows, and you can't see them for inactive accounts. This app tracks every saved profile, not just the active one.
+- Auth lives in macOS Keychain. No telemetry, no cloud sync, no account linking.
+
 ## Features
 
 - Manage multiple saved Codex profiles with custom labels
@@ -114,20 +120,26 @@ Local unsigned builds may trigger a Keychain prompt each time a different binary
 
 If upgrading from an older unsigned build, run `codex-profile keychain-repair` once to rewrite saved auth with current access settings.
 
+If a signed build still prompts for Keychain access, open Keychain Access.app, find the `CodexProfileSwitcher` entry, and add `CodexProfileSwitcher.app` under Access Control > "Always allow access by these applications."
+
 ## Troubleshooting
 
 Open `Settings...` > `General` for built-in support tools:
 
-- **Copy Debug Info** copies app state plus recent redacted logs to the clipboard.
-- **Open Log** opens `~/Library/Logs/CodexProfileSwitcher/CodexProfileSwitcher.log`.
-- **Report Bug** opens the GitHub issue form.
+- Copy Debug Info copies app state plus recent redacted logs to the clipboard.
+- Open Log opens `~/Library/Logs/CodexProfileSwitcher/CodexProfileSwitcher.log`.
+- Report Bug opens the GitHub issue form.
 
 Logs redact emails, bearer tokens, cookies, API keys, and OAuth fields before writing. From the terminal, `codex-profile doctor` prints a quick environment and saved-profile check.
 
-## Contributing and Security
+## Docs
 
-- Read [AGENTS.md](AGENTS.md) for project structure, build commands, and contribution guidelines.
-- Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [AGENTS.md](AGENTS.md) — project structure, build commands, contribution guidelines
+- [SECURITY.md](SECURITY.md) — vulnerability reporting
+- [docs/architecture.md](docs/architecture.md) — system design overview
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — development setup and workflow
+- [docs/RELEASING.md](docs/RELEASING.md) — maintainer release process
 
 ## Credits
 

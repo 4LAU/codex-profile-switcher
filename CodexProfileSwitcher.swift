@@ -6,7 +6,7 @@ import SwiftUI
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.1.1"
+    static let version = "0.1.2"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
@@ -3702,7 +3702,7 @@ struct GeneralTab: View {
                 Toggle("Launch at Login", isOn: self.$launchAtLogin)
                     .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
 
-                Text("Automatically opens CodexProfileSwitcher when you start your Mac.")
+                Text("Opens automatically when your Mac starts.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }

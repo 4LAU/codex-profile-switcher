@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.1.2 -- 2026-05-14
+
+### Added
+
+- App icon (stacked Codex visors on dark squircle)
+- "Why" section in README
+- Docs index in README linking architecture, development, and release guides
+- Keychain Access.app troubleshooting tip for signed builds
+
+### Changed
+
+- Rewrite README: concise intro, Privacy section, macOS Permissions, condensed Troubleshooting
+- Shorten Launch at Login description in Settings
+
+### Removed
+
+- CODE_OF_CONDUCT.md (unnecessary for single-maintainer utility)
+
 ## 0.1.1 -- 2026-05-14
 
 ### Fixed

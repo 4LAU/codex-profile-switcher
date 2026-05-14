@@ -89,7 +89,8 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$APP_BUNDLE/Contents
 
 for icon in \
   codex-profile-switcher-menu-icon.png \
-  codex-profile-switcher-menu-icon-empty.png
+  codex-profile-switcher-menu-icon-empty.png \
+  AppIcon.icns
 do
   if [[ -f "$ROOT_DIR/assets/$icon" ]]; then
     cp "$ROOT_DIR/assets/$icon" "$APP_BUNDLE/Contents/Resources/$icon"
@@ -122,6 +123,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>LSUIElement</key>
   <true/>
   <key>CodexProfileSwitcherBuildTimestamp</key>
