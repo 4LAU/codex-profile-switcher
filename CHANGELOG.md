@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.1.1 -- 2026-05-14
+
+### Fixed
+
+- Eliminate Keychain password prompts on first launch before any account is set up
+- Close remaining Keychain access leaks when all profiles are unset (menu open, sync)
+- Fix pipe data truncation in CLI process output reading
+- Fix incorrect "Use Re-auth" instruction for profiles that have never been set up
+
+### Changed
+
+- Redesign Settings Profiles tab with Apple-native master-detail layout (sidebar + detail panel)
+- Auto-save profile labels on focus loss, Return, tab switch, and window close (no Save button)
+- Add standard keyboard shortcuts: Cmd+Q, Cmd+H, Cmd+Option+H, Cmd+M
+- Extract shared pipe-drain helper and use static ISO8601 formatters
+
 ## 0.1.0 -- 2026-05-13
 
 ### Added
