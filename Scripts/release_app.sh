@@ -117,7 +117,26 @@ VERSION="$VERSION" \
   CASK_OUTPUT_PATH="$CASK_OUTPUT_PATH" \
   "$ROOT_DIR/Scripts/generate_homebrew_cask.sh"
 
-log "Created release artifact:"
+log "Generating Sparkle appcast..."
+SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
+
+APPCAST_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/appcast-XXXXXX")"
+trap 'rm -rf "$APPCAST_WORK_DIR"' EXIT
+cp "$DMG_PATH" "$APPCAST_WORK_DIR/"
+
+if [[ -f "$ROOT_DIR/appcast.xml" ]]; then
+  cp "$ROOT_DIR/appcast.xml" "$APPCAST_WORK_DIR/appcast.xml"
+fi
+
+"$SPARKLE_DIR/bin/generate_appcast" \
+  --download-url-prefix "https://github.com/4LAU/codex-profile-switcher/releases/download/v${VERSION}/" \
+  "$APPCAST_WORK_DIR"
+
+cp "$APPCAST_WORK_DIR/appcast.xml" "$ROOT_DIR/appcast.xml"
+log "Updated appcast.xml"
+
+log "Created release artifacts:"
 log "  $DMG_PATH"
 log "  $CHECKSUM_PATH"
 log "  $CASK_OUTPUT_PATH"
+log "  $ROOT_DIR/appcast.xml"

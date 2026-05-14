@@ -45,6 +45,9 @@ struct ProfileStoreEnvironmentTests {
         try self.run("does not mark access repair complete after failed legacy migration") {
             try self.testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration()
         }
+        try self.run("refuses to remove active profile") {
+            try self.testRefusesToRemoveActiveProfile()
+        }
 
         print("ProfileStoreEnvironmentTests: all tests passed")
     }
@@ -121,5 +124,33 @@ struct ProfileStoreEnvironmentTests {
         try envExpect(
             FileManager.default.fileExists(atPath: legacyAuth.path),
             "Failed legacy migration removed the legacy auth file")
+    }
+
+    private static func testRefusesToRemoveActiveProfile() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-remove-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let authRoot = workDir.appendingPathComponent("auth", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let store = ProfileStore(
+            authVault: FileAuthVault(root: authRoot),
+            environment: ["CODEX_PROFILE_HOME": home.path])
+        try store.saveAuthDataToVault(Data(#"{"OPENAI_API_KEY":"sk-test-active-profile-1111111111"}"#.utf8), for: "1")
+        store.setLiveProfileId("1")
+
+        do {
+            try store.removeProfile("1")
+        } catch ProfileMutationError.cannotRemoveActiveProfile {
+            try envExpect(store.authStoreExists(for: "1"), "Active profile auth was deleted")
+            try envExpect(
+                store.config.profiles.contains(where: { $0.id == "1" }),
+                "Active profile config was removed")
+            return
+        } catch {
+            try envFail("Expected cannotRemoveActiveProfile, got \(error)")
+        }
+
+        try envFail("Removing the active profile unexpectedly succeeded")
     }
 }

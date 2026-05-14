@@ -1,6 +1,9 @@
 import Cocoa
 import CryptoKit
 import SwiftUI
+#if canImport(Sparkle)
+import Sparkle
+#endif
 
 // MARK: - App Info
 
@@ -374,11 +377,14 @@ enum LiveAuthWarning: Equatable {
 
 enum ProfileMutationError: LocalizedError {
     case cannotClearActiveProfile
+    case cannotRemoveActiveProfile
 
     var errorDescription: String? {
         switch self {
         case .cannotClearActiveProfile:
             return "Switch away from the active profile before clearing its saved auth."
+        case .cannotRemoveActiveProfile:
+            return "Switch away from the active profile before deleting it."
         }
     }
 }
@@ -531,18 +537,16 @@ final class ProfileStore {
     }
 
     func removeProfile(_ id: String) throws {
+        if self.liveProfileId == id || self.config.activeProfile == id {
+            throw ProfileMutationError.cannotRemoveActiveProfile
+        }
+
         try self.authVault.deleteAuthBlob(profileID: id)
 
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
-        if self.config.activeProfile == id {
-            self.config.activeProfile = self.config.profiles.first?.id ?? ""
-        }
-        if self.liveProfileId == id {
-            self.liveProfileId = nil
-        }
         self.saveConfig()
         self.saveCache()
     }
@@ -1352,10 +1356,6 @@ enum CodexCLIResolver {
             return override
         }
 
-        if let fromPath = self.whichCodex(environment: environment) {
-            return fromPath
-        }
-
         let bundledRoot = environment["CODEX_APP"]?.trimmingCharacters(in: .whitespacesAndNewlines)
             ?? "/Applications/Codex.app"
         let bundledCLI = URL(fileURLWithPath: bundledRoot)
@@ -1363,6 +1363,10 @@ enum CodexCLIResolver {
             .path
         if self.fileManager.isExecutableFile(atPath: bundledCLI) {
             return bundledCLI
+        }
+
+        if let fromPath = self.whichCodex(environment: environment) {
+            return fromPath
         }
 
         return nil
@@ -2803,6 +2807,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastLiveAuthMtime: Date?
     private var isMenuOpen = false
     private var menuRefreshRetryTask: Task<Void, Never>?
+    #if canImport(Sparkle)
+    private var updaterController: SPUStandardUpdaterController?
+    #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.info("App launched", metadata: ["version": AppInfo.version])
@@ -2824,6 +2831,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.usageProvider.refreshAll()
         self.startPeriodicRefreshTimer()
+
+        #if canImport(Sparkle)
+        if Bundle.main.bundlePath.hasSuffix(".app") {
+            let controller = SPUStandardUpdaterController(
+                startingUpdater: false,
+                updaterDelegate: nil,
+                userDriverDelegate: nil)
+            controller.updater.automaticallyChecksForUpdates = true
+            controller.startUpdater()
+            self.updaterController = controller
+        }
+        #endif
     }
 
     deinit {
@@ -2983,6 +3002,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         settingsItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(settingsItem)
+
+        #if canImport(Sparkle)
+        if let controller = self.updaterController {
+            let updateItem = NSMenuItem(
+                title: "Check for Updates...",
+                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                keyEquivalent: "")
+            updateItem.target = controller
+            updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+            updateItem.image?.size = NSSize(width: 13, height: 13)
+            self.menu.addItem(updateItem)
+        }
+        #endif
 
         self.menu.addItem(.separator())
 
@@ -3408,7 +3440,10 @@ struct ProfilesTab: View {
                         .frame(width: 24, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .disabled(self.selectedId == nil)
+                .disabled(
+                    self.selectedId == nil
+                        || self.selectedId == self.store.liveProfileId
+                        || self.selectedId == self.store.config.activeProfile)
 
                 Spacer()
             }

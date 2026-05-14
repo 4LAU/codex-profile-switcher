@@ -59,6 +59,18 @@ fi
 
 mkdir -p "$BUILD_DIR" "$MODULE_CACHE"
 
+log "Ensuring Sparkle framework is available..."
+"$ROOT_DIR/Scripts/fetch_sparkle.sh"
+SPARKLE_DIR="$ROOT_DIR/.build/sparkle"
+
+if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+  if [[ "${CODEX_PROFILE_REQUIRE_SIGNING:-0}" == "1" ]]; then
+    printf 'ERROR: SPARKLE_ED_PUBLIC_KEY is required for signed release builds.\n' >&2
+    exit 1
+  fi
+  log "WARN: SPARKLE_ED_PUBLIC_KEY is not set — Sparkle update verification will not work."
+fi
+
 log "Building CodexProfileSwitcher..."
 swiftc -O \
   -o "$APP_BINARY" \
@@ -66,6 +78,9 @@ swiftc -O \
   -framework Cocoa \
   -framework SwiftUI \
   -framework Security \
+  -F "$SPARKLE_DIR" \
+  -framework Sparkle \
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   -parse-as-library \
   -module-cache-path "$MODULE_CACHE"
 
@@ -81,11 +96,17 @@ rm -rf "$APP_BUNDLE"
 mkdir -p \
   "$APP_BUNDLE/Contents/MacOS" \
   "$APP_BUNDLE/Contents/Helpers" \
-  "$APP_BUNDLE/Contents/Resources"
+  "$APP_BUNDLE/Contents/Resources" \
+  "$APP_BUNDLE/Contents/Frameworks"
 
 cp "$APP_BINARY" "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 cp "$HELPER_BINARY" "$APP_BUNDLE/Contents/Helpers/codex-profile"
 chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$APP_BUNDLE/Contents/Helpers/codex-profile"
+
+log "Embedding Sparkle.framework..."
+cp -R "$SPARKLE_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices"
+rm -f "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/XPCServices"
 
 for icon in \
   codex-profile-switcher-menu-icon.png \
@@ -131,9 +152,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>$BUILD_TIMESTAMP</string>
   <key>CodexProfileSwitcherGitCommit</key>
   <string>$GIT_COMMIT</string>
+  <key>SUFeedURL</key>
+  <string>https://raw.githubusercontent.com/4LAU/codex-profile-switcher/main/appcast.xml</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
 </dict>
 </plist>
 PLIST
+
+if [[ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+  plutil -insert SUPublicEDKey -string "$SPARKLE_ED_PUBLIC_KEY" "$APP_BUNDLE/Contents/Info.plist"
+fi
 
 chmod -R u+w "$APP_BUNDLE"
 xattr -cr "$APP_BUNDLE"
@@ -142,8 +171,13 @@ find "$APP_BUNDLE" -name '._*' -delete
 log "Signing helper..."
 codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Helpers/codex-profile"
 
+log "Signing Sparkle framework components..."
+codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
+codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+
 log "Signing app..."
-codesign "${codesign_args[@]}" "$APP_BUNDLE"
+codesign "${codesign_args[@]}" --entitlements "$ROOT_DIR/CodexProfileSwitcher.entitlements" "$APP_BUNDLE"
 codesign --verify --strict --verbose=2 "$APP_BUNDLE" >/dev/null
 
 log "Created $APP_BUNDLE"

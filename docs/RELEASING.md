@@ -15,6 +15,22 @@ of recurring during ordinary profile switching.
   - fallback: Apple ID, team ID, and app-specific password in environment
     variables.
 
+## One-Time Sparkle Key Setup
+
+Generate the EdDSA keypair used to sign Sparkle updates:
+
+```bash
+Scripts/setup_sparkle_keys.sh
+```
+
+The private key is stored in your macOS Keychain. Export the public key to your shell profile:
+
+```bash
+export SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)"
+```
+
+This key is required for release builds — `package_app.sh` will fail if `SPARKLE_ED_PUBLIC_KEY` is unset when `CODEX_PROFILE_REQUIRE_SIGNING=1`.
+
 ## One-Time Notary Credential Setup
 
 Run this once on the release machine:
@@ -37,22 +53,33 @@ NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher
 ```bash
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher \
+SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
 Scripts/release_app.sh
 ```
 
 The script:
 
-1. Builds `CodexProfileSwitcher.app`.
-2. Signs the helper first.
-3. Signs the app bundle.
-4. Creates `CodexProfileSwitcher-<version>.dmg`.
-5. Signs the DMG.
-6. Uploads the DMG to Apple for notarization.
-7. Staples the notarization ticket to the DMG.
-8. Runs Gatekeeper verification.
-9. Writes a SHA-256 checksum next to the DMG.
+1. Builds `CodexProfileSwitcher.app` with Sparkle embedded.
+2. Signs the helper, Sparkle framework components, and app bundle.
+3. Creates `CodexProfileSwitcher-<version>.dmg`.
+4. Signs the DMG.
+5. Uploads the DMG to Apple for notarization.
+6. Staples the notarization ticket to the DMG.
+7. Runs Gatekeeper verification.
+8. Writes a SHA-256 checksum next to the DMG.
+9. Generates a Homebrew cask.
+10. Updates `appcast.xml` with the new release (EdDSA-signed).
 
 The output is written under `.build/release/`.
+
+After the release, commit and push the updated `appcast.xml` so the feed URL
+serves the new version:
+
+```bash
+git add appcast.xml
+git commit -m "docs: update appcast for v<version>"
+git push
+```
 
 The release also generates a Homebrew cask at
 `.build/release/codex-profile-switcher.rb`. Publish the DMG to a GitHub release
