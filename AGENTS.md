@@ -1,0 +1,91 @@
+# Repository Guidelines
+
+## Project Structure
+
+```
+CodexProfileSwitcher.swift   # Main app (SwiftUI menu bar, usage polling, settings)
+CodexProfileCLI.swift        # CLI helper (login, logout, switch, doctor)
+AuthBlob.swift               # Auth token model (OAuth + API key)
+AuthVault.swift              # Auth storage protocol
+KeychainAuthVault.swift      # macOS Keychain auth storage
+FileAuthVault.swift          # File-based auth storage (tests, migration)
+build.sh                     # Dev build (loose binaries to ~/.local/bin/)
+Makefile                     # build, test, check targets
+Scripts/
+  package_app.sh             # .app bundle creation + signing
+  release_app.sh             # DMG + notarization + Homebrew cask
+  generate_homebrew_cask.sh  # Cask formula generator
+  keychain_signed_smoke.sh   # Manual Keychain validation
+Tests/
+  run-tests.sh               # All tests
+  run-swift-tests.sh         # Unit tests
+  run-integration-tests.sh   # Integration tests
+  Shell/                     # Shell-based integration tests
+  Swift/                     # Swift unit tests
+assets/                      # Menu bar icons, screenshot
+docs/                        # Public documentation
+```
+
+## Build, Test, Run
+
+```bash
+# Dev build (installs to ~/.local/bin/)
+./build.sh
+
+# Run tests
+make test              # all tests
+make test-unit         # Swift unit tests only
+make test-integration  # shell integration tests only
+
+# Full check (tests + build)
+make check
+
+# App bundle (for signing/packaging)
+Scripts/package_app.sh
+
+# Run the app
+codex-profile-switcher
+```
+
+## Coding Style
+
+- Swift with system frameworks only (Cocoa, SwiftUI, Security, Foundation)
+- No external dependencies or package managers
+- 4-space indentation
+- Prefer short functions (max ~30 lines)
+- No comments unless the WHY is non-obvious
+
+## Project Rules
+
+- Preserve existing user data under `~/.codex/` and `~/.codex-switcher/`
+- Never commit credentials, auth files, logs, or local machine artifacts
+- Keep macOS behavior native and predictable
+- Menu bar interactions should stay quick and quiet
+- Integration tests are hermetic: temporary home, fake binaries, file-backed vault
+- Never add automated tests that touch the real macOS Keychain
+
+## Commit Messages
+
+Use conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`
+
+Short imperative subject line. No body needed for small changes.
+
+## Pull Requests
+
+Before opening a PR:
+
+- Run `make check`
+- Sanity-check profile switching and menu rendering if your change affects them
+- Update documentation when user-visible behavior changes
+- Include a screenshot for UI changes
+
+Open an issue before large changes so the direction is agreed first.
+
+## Agent Notes
+
+- Always rebuild before testing (`./build.sh`)
+- The app reads `~/.codex-switcher/config.json` and stores auth in macOS Keychain
+- Use `CODEX_PROFILE_HOME` and `CODEX_PROFILE_KEYCHAIN_SERVICE` for isolated testing
+- The CLI helper is at `~/.local/bin/codex-profile` after a dev build
+
+By submitting a contribution, you agree that your work will be licensed under the repository's MIT license.

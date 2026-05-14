@@ -10,8 +10,12 @@ auth.json
 .env*
 .claude/
 .agents/
-docs/
+.plans/
+.internal/
 skills/
 skills-lock.json
 CLAUDE.md
 PRODUCT.md
+DESIGN.md
+test-scope.md
+testing-policy.md

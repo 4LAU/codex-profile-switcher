@@ -2,6 +2,13 @@
 
 A macOS menu bar app for switching between OpenAI Codex accounts and checking usage without leaving the menu bar.
 
+[![Latest release](https://img.shields.io/github/v/release/4LAU/codex-profile-switcher?style=flat-square&color=0a0a0c)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-0a0a0c?style=flat-square)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
+[![Homebrew](https://img.shields.io/badge/brew-4lau%2Ftap%2Fcodex--profile--switcher-orange?style=flat-square)](https://github.com/4LAU/homebrew-tap)
+[![License: MIT](https://img.shields.io/badge/license-MIT-6e5aff?style=flat-square)](LICENSE)
+
+<img src="assets/screenshot-menu.png" width="300" alt="Codex Profile Switcher menu bar dropdown showing 12 profiles with usage bars">
+
 ## Features
 
 - Manage multiple saved Codex profiles with custom labels
@@ -28,7 +35,7 @@ it, and drag `CodexProfileSwitcher.app` to Applications.
 
 ### Homebrew
 
-After the first public DMG is published and the Homebrew tap is updated:
+Install via the [4lau/tap](https://github.com/4LAU/homebrew-tap):
 
 ```bash
 brew install --cask 4lau/tap/codex-profile-switcher
@@ -68,7 +75,7 @@ The bundle is written to `CodexProfileSwitcher.app`, with the app executable in
 `APP_IDENTITY` is unset or unavailable, the package script falls back to ad-hoc
 signing.
 
-Maintainer releases should use the DMG release flow in [RELEASE.md](RELEASE.md).
+Maintainer releases should use the DMG release flow in [docs/RELEASING.md](docs/RELEASING.md).
 That path requires Developer ID signing and Apple notarization, and it generates
 the Homebrew cask file for a tap.
 
@@ -150,7 +157,7 @@ not repeatedly ask for your password.
 
 ## Contributing and Security
 
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Read [AGENTS.md](AGENTS.md) for project structure, build commands, and contribution guidelines.
 - Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 - Community expectations are in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 

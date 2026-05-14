@@ -28,3 +28,13 @@ jobs:
 
       - name: Build
         run: make build BUILD_OUT=/tmp/codex-profile-switcher-build-check
+
+      - name: Version check
+        run: |
+          set -euo pipefail
+          source version.env
+          swift_ver=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' CodexProfileSwitcher.swift | head -1)
+          if [[ "$swift_ver" != "$MARKETING_VERSION" ]]; then
+            echo "ERROR: version.env ($MARKETING_VERSION) != CodexProfileSwitcher.swift ($swift_ver)"
+            exit 1
+          fi

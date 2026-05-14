@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' "$ROOT_DIR/CodexProfileSwitcher.swift" | head -n 1)}"
-VERSION="${VERSION:-0.1.0}"
+if [[ -f "$ROOT_DIR/version.env" ]]; then
+  source "$ROOT_DIR/version.env"
+fi
+VERSION="${VERSION:-${MARKETING_VERSION:-0.1.0}}"
 RELEASE_DIR="${RELEASE_DIR:-$ROOT_DIR/.build/release}"
 DMG_PATH="${DMG_PATH:-$RELEASE_DIR/CodexProfileSwitcher-$VERSION.dmg}"
 CHECKSUM_PATH="${CHECKSUM_PATH:-$DMG_PATH.sha256}"
@@ -40,6 +42,7 @@ cask "$CASK_TOKEN" do
   binary "#{appdir}/CodexProfileSwitcher.app/Contents/Helpers/codex-profile"
 
   zap trash: [
+    "~/.codex-switcher",
     "~/Library/Logs/CodexProfileSwitcher",
     "~/Library/Preferences/com.4lau.codex-profile-switcher.plist",
   ]

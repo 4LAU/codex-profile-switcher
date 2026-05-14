@@ -2,11 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "$ROOT_DIR/version.env" ]]; then
+  source "$ROOT_DIR/version.env"
+fi
 APP_BUNDLE="${APP_BUNDLE:-$ROOT_DIR/CodexProfileSwitcher.app}"
 BUILD_DIR="${CODEX_PROFILE_PACKAGE_BUILD_DIR:-$ROOT_DIR/.build/package-app}"
 MODULE_CACHE="${CODEX_PROFILE_SWIFT_MODULE_CACHE:-${TMPDIR:-/tmp}/codex-profile-switcher-module-cache}"
 BUNDLE_ID="${BUNDLE_ID:-com.4lau.codex-profile-switcher}"
-MARKETING_VERSION="${MARKETING_VERSION:-$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' "$ROOT_DIR/CodexProfileSwitcher.swift" | head -n 1)}"
 MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '1')}"
 
