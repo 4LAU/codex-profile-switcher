@@ -198,6 +198,12 @@ enum AuthBlob {
         let claims = idToken.flatMap(stableClaims(fromIDToken:)) ?? [:]
 
         guard !claims.isEmpty else {
+            if let accountId {
+                return [
+                    "kind": "oauth",
+                    "accountId": accountId,
+                ]
+            }
             return nil
         }
 

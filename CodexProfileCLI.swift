@@ -119,7 +119,19 @@ enum CodexProfileCLI {
         try self.ensurePrivateDir(self.liveCodexHome())
 
         var outgoingProfile: String?
-        let outgoingLiveData = try? Data(contentsOf: self.liveAuthPath())
+        let outgoingLiveData: Data?
+        let liveAuthPath = self.liveAuthPath()
+        if self.fileManager.fileExists(atPath: liveAuthPath.path) {
+            do {
+                outgoingLiveData = try Data(contentsOf: liveAuthPath)
+            } catch {
+                throw CLIError.message(
+                    "Could not read live auth at \(liveAuthPath.path). Refusing to overwrite it: \(error.localizedDescription)"
+                )
+            }
+        } else {
+            outgoingLiveData = nil
+        }
         if let liveData = outgoingLiveData {
             let matches = try self.matchingProfiles(for: liveData)
             if matches.count == 1 {

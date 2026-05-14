@@ -168,6 +168,31 @@ test_switch_refuses_unmanaged_live_auth() {
   assert_same_file "$exported_a" "$saved_a" "saved auth changed after refused unmanaged switch"
 }
 
+test_switch_refuses_unreadable_live_auth() {
+  reset_home
+  local saved_a="$WORK_DIR/unreadable-a.json"
+  local saved_b="$WORK_DIR/unreadable-b.json"
+  local exported_a="$WORK_DIR/exported-unreadable-a.json"
+  make_api_auth "$saved_a" "sk-test-unreadable-a-1111111111" "saved-a"
+  make_api_auth "$saved_b" "sk-test-unreadable-b-2222222222" "saved-b"
+  save_auth "UnreadableA" "$saved_a"
+  save_auth "UnreadableB" "$saved_b"
+  cp "$saved_a" "$TEST_HOME/.codex/auth.json"
+  chmod 000 "$TEST_HOME/.codex/auth.json"
+
+  if run_helper app UnreadableB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/unreadable.err"; then
+    chmod 600 "$TEST_HOME/.codex/auth.json"
+    fail "switch succeeded even though live auth could not be read"
+  fi
+
+  chmod 600 "$TEST_HOME/.codex/auth.json"
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_a" "unreadable live auth was modified"
+  export_auth "UnreadableA" "$exported_a"
+  assert_same_file "$exported_a" "$saved_a" "saved auth changed after unreadable live auth"
+  grep -Fq "Could not read live auth" "$WORK_DIR/unreadable.err" \
+    || fail "unreadable live auth failure did not explain the refusal"
+}
+
 test_switch_refuses_ambiguous_live_auth() {
   reset_home
   local duplicate_a="$WORK_DIR/duplicate-a.json"
@@ -365,6 +390,7 @@ test_keychain_repair_preserves_saved_auth() {
 
 test_switch_preserves_outgoing_auth
 test_switch_refuses_unmanaged_live_auth
+test_switch_refuses_unreadable_live_auth
 test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
 test_switch_fails_when_target_profile_has_no_saved_auth

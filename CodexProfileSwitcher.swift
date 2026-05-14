@@ -377,11 +377,14 @@ enum LiveAuthWarning: Equatable {
 
 enum ProfileMutationError: LocalizedError {
     case cannotClearActiveProfile
+    case cannotRemoveActiveProfile
 
     var errorDescription: String? {
         switch self {
         case .cannotClearActiveProfile:
             return "Switch away from the active profile before clearing its saved auth."
+        case .cannotRemoveActiveProfile:
+            return "Switch away from the active profile before deleting it."
         }
     }
 }
@@ -534,18 +537,16 @@ final class ProfileStore {
     }
 
     func removeProfile(_ id: String) throws {
+        if self.liveProfileId == id || self.config.activeProfile == id {
+            throw ProfileMutationError.cannotRemoveActiveProfile
+        }
+
         try self.authVault.deleteAuthBlob(profileID: id)
 
         self.config.profiles.removeAll { $0.id == id }
         self.statuses.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
-        if self.config.activeProfile == id {
-            self.config.activeProfile = self.config.profiles.first?.id ?? ""
-        }
-        if self.liveProfileId == id {
-            self.liveProfileId = nil
-        }
         self.saveConfig()
         self.saveCache()
     }
@@ -1355,10 +1356,6 @@ enum CodexCLIResolver {
             return override
         }
 
-        if let fromPath = self.whichCodex(environment: environment) {
-            return fromPath
-        }
-
         let bundledRoot = environment["CODEX_APP"]?.trimmingCharacters(in: .whitespacesAndNewlines)
             ?? "/Applications/Codex.app"
         let bundledCLI = URL(fileURLWithPath: bundledRoot)
@@ -1366,6 +1363,10 @@ enum CodexCLIResolver {
             .path
         if self.fileManager.isExecutableFile(atPath: bundledCLI) {
             return bundledCLI
+        }
+
+        if let fromPath = self.whichCodex(environment: environment) {
+            return fromPath
         }
 
         return nil
@@ -3439,7 +3440,10 @@ struct ProfilesTab: View {
                         .frame(width: 24, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .disabled(self.selectedId == nil)
+                .disabled(
+                    self.selectedId == nil
+                        || self.selectedId == self.store.liveProfileId
+                        || self.selectedId == self.store.config.activeProfile)
 
                 Spacer()
             }

@@ -113,6 +113,9 @@ struct AuthBlobTests {
         try self.run("fingerprint ignores rotating OAuth token values") {
             try self.testFingerprintIgnoresRotatingOAuthTokenValues()
         }
+        try self.run("fingerprint can use OAuth account ID without ID token") {
+            try self.testFingerprintUsesAccountIDWithoutIDToken()
+        }
         try self.run("API key fingerprint distinguishes keys") {
             try self.testAPIKeyFingerprintDistinguishesKeys()
         }
@@ -227,6 +230,39 @@ struct AuthBlobTests {
             AuthBlob.identityFingerprint(from: first),
             AuthBlob.identityFingerprint(from: second),
             "OAuth fingerprint changed when only rotating token values changed")
+    }
+
+    private static func testFingerprintUsesAccountIDWithoutIDToken() throws {
+        let first = try jsonData([
+            "tokens": [
+                "access_token": "access-1",
+                "refresh_token": "refresh-1",
+                "account_id": "acct-fallback",
+            ],
+        ])
+        let second = try jsonData([
+            "tokens": [
+                "access_token": "access-2",
+                "refresh_token": "refresh-2",
+                "account_id": "acct-fallback",
+            ],
+        ])
+        let other = try jsonData([
+            "tokens": [
+                "access_token": "access-3",
+                "refresh_token": "refresh-3",
+                "account_id": "acct-other",
+            ],
+        ])
+
+        try expect(AuthBlob.identityFingerprint(from: first) != nil, "OAuth account ID should produce fingerprint")
+        try expectEqual(
+            AuthBlob.identityFingerprint(from: first),
+            AuthBlob.identityFingerprint(from: second),
+            "OAuth account ID fingerprint changed when only rotating token values changed")
+        try expect(
+            AuthBlob.identityFingerprint(from: first) != AuthBlob.identityFingerprint(from: other),
+            "Different OAuth account IDs should not share a fingerprint")
     }
 
     private static func testAPIKeyFingerprintDistinguishesKeys() throws {
