@@ -6,7 +6,7 @@ import SwiftUI
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.1.4"
+    static let version = "0.1.5"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
@@ -3599,6 +3599,7 @@ struct ProfilesTab: View {
         self.commitLabel()
         let profile = self.store.addProfile()
         self.profiles = self.store.config.profiles
+        self.editingLabel = profile.label
         self.selectedId = profile.id
         self.toast.show("Added \(profile.label)", style: .success)
     }
