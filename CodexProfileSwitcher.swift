@@ -441,15 +441,18 @@ final class ProfileStore {
             AppLogger.error("Failed to create app directories", metadata: ["error": error.localizedDescription])
         }
 
+        let isFirstLaunch: Bool
         if let data = try? Data(contentsOf: self.configURL),
            let loaded = try? JSONDecoder().decode(AppConfig.self, from: data) {
             self.config = loaded
+            isFirstLaunch = false
         } else {
             if self.fileManager.fileExists(atPath: self.configURL.path) {
                 AppLogger.warning("Config exists but could not be decoded",
                                   metadata: ["path": self.configURL.path])
             }
             self.config = AppConfig(profiles: [], activeProfile: "1", authStorageVersion: nil)
+            isFirstLaunch = true
         }
 
         let cacheDecoder = JSONDecoder()
@@ -461,11 +464,18 @@ final class ProfileStore {
             AppLogger.warning("Cache exists but could not be decoded", metadata: ["path": self.cacheURL.path])
         }
 
-        self.migrateLegacyProfiles()
-        self.repairKeychainAccessIfNeeded()
-        self.discoverProfiles()
+        if isFirstLaunch, self.legacyAuthStoreFiles().isEmpty {
+            self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            self.config.profiles = [ProfileConfig(id: "1", label: "Profile 1")]
+            self.statuses["1"] = .notSetUp
+            self.saveConfig()
+        } else {
+            self.migrateLegacyProfiles()
+            self.repairKeychainAccessIfNeeded()
+            self.discoverProfiles()
+            self.refreshStatusesFromStoredAuth()
+        }
         self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
-        self.refreshStatusesFromStoredAuth()
     }
 
     static func keychainService(environment: [String: String]) -> String {
@@ -1708,6 +1718,13 @@ final class UsageProvider {
     func refreshAll(force: Bool = false) {
         guard !self.isRefreshing else { return }
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
+
+        if !force,
+           !self.store.liveAuthExists(),
+           self.store.statuses.values.allSatisfy({ if case .notSetUp = $0 { true } else { false } }) {
+            return
+        }
+
         self.lastRefreshAll = Date()
         self.isRefreshing = true
 
@@ -2969,6 +2986,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.action = #selector(NSApplication.terminate(_:))
         quitItem.keyEquivalent = "q"
         quitItem.target = NSApp
+        quitItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
+        quitItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(quitItem)
     }
 
@@ -3035,7 +3054,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         self.store.setLiveProfileId(nil)
-        self.liveAuthWarning = self.store.liveAuthExists() ? .unmanaged : nil
+        let allNotSetUp = self.store.statuses.values.allSatisfy {
+            if case .notSetUp = $0 { return true }
+            return false
+        }
+        self.liveAuthWarning = self.store.liveAuthExists() && !allNotSetUp ? .unmanaged : nil
         if self.liveAuthWarning == .unmanaged {
             AppLogger.warning("Live auth does not match any saved profile")
         }
