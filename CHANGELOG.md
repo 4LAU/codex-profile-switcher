@@ -4,11 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.1.4 -- 2026-05-14
+
+### Fixed
+
+- Fix Keychain ACL discovery when CLI helper runs inside the app bundle (e.g. via Homebrew symlink) so both binaries are trusted without prompting
+
 ## 0.1.3 -- 2026-05-14
 
 ### Fixed
 
-- Eliminate Keychain password prompts during profile setup on signed builds by pre-authorizing both the app and CLI helper in each item's access control list
+- Pre-authorize both the app and CLI helper in Keychain item access control lists
 
 ## 0.1.2 -- 2026-05-14
 

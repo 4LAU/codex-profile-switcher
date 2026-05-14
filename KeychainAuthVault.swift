@@ -233,7 +233,7 @@ struct KeychainAuthVault: AuthVault {
         let execURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
         var paths: [String] = []
 
-        if let bundleURL = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil {
+        if let bundleURL = self.enclosingAppBundle(for: execURL) {
             let helperPath = bundleURL.appendingPathComponent("Contents/Helpers/codex-profile").path
             let appPath = bundleURL.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher").path
             if execURL.path != helperPath { paths.append(helperPath) }
@@ -248,6 +248,20 @@ struct KeychainAuthVault: AuthVault {
         }
 
         return paths
+    }
+
+    private func enclosingAppBundle(for executableURL: URL) -> URL? {
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            return Bundle.main.bundleURL
+        }
+        var url = executableURL.standardizedFileURL
+        while url.path != "/" {
+            if url.pathExtension == "app" {
+                return url
+            }
+            url = url.deletingLastPathComponent()
+        }
+        return nil
     }
 
     private func label(profileID: String) -> String {
