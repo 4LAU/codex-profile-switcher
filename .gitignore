@@ -19,5 +19,6 @@ PRODUCT.md
 DESIGN.md
 test-scope.md
 testing-policy.md
+!docs/testing-policy.md
 .security/
 assets/AppIcon.iconset/

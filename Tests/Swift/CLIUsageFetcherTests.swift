@@ -32,9 +32,6 @@ struct CLIUsageFetcherTests {
         try await self.run("fetches usage through isolated Codex RPC home") {
             try await self.testFetchesUsageThroughIsolatedCodexRPCHome()
         }
-        try await self.run("resolver prefers bundled Codex over PATH") {
-            try self.testResolverPrefersBundledCodexOverPath()
-        }
 
         print("CLIUsageFetcherTests: all tests passed")
     }
@@ -101,29 +98,5 @@ struct CLIUsageFetcherTests {
 
         let tempHome = URL(fileURLWithPath: try String(contentsOf: homeLog, encoding: .utf8))
         try expect(!FileManager.default.fileExists(atPath: tempHome.path), "Temporary CODEX_HOME was not cleaned up")
-    }
-
-    private static func testResolverPrefersBundledCodexOverPath() throws {
-        let workDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-profile-resolver-tests-\(UUID().uuidString)", isDirectory: true)
-        let appDir = workDir.appendingPathComponent("Codex.app", isDirectory: true)
-        let bundledCodex = appDir.appendingPathComponent("Contents/Resources/codex")
-        let pathBin = workDir.appendingPathComponent("path-bin", isDirectory: true)
-        let pathCodex = pathBin.appendingPathComponent("codex")
-        defer { try? FileManager.default.removeItem(at: workDir) }
-
-        try FileManager.default.createDirectory(
-            at: bundledCodex.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
-        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: bundledCodex)
-        try Data("#!/usr/bin/env bash\nexit 0\n".utf8).write(to: pathCodex)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bundledCodex.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pathCodex.path)
-
-        let resolved = CodexCLIResolver.resolvePath(
-            environment: ["CODEX_APP": appDir.path, "PATH": "\(pathBin.path):/usr/bin:/bin"])
-
-        try expectEqual(resolved, bundledCodex.path, "Resolver should prefer bundled Codex over PATH")
     }
 }

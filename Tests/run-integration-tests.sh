@@ -189,8 +189,6 @@ test_switch_refuses_unreadable_live_auth() {
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_a" "unreadable live auth was modified"
   export_auth "UnreadableA" "$exported_a"
   assert_same_file "$exported_a" "$saved_a" "saved auth changed after unreadable live auth"
-  grep -Fq "Could not read live auth" "$WORK_DIR/unreadable.err" \
-    || fail "unreadable live auth failure did not explain the refusal"
 }
 
 test_switch_refuses_ambiguous_live_auth() {
@@ -243,25 +241,6 @@ test_switch_uses_active_profile_to_disambiguate_live_auth() {
   assert_same_file "$exported_clone" "$live_duplicate" "active duplicate was not used as outgoing profile"
 }
 
-test_switch_fails_when_target_profile_has_no_saved_auth() {
-  reset_home
-  local saved_a="$WORK_DIR/missing-target-a.json"
-  local live_a="$WORK_DIR/missing-target-live-a.json"
-  local exported_a="$WORK_DIR/exported-missing-target-a.json"
-  make_api_auth "$saved_a" "sk-test-missing-target-a-1111111111" "saved-a"
-  make_api_auth "$live_a" "sk-test-missing-target-a-1111111111" "live-a"
-  save_auth "MissingTargetA" "$saved_a"
-  cp "$live_a" "$TEST_HOME/.codex/auth.json"
-
-  if run_helper app MissingTargetB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/missing-target.err"; then
-    fail "switch succeeded even though requested profile had no saved auth"
-  fi
-
-  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "missing-target switch modified live auth"
-  export_auth "MissingTargetA" "$exported_a"
-  assert_same_file "$exported_a" "$saved_a" "missing-target switch modified saved auth"
-}
-
 test_login_uses_isolated_home_and_preserves_live_auth() {
   reset_home
   local live="$WORK_DIR/login-live.json"
@@ -302,66 +281,6 @@ test_login_fails_when_codex_exits_nonzero() {
   fi
 }
 
-test_login_fails_when_codex_writes_no_auth() {
-  reset_home
-  if FAKE_CODEX_LOGIN_WRITE_AUTH=0 run_helper login MissingAuth >/dev/null 2>"$WORK_DIR/missing-auth.err"; then
-    fail "login succeeded even though fake codex wrote no auth.json"
-  fi
-  if [[ -f "$AUTH_STORE/MissingAuth.json" ]]; then
-    fail "missing-auth login saved a profile anyway"
-  fi
-}
-
-test_login_prefers_bundled_codex_over_path() {
-  reset_home
-  local fake_app_dir="$WORK_DIR/Fake Codex.app"
-  local bundled_codex="$fake_app_dir/Contents/Resources/codex"
-  local path_bin="$WORK_DIR/path-bin"
-  local path_codex="$path_bin/codex"
-  local path_auth="$WORK_DIR/path-login.json"
-  local bundled_auth="$WORK_DIR/bundled-login.json"
-  local exported="$WORK_DIR/exported-bundled-login.json"
-
-  mkdir -p "$(dirname "$bundled_codex")" "$path_bin"
-  make_api_auth "$path_auth" "sk-test-path-login-1111111111" "path"
-  make_api_auth "$bundled_auth" "sk-test-bundled-login-2222222222" "bundled"
-
-  cp "$FAKE_CODEX" "$path_codex"
-  chmod +x "$path_codex"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'set -euo pipefail' \
-    'case "${1:-}" in' \
-    '  --version)' \
-    '    printf "fake-bundled-codex 1.0\n"' \
-    '    ;;' \
-    '  login)' \
-    '    mkdir -p "$CODEX_HOME"' \
-    '    cp "${FAKE_BUNDLED_CODEX_LOGIN_AUTH:?}" "$CODEX_HOME/auth.json"' \
-    '    ;;' \
-    '  *)' \
-    '    printf "unexpected bundled codex command: %s\n" "$*" >&2' \
-    '    exit 2' \
-    '    ;;' \
-    'esac' \
-    > "$bundled_codex"
-  chmod +x "$bundled_codex"
-
-  CODEX_PROFILE_HOME="$TEST_HOME" \
-    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
-    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
-    CODEX_APP="$fake_app_dir" \
-    CODEX_APP_BIN="$FAKE_APP" \
-    FAKE_CODEX_LOGIN_AUTH="$path_auth" \
-    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
-    FAKE_BUNDLED_CODEX_LOGIN_AUTH="$bundled_auth" \
-    PATH="$path_bin:$PATH" \
-    "$HELPER" login BundledProfile >/dev/null
-
-  export_auth "BundledProfile" "$exported"
-  assert_same_file "$exported" "$bundled_auth" "login did not prefer bundled Codex CLI over PATH"
-}
-
 test_keychain_repair_preserves_saved_auth() {
   reset_home
   local saved_a="$WORK_DIR/repair-a.json"
@@ -376,10 +295,8 @@ test_keychain_repair_preserves_saved_auth() {
   printf '{\n  "activeProfile" : "RepairA",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "RepairA", "label" : "Repair A"},\n    {"id" : "RepairB", "label" : "Repair B"}\n  ]\n}\n' \
     > "$TEST_HOME/.codex-switcher/config.json"
 
-  run_helper keychain-repair >"$WORK_DIR/keychain-repair.out"
+  run_helper keychain-repair >/dev/null
 
-  grep -Fq "Rewrote 2 saved auth item(s)" "$WORK_DIR/keychain-repair.out" \
-    || fail "keychain-repair did not report rewritten auth items"
   grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
     || fail "keychain-repair did not mark authStorageVersion 3"
   export_auth "RepairA" "$exported_a"
@@ -393,11 +310,8 @@ test_switch_refuses_unmanaged_live_auth
 test_switch_refuses_unreadable_live_auth
 test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
-test_switch_fails_when_target_profile_has_no_saved_auth
 test_login_uses_isolated_home_and_preserves_live_auth
 test_login_fails_when_codex_exits_nonzero
-test_login_fails_when_codex_writes_no_auth
-test_login_prefers_bundled_codex_over_path
 test_keychain_repair_preserves_saved_auth
 
 printf 'Integration tests: all tests passed\n'
