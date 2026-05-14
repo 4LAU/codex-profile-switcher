@@ -14,6 +14,10 @@ DMG_PATH="${DMG_PATH:-$RELEASE_DIR/CodexProfileSwitcher-$VERSION.dmg}"
 CHECKSUM_PATH="$DMG_PATH.sha256"
 CASK_OUTPUT_PATH="${CASK_OUTPUT_PATH:-$RELEASE_DIR/codex-profile-switcher.rb}"
 
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app
+fi
+
 log() {
   printf '%s\n' "$*"
 }
@@ -133,6 +137,10 @@ fi
   "$APPCAST_WORK_DIR"
 
 cp "$APPCAST_WORK_DIR/appcast.xml" "$ROOT_DIR/appcast.xml"
+if grep -q '<enclosure' "$ROOT_DIR/appcast.xml" &&
+  grep '<enclosure' "$ROOT_DIR/appcast.xml" | grep -vq 'sparkle:edSignature='; then
+  fail "generated Sparkle appcast contains an unsigned update enclosure."
+fi
 log "Updated appcast.xml"
 
 log "Created release artifacts:"
