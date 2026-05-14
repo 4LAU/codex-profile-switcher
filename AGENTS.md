@@ -71,6 +71,8 @@ codex-profile-switcher
 - Menu bar interactions should stay quick and quiet
 - Integration tests are hermetic: temporary home, fake binaries, file-backed vault
 - Never add automated tests that touch the real macOS Keychain
+- Sparkle update checks only exist in packaged `.app` builds. The loose dev binary from `./build.sh` will not show **Check for Updates...**
+- Public releases must include a committed `appcast.xml` update from `Scripts/release_app.sh`; pushing that file to `main` is what publishes the Sparkle feed
 
 ## Commit Messages
 
@@ -96,5 +98,6 @@ Open an issue before large changes so the direction is agreed first.
 - The app reads `~/.codex-switcher/config.json` and stores auth in macOS Keychain
 - Use `CODEX_PROFILE_HOME` and `CODEX_PROFILE_KEYCHAIN_SERVICE` for isolated testing
 - The CLI helper is at `~/.local/bin/codex-profile` after a dev build
+- Smoke-test Sparkle with `/Applications/CodexProfileSwitcher.app`, not `~/.local/bin/codex-profile-switcher`
 
 By submitting a contribution, you agree that your work will be licensed under the repository's MIT license.
