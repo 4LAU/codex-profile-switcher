@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- In-app update checking via Sparkle 2.9.1 — DMG users are notified when a new version is available
+- "Check for Updates..." menu item in the status bar menu
+- Appcast generation in the release pipeline for automatic update feeds
+
 ## 0.1.5 -- 2026-05-14
 
 ### Fixed
