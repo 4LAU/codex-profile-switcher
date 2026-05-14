@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.1.3 -- 2026-05-14
+
+### Fixed
+
+- Eliminate Keychain password prompts during profile setup on signed builds by pre-authorizing both the app and CLI helper in each item's access control list
+
 ## 0.1.2 -- 2026-05-14
 
 ### Added

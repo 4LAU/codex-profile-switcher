@@ -194,7 +194,60 @@ struct KeychainAuthVault: AuthVault {
         attributes[kSecAttrLabel] = self.label(profileID: profileID)
         attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         attributes[kSecValueData] = data
+        if let access = self.sharedAccess(profileID: profileID) {
+            attributes[kSecAttrAccess] = access
+        }
         return attributes
+    }
+
+    private func sharedAccess(profileID: String) -> SecAccess? {
+        var trustedApps: [SecTrustedApplication] = []
+
+        var selfApp: SecTrustedApplication?
+        if SecTrustedApplicationCreateFromPath(nil, &selfApp) == errSecSuccess,
+           let app = selfApp {
+            trustedApps.append(app)
+        }
+
+        let siblingPaths = self.siblingBinaryPaths()
+        for path in siblingPaths {
+            var trusted: SecTrustedApplication?
+            if SecTrustedApplicationCreateFromPath(path, &trusted) == errSecSuccess,
+               let app = trusted {
+                trustedApps.append(app)
+            }
+        }
+
+        guard !trustedApps.isEmpty else { return nil }
+
+        var access: SecAccess?
+        let status = SecAccessCreate(
+            self.label(profileID: profileID) as CFString,
+            trustedApps as CFArray,
+            &access
+        )
+        return status == errSecSuccess ? access : nil
+    }
+
+    private func siblingBinaryPaths() -> [String] {
+        let execURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        var paths: [String] = []
+
+        if let bundleURL = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil {
+            let helperPath = bundleURL.appendingPathComponent("Contents/Helpers/codex-profile").path
+            let appPath = bundleURL.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher").path
+            if execURL.path != helperPath { paths.append(helperPath) }
+            if execURL.path != appPath { paths.append(appPath) }
+        } else {
+            let dir = execURL.deletingLastPathComponent()
+            let candidates = ["codex-profile", "codex-profile-switcher"]
+            for name in candidates {
+                let path = dir.appendingPathComponent(name).path
+                if path != execURL.path { paths.append(path) }
+            }
+        }
+
+        return paths
     }
 
     private func label(profileID: String) -> String {
