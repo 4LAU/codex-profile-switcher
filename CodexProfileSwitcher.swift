@@ -1,6 +1,9 @@
 import Cocoa
 import CryptoKit
 import SwiftUI
+#if canImport(Sparkle)
+import Sparkle
+#endif
 
 // MARK: - App Info
 
@@ -2803,6 +2806,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastLiveAuthMtime: Date?
     private var isMenuOpen = false
     private var menuRefreshRetryTask: Task<Void, Never>?
+    #if canImport(Sparkle)
+    private var updaterController: SPUStandardUpdaterController?
+    #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.info("App launched", metadata: ["version": AppInfo.version])
@@ -2824,6 +2830,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.usageProvider.refreshAll()
         self.startPeriodicRefreshTimer()
+
+        #if canImport(Sparkle)
+        if Bundle.main.bundlePath.hasSuffix(".app") {
+            let controller = SPUStandardUpdaterController(
+                startingUpdater: false,
+                updaterDelegate: nil,
+                userDriverDelegate: nil)
+            controller.updater.automaticallyChecksForUpdates = true
+            controller.startUpdater()
+            self.updaterController = controller
+        }
+        #endif
     }
 
     deinit {
@@ -2983,6 +3001,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         settingsItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(settingsItem)
+
+        #if canImport(Sparkle)
+        if let controller = self.updaterController {
+            let updateItem = NSMenuItem(
+                title: "Check for Updates...",
+                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                keyEquivalent: "")
+            updateItem.target = controller
+            updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+            updateItem.image?.size = NSSize(width: 13, height: 13)
+            self.menu.addItem(updateItem)
+        }
+        #endif
 
         self.menu.addItem(.separator())
 
