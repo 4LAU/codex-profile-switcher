@@ -3262,7 +3262,7 @@ enum SettingsWindow {
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false)
         window.title = "Settings"
@@ -3318,57 +3318,27 @@ struct ProfilesTab: View {
     let store: ProfileStore
     let actions: SettingsActions
     @ObservedObject var toast: ToastState
-    @State private var labels: [String: String] = [:]
+    @State private var selectedId: String?
+    @State private var editingLabel: String = ""
     @State private var profiles: [ProfileConfig] = []
     @State private var pendingDeleteId: String?
     @State private var pendingClearAuthId: String?
     @State private var actionInFlight: Set<String> = []
     @State private var refreshTick = 0
+    @FocusState private var labelFieldFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if !self.store.duplicateProfileGroups().isEmpty {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "square.stack.3d.up.trianglebadge.exclamationmark")
-                                .foregroundStyle(Palette.warning)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Shared account detected")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("Profiles marked below appear to use the same underlying OpenAI account. Re-auth or clear one of them to remove duplicates.")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(12)
-                        .background(Palette.warning.opacity(0.10))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-
-                    ForEach(self.profiles) { profile in
-                        self.profileRow(profile)
-                    }
-                }
-                .padding(20)
-            }
-
+        HStack(spacing: 0) {
+            self.sidebar
             Divider()
-
-            HStack {
-                Spacer()
-
-                Button(action: self.addProfile) {
-                    Label("Add", systemImage: "plus")
-                }
-
-                Button("Save") { self.saveAll() }
-                    .keyboardShortcut(.return)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
+            self.detailPanel
         }
-        .onAppear { self.reload() }
+        .onAppear {
+            self.profiles = self.store.config.profiles
+            self.selectedId = self.store.liveProfileId ?? self.profiles.first?.id
+            self.syncEditingLabel()
+        }
+        .onDisappear { self.commitLabel() }
         .alert("Delete Profile", isPresented: Binding(
             get: { self.pendingDeleteId != nil },
             set: { if !$0 { self.pendingDeleteId = nil } }
@@ -3376,7 +3346,7 @@ struct ProfilesTab: View {
             Button("Cancel", role: .cancel) { self.pendingDeleteId = nil }
             Button("Delete", role: .destructive) {
                 if let id = self.pendingDeleteId {
-                    let label = self.labels[id] ?? id
+                    let label = self.profileLabel(id)
                     if self.removeProfile(id) {
                         self.toast.show("Deleted \(label)", style: .info)
                     }
@@ -3385,7 +3355,7 @@ struct ProfilesTab: View {
             }
         } message: {
             if let id = self.pendingDeleteId {
-                Text("Are you sure you want to delete \"\(self.labels[id] ?? id)\"? This cannot be undone.")
+                Text("Are you sure you want to delete \"\(self.profileLabel(id))\"? This cannot be undone.")
             }
         }
         .confirmationDialog("Clear Saved Auth", isPresented: Binding(
@@ -3402,34 +3372,245 @@ struct ProfilesTab: View {
         }
     }
 
-    private func reload() {
-        self.profiles = self.store.config.profiles
-        self.labels = [:]
-        for profile in self.profiles {
-            self.labels[profile.id] = profile.label
+    // MARK: - Sidebar
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            List(selection: self.$selectedId) {
+                Section("Profiles") {
+                    ForEach(self.profiles) { profile in
+                        self.sidebarRow(profile)
+                            .tag(profile.id)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .onChange(of: self.selectedId) { _, _ in
+                self.commitLabel()
+                self.syncEditingLabel()
+            }
+
+            Divider()
+
+            HStack(spacing: 0) {
+                Button(action: self.addProfile) {
+                    Image(systemName: "plus")
+                        .frame(width: 24, height: 20)
+                }
+                .buttonStyle(.borderless)
+
+                Divider().frame(height: 14)
+
+                Button {
+                    if let id = self.selectedId { self.pendingDeleteId = id }
+                } label: {
+                    Image(systemName: "minus")
+                        .frame(width: 24, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .disabled(self.selectedId == nil)
+
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+        }
+        .frame(width: 200)
+    }
+
+    @ViewBuilder
+    private func sidebarRow(_ profile: ProfileConfig) -> some View {
+        let details = self.store.authDetails(for: profile.id)
+        let isActive = self.store.liveProfileId == profile.id
+        let hasSavedAuth = self.store.authStoreExists(for: profile.id)
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Text(profile.label)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                if isActive {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                }
+            }
+            Text(hasSavedAuth ? (details?.menuSummary ?? "Authenticated") : "Not set up")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 2)
+        .id("\(profile.id)-\(self.refreshTick)")
+    }
+
+    // MARK: - Detail Panel
+
+    @ViewBuilder
+    private var detailPanel: some View {
+        if let id = self.selectedId,
+           let profile = self.profiles.first(where: { $0.id == id }) {
+            self.profileDetail(profile)
+        } else {
+            Text("No profile selected")
+                .font(.system(size: 13))
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private func saveAll() {
-        for (id, label) in self.labels {
-            self.store.updateLabel(for: id, label: label)
+    @ViewBuilder
+    private func profileDetail(_ profile: ProfileConfig) -> some View {
+        let details = self.store.authDetails(for: profile.id)
+        let hasSavedAuth = self.store.authStoreExists(for: profile.id)
+        let isActive = self.store.liveProfileId == profile.id
+        let status = self.store.statuses[profile.id] ?? .notSetUp
+        let loginRunning = CodexBridge.isLoginRunning(profileId: profile.id)
+        let inFlight = self.actionInFlight.contains(profile.id) || loginRunning
+        let duplicates = self.store.duplicateProfileIDs(for: profile.id)
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if !duplicates.isEmpty {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Palette.warning)
+                            .font(.system(size: 12))
+                        Text("Same account as \(self.duplicateNames(for: duplicates))")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Palette.warning)
+                    }
+                }
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Label:")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 60, alignment: .trailing)
+                    TextField("", text: self.$editingLabel)
+                        .textFieldStyle(.roundedBorder)
+                        .focused(self.$labelFieldFocused)
+                        .onSubmit { self.commitLabel() }
+                        .onExitCommand { self.syncEditingLabel() }
+                        .onChange(of: self.labelFieldFocused) { _, focused in
+                            if !focused { self.commitLabel() }
+                        }
+                        .disabled(inFlight)
+                }
+
+                if hasSavedAuth {
+                    if let details {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("Account:")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 60, alignment: .trailing)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(details.settingsTitle)
+                                    .font(.system(size: 13))
+                                    .textSelection(.enabled)
+
+                                if !details.settingsDetails.isEmpty,
+                                   details.settingsDetails != "No additional identity details" {
+                                    Text(details.settingsDetails)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Status:")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 60, alignment: .trailing)
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(self.statusColor(for: status))
+                                .frame(width: 7, height: 7)
+                            Text(self.statusLabel(for: status))
+                                .font(.system(size: 13))
+                            if isActive {
+                                Text("(active)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if loginRunning {
+                            Button("Cancel Login") { self.cancelLogin(profile.id) }
+                        } else {
+                            Button("Set Up") { self.reauthenticate(profile.id) }
+                                .disabled(inFlight)
+                        }
+                        Text("Link your OpenAI account to start tracking usage.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.leading, 68)
+                }
+
+                if hasSavedAuth {
+                    HStack(spacing: 8) {
+                        if loginRunning {
+                            Button("Cancel Login") { self.cancelLogin(profile.id) }
+                        } else {
+                            Button("Re-authenticate\u{2026}") {
+                                self.reauthenticate(profile.id)
+                            }
+                            .disabled(inFlight)
+                        }
+
+                        Button("Clear Auth\u{2026}") { self.pendingClearAuthId = profile.id }
+                            .disabled(inFlight || isActive)
+                    }
+                    .padding(.leading, 68)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    // MARK: - Actions
+
+    private func syncEditingLabel() {
+        guard let id = self.selectedId,
+              let profile = self.profiles.first(where: { $0.id == id }) else {
+            self.editingLabel = ""
+            return
+        }
+        self.editingLabel = profile.label
+    }
+
+    private func commitLabel() {
+        guard let id = self.selectedId else { return }
+        let trimmed = self.editingLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        self.store.updateLabel(for: id, label: trimmed)
         self.profiles = self.store.config.profiles
-        self.toast.show("Settings saved", style: .success)
     }
 
     private func addProfile() {
+        self.commitLabel()
         let profile = self.store.addProfile()
-        self.labels[profile.id] = profile.label
         self.profiles = self.store.config.profiles
+        self.selectedId = profile.id
         self.toast.show("Added \(profile.label)", style: .success)
     }
 
     private func removeProfile(_ id: String) -> Bool {
         do {
             try self.store.removeProfile(id)
-            self.labels.removeValue(forKey: id)
             self.profiles = self.store.config.profiles
+            if self.selectedId == id {
+                self.selectedId = self.profiles.first?.id
+                self.syncEditingLabel()
+            }
             return true
         } catch {
             self.toast.show(error.localizedDescription, style: .error)
@@ -3437,155 +3618,18 @@ struct ProfilesTab: View {
         }
     }
 
-    private func labelBinding(for id: String, default defaultValue: String) -> Binding<String> {
-        Binding(
-            get: { self.labels[id] ?? defaultValue },
-            set: { self.labels[id] = $0 })
-    }
-
-    @ViewBuilder
-    private func profileRow(_ profile: ProfileConfig) -> some View {
-        let details = self.store.authDetails(for: profile.id)
-        let duplicates = self.store.duplicateProfileIDs(for: profile.id)
-        let isActive = self.store.liveProfileId == profile.id
-        let hasSavedAuth = self.store.authStoreExists(for: profile.id)
-        let status = self.store.statuses[profile.id] ?? .notSetUp
-        let loginRunning = CodexBridge.isLoginRunning(profileId: profile.id)
-        let inFlight = self.actionInFlight.contains(profile.id) || loginRunning
-
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                Text("Profile \(profile.id)")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 58, alignment: .leading)
-
-                TextField("Label", text: self.labelBinding(for: profile.id, default: profile.label))
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(inFlight)
-
-                if isActive {
-                    Text("Active")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Palette.accent)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Palette.accent.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-
-                Text(self.statusLabel(for: status))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.07))
-                    .clipShape(Capsule())
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(details?.settingsTitle ?? "No saved auth")
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-
-                Text(details?.settingsDetails ?? "No saved auth snapshot yet. Use Re-auth to log this profile in.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-
-                if !duplicates.isEmpty {
-                    Text(self.duplicateDetails(for: duplicates))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Palette.warning)
-                }
-            }
-
-            Divider()
-
-            HStack(spacing: 8) {
-                if loginRunning {
-                    Button {
-                        self.cancelLogin(profile.id)
-                    } label: {
-                        Label("Cancel Login", systemImage: "xmark.circle")
-                    }
-                } else {
-                    Button {
-                        self.reauthenticate(profile.id)
-                    } label: {
-                        Label(
-                            hasSavedAuth ? "Re-auth" : "Set Up",
-                            systemImage: hasSavedAuth ? "arrow.triangle.2.circlepath" : "person.badge.plus")
-                    }
-                    .disabled(self.actionInFlight.contains(profile.id))
-                }
-
-                Spacer(minLength: 0)
-
-                Button {
-                    self.pendingClearAuthId = profile.id
-                } label: {
-                    Label("Clear Auth", systemImage: "xmark.circle")
-                }
-                .disabled(inFlight || !hasSavedAuth || isActive)
-
-                Button(role: .destructive, action: {
-                    self.pendingDeleteId = profile.id
-                }) {
-                    Label("Delete", systemImage: "trash")
-                }
-                .disabled(inFlight)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-        .padding(14)
-        .background(Color.primary.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(duplicates.isEmpty ? Color.primary.opacity(0.08) : Palette.warning.opacity(0.35), lineWidth: 1)
-        )
-        .id("\(profile.id)-\(self.refreshTick)")
-    }
-
-    private func duplicateDetails(for duplicates: [String]) -> String {
-        let names = duplicates.map { id in
-            self.labels[id] ?? self.store.config.profiles.first(where: { $0.id == id })?.label ?? "Profile \(id)"
-        }
-
-        if names.count == 1, let name = names.first {
-            return "Same account as \(name)"
-        }
-        return "Same account as \(names.joined(separator: ", "))"
-    }
-
-    private func statusLabel(for status: ProfileStatus) -> String {
-        switch status {
-        case .available:
-            return "Ready"
-        case .loading:
-            return "Refreshing"
-        case .stale:
-            return "Cached"
-        case .reloginNeeded:
-            return "Re-login needed"
-        case .notSetUp:
-            return "Not set up"
-        }
-    }
-
     private func reauthenticate(_ profileId: String) {
+        self.commitLabel()
         self.actionInFlight.insert(profileId)
         self.actions.reauthenticateProfile(profileId) { result in
             DispatchQueue.main.async(execute: {
                 self.actionInFlight.remove(profileId)
                 self.refreshTick += 1
-                self.reload()
+                self.profiles = self.store.config.profiles
+                self.syncEditingLabel()
                 switch result {
                 case .success:
-                    self.toast.show("Updated auth for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .success)
+                    self.toast.show("Updated auth for \(self.profileLabel(profileId))", style: .success)
                 case .failure(let error):
                     self.toast.show(error.localizedDescription, style: .error)
                 }
@@ -3597,7 +3641,7 @@ struct ProfilesTab: View {
         if self.actions.cancelLogin(profileId) {
             self.actionInFlight.remove(profileId)
             self.refreshTick += 1
-            self.toast.show("Cancelled login for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .info)
+            self.toast.show("Cancelled login for \(self.profileLabel(profileId))", style: .info)
         }
     }
 
@@ -3605,10 +3649,40 @@ struct ProfilesTab: View {
         switch self.actions.clearSavedAuth(profileId) {
         case .success:
             self.refreshTick += 1
-            self.reload()
-            self.toast.show("Cleared saved auth for \(self.labels[profileId] ?? "Profile \(profileId)")", style: .info)
+            self.profiles = self.store.config.profiles
+            self.syncEditingLabel()
+            self.toast.show("Cleared auth for \(self.profileLabel(profileId))", style: .info)
         case .failure(let error):
             self.toast.show(error.localizedDescription, style: .error)
+        }
+    }
+
+    private func profileLabel(_ id: String) -> String {
+        self.profiles.first(where: { $0.id == id })?.label ?? "Profile \(id)"
+    }
+
+    private func duplicateNames(for duplicates: [String]) -> String {
+        let names = duplicates.map { self.profileLabel($0) }
+        return names.count == 1 ? (names.first ?? "") : names.joined(separator: ", ")
+    }
+
+    private func statusLabel(for status: ProfileStatus) -> String {
+        switch status {
+        case .available: return "Ready"
+        case .loading: return "Refreshing"
+        case .stale: return "Cached"
+        case .reloginNeeded: return "Re-login needed"
+        case .notSetUp: return "Not set up"
+        }
+    }
+
+    private func statusColor(for status: ProfileStatus) -> Color {
+        switch status {
+        case .available: return Palette.success
+        case .loading: return Palette.accent
+        case .stale: return .secondary
+        case .reloginNeeded: return Palette.warning
+        case .notSetUp: return .secondary.opacity(0.5)
         }
     }
 }
@@ -3765,6 +3839,28 @@ enum Main {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
+        let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: "Hide Codex Profile Switcher",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(
+            withTitle: "Hide Others",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(
+            withTitle: "Show All",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "Quit Codex Profile Switcher",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q")
+        let appMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        appMenuItem.submenu = appMenu
+
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(
             withTitle: "Close Window",
@@ -3783,9 +3879,20 @@ enum Main {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
         editMenuItem.submenu = editMenu
+
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(
+            withTitle: "Minimize",
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m")
+        let windowMenuItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        windowMenuItem.submenu = windowMenu
+
         let mainMenu = NSMenu()
+        mainMenu.addItem(appMenuItem)
         mainMenu.addItem(fileMenuItem)
         mainMenu.addItem(editMenuItem)
+        mainMenu.addItem(windowMenuItem)
         app.mainMenu = mainMenu
 
         let delegate = AppDelegate()
