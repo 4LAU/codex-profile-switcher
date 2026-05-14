@@ -758,6 +758,12 @@ final class ProfileStore {
     func matchingProfilesForLiveAuth() -> [String] {
         guard let liveFingerprint = self.liveAuthFingerprint() else { return [] }
 
+        let hasAnySetUp = self.statuses.values.contains {
+            if case .notSetUp = $0 { return false }
+            return true
+        }
+        guard hasAnySetUp else { return [] }
+
         return self.config.profiles.compactMap { profile in
             guard self.savedAuthFingerprint(for: profile.id) == liveFingerprint else {
                 return nil
@@ -1720,7 +1726,6 @@ final class UsageProvider {
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
 
         if !force,
-           !self.store.liveAuthExists(),
            self.store.statuses.values.allSatisfy({ if case .notSetUp = $0 { true } else { false } }) {
             return
         }
