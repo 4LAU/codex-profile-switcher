@@ -1,6 +1,15 @@
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-  <channel>
-    <title>Codex Profile Switcher Changelog</title>
-  </channel>
+    <channel>
+        <title>Codex Profile Switcher Changelog</title>
+        <item>
+            <title>0.1.5</title>
+            <pubDate>Thu, 14 May 2026 13:31:11 -0700</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.5/CodexProfileSwitcher-0.1.5.dmg" length="3742322" type="application/octet-stream" sparkle:edSignature="Law9+uGkD493NHl2TUSQpMqFcOxH2uY9Uxu/xFogNx2KliDBRIDUyxa20Sgd5A85SW/dR0l7cK6HCMvPkSWdCw=="/>
+        </item>
+    </channel>
 </rss>

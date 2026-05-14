@@ -36,7 +36,7 @@ This key is required for release builds — `package_app.sh` will fail if `SPARK
 Run this once on the release machine:
 
 ```bash
-xcrun notarytool store-credentials codex-profile-switcher \
+xcrun notarytool store-credentials notarytool \
   --apple-id "you@example.com" \
   --team-id "TEAMID12345" \
   --password "app-specific-password"
@@ -45,14 +45,14 @@ xcrun notarytool store-credentials codex-profile-switcher \
 The release script can then use:
 
 ```bash
-NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher
+NOTARY_KEYCHAIN_PROFILE=notarytool
 ```
 
 ## Build a Public DMG
 
 ```bash
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
-NOTARY_KEYCHAIN_PROFILE=codex-profile-switcher \
+NOTARY_KEYCHAIN_PROFILE=notarytool \
 SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
 Scripts/release_app.sh
 ```
