@@ -1920,17 +1920,6 @@ private enum Palette {
     static let mid = Color(red: 0.70, green: 0.55, blue: 0.35)
 }
 
-private func blankMenuGlyph() -> NSImage {
-    let size = NSSize(width: 1, height: 1)
-    let image = NSImage(size: size)
-    image.lockFocus()
-    NSColor.clear.setFill()
-    NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
-    image.unlockFocus()
-    image.isTemplate = true
-    return image
-}
-
 func progressColor(for percent: Int) -> Color {
     if percent >= 80 { return Palette.danger }
     if percent >= 50 { return Palette.mid }
@@ -2941,11 +2930,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.action = #selector(NSApplication.terminate(_:))
         quitItem.keyEquivalent = "q"
         quitItem.target = NSApp
-        quitItem.state = .off
-        quitItem.image = nil
-        quitItem.offStateImage = blankMenuGlyph()
-        quitItem.onStateImage = blankMenuGlyph()
-        quitItem.mixedStateImage = blankMenuGlyph()
         self.menu.addItem(quitItem)
     }
 
