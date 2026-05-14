@@ -1,0 +1,102 @@
+name: Update Homebrew
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.5"
+        required: false
+        type: string
+      version:
+        description: "Release version, e.g. 0.1.5"
+        required: false
+        type: string
+
+jobs:
+  update-cask:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve release inputs
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
+          INPUT_TAG: ${{ inputs.tag || '' }}
+          INPUT_VERSION: ${{ inputs.version || '' }}
+        run: |
+          set -euo pipefail
+
+          tag="$RELEASE_TAG"
+          if [ -z "$tag" ]; then
+            tag="$INPUT_TAG"
+          fi
+          if [ -z "$tag" ] && [ -n "$INPUT_VERSION" ]; then
+            tag="v${INPUT_VERSION#v}"
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "::error::Provide a release tag or version."
+            exit 1
+          fi
+
+          version="${tag#v}"
+          tag="v$version"
+          artifact="CodexProfileSwitcher-${version}.dmg"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Homebrew cask update
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag }}
+          ARTIFACT: ${{ steps.release.outputs.artifact }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set HOMEBREW_TAP_TOKEN with Actions read/write access to 4LAU/homebrew-tap."
+            exit 1
+          fi
+
+          request_id="codex-profile-switcher-${TAG_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          expected_title="Update codex-profile-switcher for ${TAG_NAME} (${request_id})"
+
+          gh workflow run update-cask.yml \
+            --repo 4LAU/homebrew-tap \
+            --ref main \
+            -f cask=codex-profile-switcher \
+            -f tag="$TAG_NAME" \
+            -f repository="${{ github.repository }}" \
+            -f artifact="$ARTIFACT" \
+            -f request_id="$request_id"
+
+          run_id=""
+          for _ in {1..30}; do
+            run_id=$(gh run list \
+              --repo 4LAU/homebrew-tap \
+              --workflow update-cask.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle == \"$expected_title\") | .databaseId" | head -n1)
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not find tap workflow run with title: $expected_title"
+            exit 1
+          fi
+
+          gh run watch "$run_id" \
+            --repo 4LAU/homebrew-tap \
+            --exit-status \
+            --interval 10

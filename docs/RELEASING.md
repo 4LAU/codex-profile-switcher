@@ -48,6 +48,15 @@ The release script can then use:
 NOTARY_KEYCHAIN_PROFILE=notarytool
 ```
 
+## One-Time Homebrew Dispatch Setup
+
+The source repository dispatches a workflow in `4LAU/homebrew-tap` after a
+GitHub Release is published. Add a fine-grained token as
+`HOMEBREW_TAP_TOKEN` in this repository's GitHub Actions secrets.
+
+The token should only have access to `4LAU/homebrew-tap`, and only needs
+Actions read/write permission.
+
 ## Build a Public DMG
 
 ```bash
@@ -82,8 +91,8 @@ git push
 ```
 
 The release also generates a Homebrew cask at
-`.build/release/codex-profile-switcher.rb`. Publish the DMG to a GitHub release
-before updating a tap with that cask.
+`.build/release/codex-profile-switcher.rb` as a local fallback. The normal
+Homebrew tap update is automated after the GitHub Release is published.
 
 ## Homebrew Cask
 
@@ -100,17 +109,28 @@ The generated cask assumes:
 - the release asset is `CodexProfileSwitcher-<version>.dmg`
 - the tap repository contains `Casks/codex-profile-switcher.rb`
 
-After running `Scripts/release_app.sh`, copy or commit the generated cask into
-the tap:
+After the notarized DMG is uploaded to the GitHub Release, publishing that
+release triggers `.github/workflows/update-homebrew.yml`. That workflow
+dispatches `4LAU/homebrew-tap`'s `update-cask.yml` workflow with:
+
+- `cask=codex-profile-switcher`
+- `repository=4LAU/codex-profile-switcher`
+- `tag=v<version>`
+- `artifact=CodexProfileSwitcher-<version>.dmg`
+
+The tap workflow downloads the public DMG, computes the SHA-256, updates
+`Casks/codex-profile-switcher.rb`, commits, and pushes the tap change.
+
+If the automatic dispatch fails, run the tap workflow manually:
 
 ```bash
-cp .build/release/codex-profile-switcher.rb ../homebrew-tap/Casks/
-cd ../homebrew-tap
-brew audit --cask --strict Casks/codex-profile-switcher.rb
-brew install --cask --verbose ./Casks/codex-profile-switcher.rb
-git add Casks/codex-profile-switcher.rb
-git commit -m "Update codex-profile-switcher <version>"
-git push
+gh workflow run update-cask.yml \
+  --repo 4LAU/homebrew-tap \
+  --ref main \
+  -f cask=codex-profile-switcher \
+  -f repository=4LAU/codex-profile-switcher \
+  -f tag=v<version> \
+  -f artifact=CodexProfileSwitcher-<version>.dmg
 ```
 
 If the repository, release tag, or tap name differs, override the generator:
