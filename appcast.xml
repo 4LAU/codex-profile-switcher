@@ -9,7 +9,7 @@
             <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.5/CodexProfileSwitcher-0.1.5.dmg" length="3742322" type="application/octet-stream" sparkle:edSignature="Law9+uGkD493NHl2TUSQpMqFcOxH2uY9Uxu/xFogNx2KliDBRIDUyxa20Sgd5A85SW/dR0l7cK6HCMvPkSWdCw=="/>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.5/CodexProfileSwitcher-0.1.5.dmg" length="3857534" type="application/octet-stream" sparkle:edSignature="B7lXFFCq57cDn5wEoNe7m9jX8iPx2Zd0dBpD/Libqa0zQLuDFgxhnrTVwXbJZh8EeHqaUE5ilAIbgZfNnbSqBA=="/>
         </item>
     </channel>
 </rss>
