@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.1.6</title>
+            <pubDate>Fri, 15 May 2026 01:05:55 -0700</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.6/CodexProfileSwitcher-0.1.6.dmg" length="3869919" type="application/octet-stream" sparkle:edSignature="tTnlJoo+VmDwlWgiGe5uv8XhLOuLh9cJLYApJ4rUhQZcvXTSTz+y0zr7Z2Yo+Ukb7+0ZKNvPaXBHEV5X2HcDCA=="/>
+        </item>
+        <item>
             <title>0.1.5</title>
             <pubDate>Thu, 14 May 2026 13:31:11 -0700</pubDate>
             <sparkle:version>6</sparkle:version>
