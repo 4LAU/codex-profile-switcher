@@ -459,7 +459,9 @@ final class ProfileStore {
         let existingIds = Set(self.config.profiles.map(\.id))
         var nextId = 1
         while existingIds.contains("\(nextId)") { nextId += 1 }
-        let profile = ProfileConfig(id: "\(nextId)", label: "Profile \(nextId)")
+        let profile = ProfileConfig(
+            id: "\(nextId)",
+            label: Self.nextDefaultProfileLabel(after: self.config.profiles))
         self.config.profiles.append(profile)
         if self.authVault.diagnostics().activeBackend == .legacyACL {
             self.config.migrationComplete = false
@@ -467,6 +469,21 @@ final class ProfileStore {
         self.statuses[profile.id] = .notSetUp
         self.saveConfig()
         return profile
+    }
+
+    static func nextDefaultProfileLabel(after profiles: [ProfileConfig]) -> String {
+        let highestDefaultNumber = profiles
+            .compactMap { Self.defaultProfileLabelNumber($0.label) }
+            .max() ?? 0
+        return "Profile \(highestDefaultNumber + 1)"
+    }
+
+    private static func defaultProfileLabelNumber(_ label: String) -> Int? {
+        let prefix = "Profile "
+        guard label.hasPrefix(prefix) else { return nil }
+        let suffix = label.dropFirst(prefix.count)
+        guard let number = Int(suffix), number > 0 else { return nil }
+        return String(number) == String(suffix) ? number : nil
     }
 
     func removeProfile(_ id: String) throws {
@@ -801,9 +818,13 @@ final class ProfileStore {
             case .needsMigration:
                 self.statuses[profile.id] = .needsMigration
             case .missing:
-                self.statuses[profile.id] = .notSetUp
+                self.statuses[profile.id] = self.missingAuthStatus(cached: self.cache.snapshots[profile.id])
             }
         }
+    }
+
+    private func missingAuthStatus(cached: UsageSnapshot?) -> ProfileStatus {
+        cached.map { .reloginNeeded($0) } ?? .notSetUp
     }
 
     private func savedProfileIDs() -> [String] {
@@ -1127,7 +1148,7 @@ final class UsageProvider {
             await MainActor.run {
                 if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
                     self.store.updateRefreshDiagnostics(id, snapshot)
-                    self.store.updateStatus(id, .notSetUp)
+                    self.store.updateStatus(id, cached.map { .reloginNeeded($0) } ?? .notSetUp)
                     return
                 }
                 self.store.updateRefreshDiagnostics(id, snapshot)

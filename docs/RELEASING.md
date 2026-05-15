@@ -96,23 +96,34 @@ To build with a validated shared Keychain access group:
    app identifier, then download it to the release machine.
    Keep this file private and out of git. A good local path is:
    `~/Developer/AppleProfiles/Codex_Profile_Switcher_Developer_ID.provisionprofile`.
-3. Build with the access group and provisioning profile path:
+3. Build with the Developer ID identity:
 
 ```bash
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
-CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP="TEAMID12345.com.example.codex-profile-switcher" \
-CODEX_PROFILE_PROVISIONING_PROFILE="/path/to/CodexProfileSwitcher.provisionprofile" \
 SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
 Scripts/package_app.sh
 ```
 
-`package_app.sh` verifies that the provisioning profile authorizes the requested
-`keychain-access-groups` value, embeds it at
-`Contents/embedded.provisionprofile`, signs both the app and helper with
-generated entitlements, and runs strict codesign verification plus entitlement
-dumps. With `CODEX_PROFILE_REQUIRE_SIGNING=1`, any missing identity, entitlement
-file, provisioning profile, or unauthorized access group fails the build instead
-of falling back to ad-hoc signing.
+For the official `com.4lau.codex-profile-switcher` bundle ID,
+`package_app.sh` automatically requires the public keychain access group
+`W3ZHLSH96F.com.4lau.codex-profile-switcher`. It discovers a local provisioning
+profile from standard Apple profile locations, verifies that the profile
+authorizes the group, embeds it at `Contents/embedded.provisionprofile`, signs
+both the app and helper with generated entitlements, and fails the build if the
+final signed app or helper is missing the group.
+
+The provisioning profile itself stays private and out of git. If it is not in a
+standard location, pass it explicitly:
+
+```bash
+APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
+CODEX_PROFILE_PROVISIONING_PROFILE="/path/to/CodexProfileSwitcher.provisionprofile" \
+Scripts/package_app.sh
+```
+
+With `CODEX_PROFILE_REQUIRE_SIGNING=1`, any missing identity, entitlement file,
+provisioning profile, or unauthorized access group fails the build instead of
+falling back to ad-hoc signing.
 
 Useful release verification commands:
 
@@ -206,9 +217,8 @@ APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 Scripts/keychain_signed_smoke.sh
 ```
 
-For the validated access-group path, include the same
-`CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP` and `CODEX_PROFILE_PROVISIONING_PROFILE`
-values used for the build. The smoke uses a disposable
+For the official bundle ID, the signed smoke inherits the same fail-closed
+keychain sharing checks from `package_app.sh`. The smoke uses a disposable
 `CODEX_PROFILE_KEYCHAIN_SERVICE` value by default and performs a launched helper
 Keychain round-trip. Run it manually only; it can trigger interactive macOS
 password prompts.

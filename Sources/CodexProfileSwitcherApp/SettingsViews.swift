@@ -79,7 +79,7 @@ struct ProfilesTab: View {
     let actions: SettingsActions
     @ObservedObject var toast: ToastState
     @State private var selectedId: String?
-    @State private var editingLabel: String = ""
+    @State private var labelDraft = ProfileLabelDraft()
     @State private var profiles: [ProfileConfig] = []
     @State private var pendingDeleteId: String?
     @State private var pendingClearAuthId: String?
@@ -250,7 +250,7 @@ struct ProfilesTab: View {
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .frame(width: 60, alignment: .trailing)
-                    TextField("", text: self.$editingLabel)
+                    TextField("", text: self.$labelDraft.text)
                         .textFieldStyle(.roundedBorder)
                         .focused(self.$labelFieldFocused)
                         .onSubmit { self.commitLabel() }
@@ -342,19 +342,12 @@ struct ProfilesTab: View {
     // MARK: - Actions
 
     private func syncEditingLabel() {
-        guard let id = self.selectedId,
-              let profile = self.profiles.first(where: { $0.id == id }) else {
-            self.editingLabel = ""
-            return
-        }
-        self.editingLabel = profile.label
+        self.labelDraft.sync(selectedId: self.selectedId, profiles: self.profiles)
     }
 
     private func commitLabel() {
-        guard let id = self.selectedId else { return }
-        let trimmed = self.editingLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        self.store.updateLabel(for: id, label: trimmed)
+        guard let value = self.labelDraft.commitValue() else { return }
+        self.store.updateLabel(for: value.id, label: value.label)
         self.profiles = self.store.config.profiles
     }
 
@@ -362,8 +355,8 @@ struct ProfilesTab: View {
         self.commitLabel()
         let profile = self.store.addProfile()
         self.profiles = self.store.config.profiles
-        self.editingLabel = profile.label
         self.selectedId = profile.id
+        self.syncEditingLabel()
         self.toast.show("Added \(profile.label)", style: .success)
     }
 

@@ -120,4 +120,54 @@ final class ProfileStoreEnvironmentTests {
 
         try envFail("Removing the active profile unexpectedly succeeded")
     }
+
+    @Test
+    func cachedUsageSurvivesWhenSavedAuthIsMissing() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-cache-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let switcherHome = home.appendingPathComponent(".codex-switcher", isDirectory: true)
+        let authRoot = workDir.appendingPathComponent("auth", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        try FileManager.default.createDirectory(
+            at: switcherHome,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try Data("""
+        {
+          "activeProfile": "1",
+          "authStorageVersion": 3,
+          "migrationComplete": true,
+          "profiles": [
+            { "id": "1", "label": "Profile 1" }
+          ]
+        }
+        """.utf8).write(to: switcherHome.appendingPathComponent("config.json"))
+        try Data("""
+        {
+          "snapshots": {
+            "1": {
+              "planType": "team",
+              "creditsRemaining": null,
+              "primaryUsedPercent": 57,
+              "primaryResetAt": null,
+              "secondaryUsedPercent": 40,
+              "secondaryResetAt": null,
+              "fetchedAt": "2026-05-15T04:20:08Z"
+            }
+          }
+        }
+        """.utf8).write(to: switcherHome.appendingPathComponent("cache.json"))
+
+        let store = ProfileStore(
+            authVault: FileAuthVault(root: authRoot),
+            environment: ["CODEX_PROFILE_HOME": home.path])
+
+        guard case .reloginNeeded(let cached)? = store.statuses["1"] else {
+            try envFail("Cached profile with missing auth was not shown as re-login needed")
+        }
+        #expect(cached?.primaryUsedPercent == 57)
+        #expect(cached?.secondaryUsedPercent == 40)
+    }
 }
