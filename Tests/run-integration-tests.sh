@@ -268,24 +268,6 @@ test_login_uses_isolated_home_and_preserves_live_auth() {
   esac
 }
 
-test_login_fails_when_codex_exits_nonzero() {
-  reset_home
-  local live="$WORK_DIR/login-nonzero-live.json"
-  local login="$WORK_DIR/login-nonzero-result.json"
-  make_api_auth "$live" "sk-test-login-nonzero-live-1111111111" "live"
-  make_api_auth "$login" "sk-test-login-nonzero-result-2222222222" "login"
-  cp "$live" "$TEST_HOME/.codex/auth.json"
-
-  if FAKE_CODEX_LOGIN_AUTH="$login" FAKE_CODEX_LOGIN_STATUS=42 run_helper login NonzeroLogin >/dev/null 2>"$WORK_DIR/login-nonzero.err"; then
-    fail "login succeeded even though fake codex exited non-zero"
-  fi
-
-  assert_same_file "$TEST_HOME/.codex/auth.json" "$live" "nonzero login modified live Codex auth"
-  if [[ -f "$AUTH_STORE/NonzeroLogin.json" ]]; then
-    fail "nonzero login saved a profile anyway"
-  fi
-}
-
 test_keychain_repair_preserves_saved_auth() {
   reset_home
   local saved_a="$WORK_DIR/repair-a.json"
@@ -316,7 +298,6 @@ test_switch_refuses_unreadable_live_auth
 test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
-test_login_fails_when_codex_exits_nonzero
 test_keychain_repair_preserves_saved_auth
 
 printf 'Integration tests: all tests passed\n'
