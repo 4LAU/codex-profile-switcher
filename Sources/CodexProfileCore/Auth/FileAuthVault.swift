@@ -63,6 +63,10 @@ public struct FileAuthVault: AuthVault {
         self.fileManager.fileExists(atPath: self.authURL(profileID: profileID).path)
     }
 
+    public func diagnostics() -> AuthVaultDiagnostics {
+        AuthVaultDiagnostics(activeBackend: .file)
+    }
+
     private func authURL(profileID: String) -> URL {
         self.root.appendingPathComponent("\(profileID).json")
     }

@@ -164,35 +164,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.addItem(.separator())
         }
 
-        for profile in self.store.config.profiles {
-            let isActive = profile.id == self.store.liveProfileId
-            let status = self.store.statuses[profile.id] ?? .notSetUp
-            let duplicateLine = self.duplicateSummary(for: profile.id)
+        let healthRecords = ProfileHealth.build(
+            profiles: self.store.config.profiles,
+            statuses: self.store.statuses,
+            activeProfileId: self.store.liveProfileId,
+            canActivateAuth: { id in self.store.authCanBeActivated(for: id) })
+        var addedProfileSection = false
 
-            let cardView = ProfileCardView(
-                profile: profile,
-                status: status,
-                isActive: isActive,
-                duplicateLine: duplicateLine,
-                onSwitch: { [weak self] in self?.switchToProfile(profile.id) })
-
-            let hostView = NSHostingView(rootView: cardView)
-            hostView.frame = NSRect(
-                x: 0,
-                y: 0,
-                width: 290,
-                height: self.cardHeight(for: status, hasDuplicate: duplicateLine != nil))
-
-            let menuItem = NSMenuItem()
-            menuItem.view = hostView
-            self.menu.addItem(menuItem)
-
-            if profile.id != self.store.config.profiles.last?.id {
-                self.menu.addItem(.separator())
-            }
+        if let activeHealth = healthRecords.first(where: \.isActive) {
+            self.addProfileCard(for: activeHealth)
+            addedProfileSection = true
         }
 
-        self.menu.addItem(.separator())
+        if let recommendation = ProfileHealth.recommendation(from: healthRecords) {
+            if addedProfileSection { self.menu.addItem(.separator()) }
+            self.addRecommendationItem(for: recommendation)
+            addedProfileSection = true
+        }
+
+        let inactiveProfiles = ProfileHealth.menuOrderedInactive(healthRecords)
+        if !inactiveProfiles.isEmpty {
+            if addedProfileSection { self.menu.addItem(.separator()) }
+            for (index, health) in inactiveProfiles.enumerated() {
+                self.addProfileCard(for: health)
+                if index != inactiveProfiles.indices.last {
+                    self.menu.addItem(.separator())
+                }
+            }
+            addedProfileSection = true
+        }
+
+        if addedProfileSection {
+            self.menu.addItem(.separator())
+        }
 
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(self.refreshAll), keyEquivalent: "r")
         refreshItem.target = self
@@ -218,6 +222,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
         quitItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(quitItem)
+    }
+
+    private func addProfileCard(for health: ProfileHealth) {
+        let duplicateLine = self.duplicateSummary(for: health.profile.id)
+        let cardView = ProfileCardView(
+            profile: health.profile,
+            status: health.status,
+            isActive: health.isActive,
+            duplicateLine: duplicateLine,
+            onSwitch: { [weak self] in self?.switchToProfile(health.profile.id) })
+
+        let hostView = NSHostingView(rootView: cardView)
+        hostView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 290,
+            height: self.cardHeight(for: health.status, hasDuplicate: duplicateLine != nil))
+
+        let menuItem = NSMenuItem()
+        menuItem.view = hostView
+        self.menu.addItem(menuItem)
+    }
+
+    private func addRecommendationItem(for health: ProfileHealth) {
+        let score = health.score ?? 0
+        let title = "⚡ Switch to \"\(health.profile.label)\" — \(score)% used"
+        let item = NSMenuItem(title: title, action: #selector(self.switchToRecommendedProfile(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = health.profile.id
+        item.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)
+        item.image?.size = NSSize(width: 13, height: 13)
+        self.menu.addItem(item)
     }
 
     private func cardHeight(for status: ProfileStatus, hasDuplicate: Bool) -> CGFloat {
@@ -284,8 +320,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         self.store.setLiveProfileId(nil)
         let allNotSetUp = self.store.statuses.values.allSatisfy {
-            if case .notSetUp = $0 { return true }
-            return false
+            switch $0 {
+            case .notSetUp, .needsMigration: return true
+            default: return false
+            }
         }
         self.liveAuthWarning = self.store.liveAuthExists() && !allNotSetUp ? .unmanaged : nil
         if self.liveAuthWarning == .unmanaged {
@@ -294,6 +332,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Actions
+
+    @objc private func switchToRecommendedProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        self.switchToProfile(id)
+    }
 
     private func switchToProfile(_ id: String) {
         self.menu.cancelTracking()
@@ -312,7 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             startLogin()
             return
         case .reloginNeeded:
-            if !self.store.authStoreExists(for: id) {
+            if !self.store.authCanBeActivated(for: id) {
                 AppLogger.warning("Profile requires login and has no saved auth; starting login",
                                   metadata: ["profile": id])
                 startLogin()
@@ -320,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         default:
             if isActive { return }
-            if !self.store.authStoreExists(for: id) {
+            if !self.store.authCanBeActivated(for: id) {
                 AppLogger.warning("Profile has cached usage but no saved auth; starting login",
                                   metadata: ["profile": id])
                 startLogin()
@@ -361,7 +404,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .failure(let error):
                 self.syncActiveProfile(force: true)
                 self.updateIcon()
-                self.presentBridgeError(title: "Switch failed", message: error.localizedDescription)
+                switch error {
+                case .switchCommittedButLaunchFailed:
+                    self.presentBridgeError(title: "Profile switched", message: error.localizedDescription)
+                default:
+                    self.presentBridgeError(title: "Switch failed", message: error.localizedDescription)
+                }
             }
         }
     }

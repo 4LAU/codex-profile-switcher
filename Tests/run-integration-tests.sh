@@ -101,6 +101,18 @@ run_helper() {
     "$HELPER" "$@"
 }
 
+run_helper_with_app() {
+  local app_bin="$1"
+  shift
+  CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
+    CODEX_APP_BIN="$app_bin" \
+    CODEX_CLI="$FAKE_CODEX" \
+    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
+    "$HELPER" "$@"
+}
+
 assert_same_file() {
   local actual="$1"
   local expected="$2"
@@ -149,6 +161,83 @@ test_switch_preserves_outgoing_auth() {
   grep -Fq '"activeProfile" : "SwitchB"' "$TEST_HOME/.codex-switcher/config.json" \
     || fail "active profile was not updated after switch"
   wait_for_launch_log "workspace-switch"
+}
+
+test_switch_rolls_back_after_auth_write_failure() {
+  reset_home
+  local saved_target="$WORK_DIR/auth-failure-target.json"
+  local original_config="$WORK_DIR/auth-failure-config.json"
+  make_api_auth "$saved_target" "sk-test-auth-failure-target-1111111111" "target"
+  save_auth "Target" "$saved_target"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "Original",\n  "authStorageVersion" : 3,\n  "profiles" : [\n    {"id" : "Original", "label" : "Original"},\n    {"id" : "Target", "label" : "Target"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+  cp "$TEST_HOME/.codex-switcher/config.json" "$original_config"
+  chmod 500 "$TEST_HOME/.codex"
+
+  if run_helper app Target "$WORK_DIR" >/dev/null 2>"$WORK_DIR/auth-failure.err"; then
+    chmod 700 "$TEST_HOME/.codex"
+    fail "switch succeeded even though live auth could not be written"
+  fi
+
+  chmod 700 "$TEST_HOME/.codex"
+  [[ ! -f "$TEST_HOME/.codex/auth.json" ]] || fail "auth write failure left a live auth file behind"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" \
+    "auth write failure did not preserve original config"
+}
+
+test_switch_rolls_back_after_config_write_failure() {
+  reset_home
+  local saved_active="$WORK_DIR/config-failure-active.json"
+  local saved_target="$WORK_DIR/config-failure-target.json"
+  local original_config="$WORK_DIR/config-failure-config.json"
+  make_api_auth "$saved_active" "sk-test-config-failure-active-1111111111" "active"
+  make_api_auth "$saved_target" "sk-test-config-failure-target-2222222222" "target"
+  save_auth "Active" "$saved_active"
+  save_auth "Target" "$saved_target"
+  cp "$saved_active" "$TEST_HOME/.codex/auth.json"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "Active",\n  "authStorageVersion" : 3,\n  "profiles" : [\n    {"id" : "Active", "label" : "Active"},\n    {"id" : "Target", "label" : "Target"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+  cp "$TEST_HOME/.codex-switcher/config.json" "$original_config"
+  chmod 500 "$TEST_HOME/.codex-switcher"
+
+  if run_helper app Target "$WORK_DIR" >/dev/null 2>"$WORK_DIR/config-failure.err"; then
+    chmod 700 "$TEST_HOME/.codex-switcher"
+    fail "switch succeeded even though config could not be written"
+  fi
+
+  chmod 700 "$TEST_HOME/.codex-switcher"
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_active" \
+    "config write failure did not restore original live auth"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" \
+    "config write failure did not preserve original config"
+}
+
+test_switch_does_not_roll_back_after_launch_failure() {
+  reset_home
+  local bad_app="$WORK_DIR/bad-codex-app"
+  local saved_active="$WORK_DIR/launch-failure-active.json"
+  local saved_target="$WORK_DIR/launch-failure-target.json"
+  printf 'not a runnable Mach-O or script\n' > "$bad_app"
+  chmod +x "$bad_app"
+  make_api_auth "$saved_active" "sk-test-launch-failure-active-1111111111" "active"
+  make_api_auth "$saved_target" "sk-test-launch-failure-target-2222222222" "target"
+  save_auth "Active" "$saved_active"
+  save_auth "Target" "$saved_target"
+  cp "$saved_active" "$TEST_HOME/.codex/auth.json"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "Active",\n  "authStorageVersion" : 3,\n  "profiles" : [\n    {"id" : "Active", "label" : "Active"},\n    {"id" : "Target", "label" : "Target"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+
+  if run_helper_with_app "$bad_app" app Target "$WORK_DIR" >/dev/null 2>"$WORK_DIR/launch-failure.err"; then
+    fail "switch command succeeded even though Codex app launch failed"
+  fi
+
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_target" \
+    "launch failure rolled back committed live auth"
+  grep -Fq '"activeProfile" : "Target"' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "launch failure rolled back committed active profile"
 }
 
 test_switch_refuses_unmanaged_live_auth() {
@@ -268,6 +357,28 @@ test_login_uses_isolated_home_and_preserves_live_auth() {
   esac
 }
 
+test_login_rejects_duplicate_auth_and_preserves_target_auth() {
+  reset_home
+  local existing="$WORK_DIR/login-duplicate-existing.json"
+  local target_original="$WORK_DIR/login-duplicate-target-original.json"
+  local exported_target="$WORK_DIR/exported-login-duplicate-target.json"
+  make_api_auth "$existing" "sk-test-login-duplicate-existing-1111111111" "existing"
+  make_api_auth "$target_original" "sk-test-login-duplicate-target-2222222222" "target-original"
+  save_auth "Existing" "$existing"
+  save_auth "Target" "$target_original"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  printf '{\n  "activeProfile" : "Target",\n  "authStorageVersion" : 3,\n  "profiles" : [\n    {"id" : "Existing", "label" : "Existing Account"},\n    {"id" : "Target", "label" : "Target"}\n  ]\n}\n' \
+    > "$TEST_HOME/.codex-switcher/config.json"
+
+  if FAKE_CODEX_LOGIN_AUTH="$existing" run_helper login Target >/dev/null 2>"$WORK_DIR/login-duplicate.err"; then
+    fail "duplicate login unexpectedly succeeded"
+  fi
+
+  export_auth "Target" "$exported_target"
+  assert_same_file "$exported_target" "$target_original" \
+    "duplicate login overwrote the target profile auth"
+}
+
 test_keychain_repair_preserves_saved_auth() {
   reset_home
   local saved_a="$WORK_DIR/repair-a.json"
@@ -293,11 +404,15 @@ test_keychain_repair_preserves_saved_auth() {
 }
 
 test_switch_preserves_outgoing_auth
+test_switch_rolls_back_after_auth_write_failure
+test_switch_rolls_back_after_config_write_failure
+test_switch_does_not_roll_back_after_launch_failure
 test_switch_refuses_unmanaged_live_auth
 test_switch_refuses_unreadable_live_auth
 test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
+test_login_rejects_duplicate_auth_and_preserves_target_auth
 test_keychain_repair_preserves_saved_auth
 
 printf 'Integration tests: all tests passed\n'

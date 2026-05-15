@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="${APP_BUNDLE:-$ROOT_DIR/CodexProfileSwitcher.app}"
+APP_BIN="$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 HELPER="$APP_BUNDLE/Contents/Helpers/codex-profile"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-keychain-smoke.XXXXXX")"
 TEST_HOME="$WORK_DIR/home"
@@ -59,6 +60,7 @@ assert_same_file() {
 }
 
 "$ROOT_DIR/Scripts/package_app.sh"
+[[ -x "$APP_BIN" ]] || fail "packaged app binary missing at $APP_BIN"
 [[ -x "$HELPER" ]] || fail "packaged helper missing at $HELPER"
 
 mkdir -p "$TEST_HOME/.codex"
@@ -105,10 +107,43 @@ COMMON_ENV=(
   CODEX_CLI="$FAKE_CODEX"
   FAKE_APP_LAUNCH_LOG="$LAUNCH_LOG"
 )
+if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
+  COMMON_ENV+=(CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP="$CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP")
+fi
 
 run_helper() {
   run_with_timeout 120 env "${COMMON_ENV[@]}" "$@"
 }
+
+run_app_probe() {
+  local action="$1"
+  local profile="$2"
+  local marker="$3"
+  run_with_timeout 120 env "${COMMON_ENV[@]}" \
+    CODEX_PROFILE_KEYCHAIN_PROBE="$action" \
+    CODEX_PROFILE_KEYCHAIN_PROBE_PROFILE="$profile" \
+    CODEX_PROFILE_KEYCHAIN_PROBE_MARKER="$marker" \
+    "$APP_BIN"
+}
+
+if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
+  AUTH_HELPER_PROBE="$WORK_DIR/helper-probe.json"
+  make_api_auth "$AUTH_HELPER_PROBE" "sk-test-smoke-helper-probe-3333333333333333" "helper-to-app"
+
+  run_app_probe write AppWrites "app-to-helper" >/dev/null
+  run_helper "$HELPER" status AppWrites > "$WORK_DIR/app-writes.status"
+  grep -Fq "AppWrites: Saved API key auth" "$WORK_DIR/app-writes.status" \
+    || fail "helper could not read app-written data-protection Keychain item"
+
+  run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_HELPER_PROBE" "$HELPER" login HelperWrites >/dev/null
+  run_app_probe read HelperWrites "helper-to-app" >/dev/null
+
+  run_app_probe delete AppWrites "app-to-helper" >/dev/null
+  run_app_probe delete HelperWrites "helper-to-app" >/dev/null
+  run_helper "$HELPER" status AppWrites > "$WORK_DIR/app-writes-deleted.status"
+  grep -Fq "AppWrites: Not set up" "$WORK_DIR/app-writes-deleted.status" \
+    || fail "helper still sees app-written probe item after app delete"
+fi
 
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_A" "$HELPER" login SmokeA >/dev/null
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_B" "$HELPER" login SmokeB >/dev/null
@@ -124,5 +159,10 @@ assert_same_file "$TEST_HOME/.codex/auth.json" "$AUTH_A" "SmokeA was not restore
 
 run_helper "$HELPER" app SmokeB "$WORK_DIR" >/dev/null
 assert_same_file "$TEST_HOME/.codex/auth.json" "$AUTH_B" "repeat SmokeB switch did not restore live auth"
+
+if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
+  run_app_probe delete SmokeA "smoke-a" >/dev/null
+  run_app_probe delete SmokeB "smoke-b" >/dev/null
+fi
 
 printf 'Signed Keychain smoke passed. Launch log: %s\n' "$LAUNCH_LOG"

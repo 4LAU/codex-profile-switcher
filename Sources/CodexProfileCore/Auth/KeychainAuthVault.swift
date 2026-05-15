@@ -1,7 +1,9 @@
 import Foundation
 import Security
 
-public struct KeychainAuthVault: AuthVault {
+public typealias KeychainAuthVault = LegacyKeychainAuthVault
+
+public struct LegacyKeychainAuthVault: AuthVault {
     public static let defaultService = "com.4lau.codex-profile-switcher.auth"
 
     public let service: String
@@ -159,6 +161,10 @@ public struct KeychainAuthVault: AuthVault {
             profileID: profileID,
             status: status
         )
+    }
+
+    public func diagnostics() -> AuthVaultDiagnostics {
+        AuthVaultDiagnostics(activeBackend: .legacyACL)
     }
 
     private func listQuery() -> [CFString: Any] {

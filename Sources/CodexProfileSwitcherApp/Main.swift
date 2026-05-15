@@ -1,10 +1,15 @@
 import Cocoa
+import CodexProfileCore
 
 #if !TESTING
 @main
 #endif
 enum Main {
     static func main() {
+        if let probeStatus = KeychainProbeRunner.runIfRequested() {
+            exit(probeStatus)
+        }
+
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
@@ -67,5 +72,82 @@ enum Main {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
+    }
+}
+
+private enum KeychainProbeRunner {
+    static func runIfRequested() -> Int32? {
+        guard let action = ProcessInfo.processInfo.environment["CODEX_PROFILE_KEYCHAIN_PROBE"] else {
+            return nil
+        }
+
+        do {
+            try self.run(action: action)
+            return 0
+        } catch {
+            fputs("Keychain probe failed: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+    }
+
+    private static func run(action: String) throws {
+        let env = ProcessInfo.processInfo.environment
+        let service = env["CODEX_PROFILE_KEYCHAIN_SERVICE"] ?? LegacyKeychainAuthVault.defaultService
+        let profile = env["CODEX_PROFILE_KEYCHAIN_PROBE_PROFILE"] ?? "Probe"
+        let marker = env["CODEX_PROFILE_KEYCHAIN_PROBE_MARKER"] ?? "probe"
+        let vault = MigratingAuthVault(
+            service: service,
+            accessGroup: KeychainAccessGroupResolver.configuredAccessGroup(environment: env),
+            migrationComplete: true)
+        let diagnostics = vault.diagnostics()
+        guard diagnostics.activeBackend == .dataProtectionShared else {
+            throw ProbeError.backendUnavailable(diagnostics.dataProtectionProbe ?? "<none>")
+        }
+
+        switch action {
+        case "write":
+            try vault.saveAuthBlob(self.authData(marker: marker), profileID: profile)
+        case "read":
+            guard let data = try vault.loadAuthBlob(profileID: profile),
+                  self.marker(in: data) == marker else {
+                throw ProbeError.readbackMismatch
+            }
+        case "delete":
+            try vault.deleteAuthBlob(profileID: profile)
+        default:
+            throw ProbeError.unknownAction(action)
+        }
+        print("keychain_probe=\(action) backend=\(diagnostics.activeBackend.rawValue)")
+    }
+
+    private static func authData(marker: String) throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: [
+                "OPENAI_API_KEY": "sk-test-keychain-probe-1111111111111111",
+                "marker": marker,
+            ],
+            options: [.prettyPrinted, .sortedKeys])
+    }
+
+    private static func marker(in data: Data) -> String? {
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["marker"] as? String
+    }
+
+    private enum ProbeError: LocalizedError {
+        case backendUnavailable(String)
+        case readbackMismatch
+        case unknownAction(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .backendUnavailable(let probe):
+                return "data protection backend unavailable: \(probe)"
+            case .readbackMismatch:
+                return "probe item was missing or did not match"
+            case .unknownAction(let action):
+                return "unknown keychain probe action: \(action)"
+            }
+        }
     }
 }

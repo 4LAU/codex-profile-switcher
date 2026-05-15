@@ -81,6 +81,48 @@ The script:
 
 The output is written under `.build/release/`.
 
+## Optional Validated Keychain Access Group
+
+The shared data-protection Keychain entitlement is opt-in until the production
+entitlement path has been proven. Normal contributor and ad-hoc builds should
+not set these variables.
+
+To build with a validated shared Keychain access group:
+
+1. In Apple Developer Certificates, Identifiers & Profiles, create or update the
+   macOS app identifier for the bundle ID and enable the Keychain Sharing
+   capability with the intended access group.
+2. Generate a macOS provisioning profile for the same distribution identity and
+   app identifier, then download it to the release machine.
+3. Build with the access group and provisioning profile path:
+
+```bash
+APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
+CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP="TEAMID12345.com.example.codex-profile-switcher" \
+CODEX_PROFILE_PROVISIONING_PROFILE="/path/to/CodexProfileSwitcher.provisionprofile" \
+SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
+Scripts/package_app.sh
+```
+
+`package_app.sh` verifies that the provisioning profile authorizes the requested
+`keychain-access-groups` value, embeds it at
+`Contents/embedded.provisionprofile`, signs both the app and helper with
+generated entitlements, and runs strict codesign verification plus entitlement
+dumps. With `CODEX_PROFILE_REQUIRE_SIGNING=1`, any missing identity, entitlement
+file, provisioning profile, or unauthorized access group fails the build instead
+of falling back to ad-hoc signing.
+
+Useful release verification commands:
+
+```bash
+codesign --verify --strict --verbose=2 CodexProfileSwitcher.app
+codesign -d --entitlements :- CodexProfileSwitcher.app
+codesign --verify --strict --verbose=2 CodexProfileSwitcher.app/Contents/Helpers/codex-profile
+codesign -d --entitlements :- CodexProfileSwitcher.app/Contents/Helpers/codex-profile
+security cms -D -i CodexProfileSwitcher.app/Contents/embedded.provisionprofile | \
+  plutil -extract Entitlements.keychain-access-groups raw -o - -
+```
+
 After the release, commit and push the updated `appcast.xml` so the feed URL
 serves the new version:
 
@@ -161,6 +203,13 @@ Developer ID identity:
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 Scripts/keychain_signed_smoke.sh
 ```
+
+For the validated access-group path, include the same
+`CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP` and `CODEX_PROFILE_PROVISIONING_PROFILE`
+values used for the build. The smoke uses a disposable
+`CODEX_PROFILE_KEYCHAIN_SERVICE` value by default and performs a launched helper
+Keychain round-trip. Run it manually only; it can trigger interactive macOS
+password prompts.
 
 Expected behavior:
 

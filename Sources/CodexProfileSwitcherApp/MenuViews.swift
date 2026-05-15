@@ -23,8 +23,8 @@ enum Palette {
 }
 
 func progressColor(for percent: Int) -> Color {
-    if percent >= 80 { return Palette.danger }
-    if percent >= 50 { return Palette.mid }
+    if percent >= 90 { return Palette.danger }
+    if percent >= 70 { return Palette.mid }
     return Palette.success
 }
 
@@ -283,6 +283,10 @@ struct ProfileCardView: View {
                     .font(.system(size: 10))
             }
             .foregroundStyle(Palette.warning)
+        case .needsMigration:
+            Text("Migration needed")
+                .font(.system(size: 10))
+                .foregroundStyle(Palette.warning)
         case .notSetUp:
             Text("Click to set up")
                 .font(.system(size: 10))

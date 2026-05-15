@@ -61,8 +61,8 @@ enum IconRenderer {
         case normal, warning, critical
 
         init(percent: Int) {
-            if percent >= 95 { self = .critical }
-            else if percent >= 80 { self = .warning }
+            if percent >= 90 { self = .critical }
+            else if percent >= 70 { self = .warning }
             else { self = .normal }
         }
 

@@ -23,6 +23,17 @@ private struct FailingSaveAuthVault: AuthVault {
     func hasAuthBlob(profileID: String) throws -> Bool { false }
 }
 
+private struct AvailabilityAuthVault: AuthVault {
+    var availability: AuthBlobAvailability
+
+    func listProfileIDs() throws -> [String] { [] }
+    func loadAuthBlob(profileID: String) throws -> Data? { nil }
+    func saveAuthBlob(_ data: Data, profileID: String) throws {}
+    func deleteAuthBlob(profileID: String) throws {}
+    func hasAuthBlob(profileID: String) throws -> Bool { self.availability == .present }
+    func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability { self.availability }
+}
+
 func envFail(_ message: String) throws -> Never {
     throw ProfileStoreEnvironmentTestFailure.failed(message)
 }
@@ -34,6 +45,22 @@ func envExpect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 }
 
 final class ProfileStoreEnvironmentTests {
+    @Test
+    func testNeedsMigrationAuthIsNotTreatedAsActivatable() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-availability-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let store = ProfileStore(
+            authVault: AvailabilityAuthVault(availability: .needsMigration),
+            environment: ["CODEX_PROFILE_HOME": home.path])
+
+        try envExpect(
+            !store.authCanBeActivated(for: "1"),
+            "Needs-migration auth was incorrectly treated as ready to activate")
+    }
+
     @Test
     func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
         let workDir = FileManager.default.temporaryDirectory
