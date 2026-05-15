@@ -2,7 +2,10 @@ import Cocoa
 import Foundation
 
 enum IconRenderer {
-    private static let iconHeight: CGFloat = 18
+    private static let iconHeight: CGFloat = 20
+    private static let rowHeight = Self.iconHeight / 2
+    private static let textFontSize: CGFloat = 8.5
+    private static let horizontalMargin: CGFloat = 1
     private static let emptyIconSize = CGSize(width: 18, height: 18)
     private static let scale: CGFloat = 2
     private static let emptyIconName = "codex-profile-switcher-menu-icon-empty.png"
@@ -10,7 +13,7 @@ enum IconRenderer {
     // MARK: - Public
 
     static func render(primaryPercent: Int, secondaryPercent: Int) -> NSImage {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .medium)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: Self.textFontSize, weight: .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.black,
@@ -24,27 +27,21 @@ enum IconRenderer {
         let topUrgency = Urgency(percent: primaryPercent)
         let bottomUrgency = Urgency(percent: secondaryPercent)
 
-        let topPadded = Self.paddedSize(topSize, urgency: topUrgency)
-        let bottomPadded = Self.paddedSize(bottomSize, urgency: bottomUrgency)
-
-        let contentWidth = max(topPadded.width, bottomPadded.width)
-        let contentHeight = topPadded.height + bottomPadded.height
-        let margin: CGFloat = 1
-        let imageWidth = ceil(contentWidth + margin * 2)
+        let contentWidth = max(
+            Self.rowWidth(textSize: topSize, urgency: topUrgency),
+            Self.rowWidth(textSize: bottomSize, urgency: bottomUrgency))
+        let imageWidth = ceil(contentWidth + Self.horizontalMargin * 2)
         let size = NSSize(width: imageWidth, height: Self.iconHeight)
-
-        let topY = (Self.iconHeight - contentHeight) / 2
-        let bottomY = topY + topPadded.height
 
         let image = NSImage(size: size, flipped: true) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
 
-            let rightEdge = imageWidth - margin
+            let rightEdge = imageWidth - Self.horizontalMargin
 
             Self.drawRow(attrStr: topStr, textSize: topSize, urgency: topUrgency,
-                         rightEdge: rightEdge, y: topY, in: ctx)
+                         rightEdge: rightEdge, rowY: 0, in: ctx)
             Self.drawRow(attrStr: bottomStr, textSize: bottomSize, urgency: bottomUrgency,
-                         rightEdge: rightEdge, y: bottomY, in: ctx)
+                         rightEdge: rightEdge, rowY: Self.rowHeight, in: ctx)
 
             return true
         }
@@ -69,11 +66,11 @@ enum IconRenderer {
             else { self = .normal }
         }
 
-        var boxPadding: (h: CGFloat, v: CGFloat)? {
+        var boxHorizontalPadding: CGFloat? {
             switch self {
             case .normal: return nil
-            case .warning: return (h: 1.5, v: 1.0)
-            case .critical: return (h: 2.0, v: 1.5)
+            case .warning: return 1.5
+            case .critical: return 2.0
             }
         }
 
@@ -88,9 +85,9 @@ enum IconRenderer {
 
     // MARK: - Row Drawing
 
-    private static func paddedSize(_ textSize: CGSize, urgency: Urgency) -> CGSize {
-        guard let p = urgency.boxPadding else { return textSize }
-        return CGSize(width: textSize.width + p.h * 2, height: textSize.height + p.v * 2)
+    private static func rowWidth(textSize: CGSize, urgency: Urgency) -> CGFloat {
+        guard let padding = urgency.boxHorizontalPadding else { return textSize.width }
+        return textSize.width + padding * 2
     }
 
     private static func drawRow(
@@ -98,18 +95,20 @@ enum IconRenderer {
         textSize: CGSize,
         urgency: Urgency,
         rightEdge: CGFloat,
-        y: CGFloat,
+        rowY: CGFloat,
         in ctx: CGContext
     ) {
-        guard let padding = urgency.boxPadding else {
-            attrStr.draw(at: NSPoint(x: rightEdge - textSize.width, y: y))
+        let textY = rowY + (Self.rowHeight - textSize.height) / 2
+
+        guard let padding = urgency.boxHorizontalPadding else {
+            attrStr.draw(at: NSPoint(x: rightEdge - textSize.width, y: textY))
             return
         }
 
-        let boxWidth = textSize.width + padding.h * 2
-        let boxHeight = textSize.height + padding.v * 2
+        let boxWidth = textSize.width + padding * 2
+        let boxHeight = Self.rowHeight
         let boxX = rightEdge - boxWidth
-        let boxRect = CGRect(x: boxX, y: y, width: boxWidth, height: boxHeight)
+        let boxRect = CGRect(x: boxX, y: rowY, width: boxWidth, height: boxHeight)
         let boxPath = CGPath(
             roundedRect: boxRect,
             cornerWidth: urgency.cornerRadius,
@@ -121,7 +120,7 @@ enum IconRenderer {
         ctx.addPath(boxPath)
         ctx.fillPath()
         ctx.setBlendMode(.clear)
-        attrStr.draw(at: NSPoint(x: boxX + padding.h, y: y + padding.v))
+        attrStr.draw(at: NSPoint(x: boxX + padding, y: textY))
         ctx.restoreGState()
     }
 
