@@ -7,6 +7,7 @@ private final class RecordingAuthVault: AuthVault {
     var loadCount = 0
     var deleteCount = 0
     var hasCount = 0
+    var onDelete: ((String) -> Void)?
 
     init(blobs: [String: Data] = [:]) {
         self.blobs = blobs
@@ -28,6 +29,7 @@ private final class RecordingAuthVault: AuthVault {
     func deleteAuthBlob(profileID: String) throws {
         self.deleteCount += 1
         self.blobs.removeValue(forKey: profileID)
+        self.onDelete?(profileID)
     }
 
     func hasAuthBlob(profileID: String) throws -> Bool {
@@ -53,6 +55,25 @@ final class MigratingAuthVaultTests {
         #expect(legacy.blobs["Work"] == nil)
         #expect(legacy.loadCount == 1)
         #expect(legacy.deleteCount == 1)
+    }
+
+    @Test
+    func activationRestoresDataProtectionBlobAfterLegacyDeleteOverlap() throws {
+        let legacyData = Data("legacy-auth".utf8)
+        let dataProtection = RecordingAuthVault()
+        let legacy = RecordingAuthVault(blobs: ["Work": legacyData])
+        legacy.onDelete = { profileID in
+            dataProtection.blobs.removeValue(forKey: profileID)
+        }
+        let vault = MigratingAuthVault(
+            dataProtection: dataProtection,
+            legacy: legacy,
+            accessGroup: "TEAM.example",
+            probeResult: .succeeded)
+
+        #expect(try vault.loadAuthBlobForActivation(profileID: "Work") == legacyData)
+        #expect(dataProtection.blobs["Work"] == legacyData)
+        #expect(legacy.blobs["Work"] == nil)
     }
 
     @Test

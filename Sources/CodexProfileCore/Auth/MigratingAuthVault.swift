@@ -70,6 +70,10 @@ public final class MigratingAuthVault: AuthVault {
             throw KeychainAuthVaultError.unexpectedResult(operation: "verify migrated auth blob")
         }
         try self.legacy.deleteAuthBlob(profileID: profileID)
+        try self.dataProtection.saveAuthBlob(legacyData, profileID: profileID)
+        guard try self.dataProtection.loadAuthBlob(profileID: profileID) == legacyData else {
+            throw KeychainAuthVaultError.unexpectedResult(operation: "verify migrated auth blob after legacy cleanup")
+        }
         return legacyData
     }
 

@@ -316,8 +316,12 @@ enum CodexProfileCLI {
     }
 
     private static func migrateLegacyProfile(_ profile: String, legacyVault: AuthVault) throws -> Bool {
-        if try self.vault.loadAuthBlob(profileID: profile) != nil {
+        if let existingData = try self.vault.loadAuthBlob(profileID: profile) {
             try legacyVault.deleteAuthBlob(profileID: profile)
+            try self.vault.saveAuthBlob(existingData, profileID: profile)
+            guard try self.vault.loadAuthBlob(profileID: profile) == existingData else {
+                throw CLIError.message("Could not verify preserved auth for profile '\(profile)'")
+            }
             return false
         }
 
@@ -329,6 +333,10 @@ enum CodexProfileCLI {
             throw CLIError.message("Could not verify migrated auth for profile '\(profile)'")
         }
         try legacyVault.deleteAuthBlob(profileID: profile)
+        try self.vault.saveAuthBlob(legacyData, profileID: profile)
+        guard try self.vault.loadAuthBlob(profileID: profile) == legacyData else {
+            throw CLIError.message("Could not verify migrated auth after legacy cleanup for profile '\(profile)'")
+        }
         return true
     }
 
