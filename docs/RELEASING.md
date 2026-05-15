@@ -94,6 +94,8 @@ To build with a validated shared Keychain access group:
    capability with the intended access group.
 2. Generate a macOS provisioning profile for the same distribution identity and
    app identifier, then download it to the release machine.
+   Keep this file private and out of git. A good local path is:
+   `~/Developer/AppleProfiles/Codex_Profile_Switcher_Developer_ID.provisionprofile`.
 3. Build with the access group and provisioning profile path:
 
 ```bash
