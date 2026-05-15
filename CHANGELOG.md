@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.7 -- 2026-05-15
+
+### Fixed
+
+- Bring Sparkle update check windows to the front from the menu bar app
+
 ## 0.1.6 -- 2026-05-15
 
 ### Fixed

@@ -4,7 +4,7 @@ import Cocoa
 import Sparkle
 #endif
 
-final class SparkleUpdater {
+final class SparkleUpdater: NSObject {
     #if canImport(Sparkle)
     private var updaterController: SPUStandardUpdaterController?
     #endif
@@ -13,26 +13,49 @@ final class SparkleUpdater {
         #if canImport(Sparkle)
         guard Bundle.main.bundlePath.hasSuffix(".app") else { return }
         let controller = SPUStandardUpdaterController(
-            startingUpdater: false,
+            startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil)
+            userDriverDelegate: self)
         controller.updater.automaticallyChecksForUpdates = true
-        controller.startUpdater()
         self.updaterController = controller
         #endif
     }
 
     func addMenuItem(to menu: NSMenu) {
         #if canImport(Sparkle)
-        guard let controller = self.updaterController else { return }
+        guard self.updaterController != nil else { return }
         let updateItem = NSMenuItem(
             title: "Check for Updates...",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            action: #selector(self.checkForUpdates(_:)),
             keyEquivalent: "")
-        updateItem.target = controller
+        updateItem.target = self
         updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
         updateItem.image?.size = NSSize(width: 13, height: 13)
         menu.addItem(updateItem)
         #endif
     }
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        #if canImport(Sparkle)
+        NSApp.activate(ignoringOtherApps: true)
+        self.updaterController?.checkForUpdates(sender)
+        #endif
+    }
 }
+
+#if canImport(Sparkle)
+extension SparkleUpdater: SPUStandardUserDriverDelegate {
+    func standardUserDriverWillShowModalAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        guard state.userInitiated else { return }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+#endif

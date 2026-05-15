@@ -257,9 +257,6 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$HELPER_APP_EXECUTAB
 
 log "Embedding Sparkle.framework..."
 cp -R "$SPARKLE_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices"
-rm -f "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/XPCServices"
-
 for icon in \
   codex-profile-switcher-menu-icon-empty.png \
   AppIcon.icns
@@ -360,6 +357,12 @@ if [[ -n "$KEYCHAIN_ACCESS_GROUP" && "$EMBED_PROVISIONING_PROFILE" == "1" ]]; th
 fi
 
 log "Signing Sparkle framework components..."
+if [[ -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ]]; then
+  codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+fi
+if [[ -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" ]]; then
+  codesign "${codesign_args[@]}" --preserve-metadata=entitlements "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+fi
 codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
 codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
 codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
