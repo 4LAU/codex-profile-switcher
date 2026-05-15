@@ -1347,7 +1347,7 @@ enum CodexBridgeError: LocalizedError {
         case .launchFailed(let message):
             return message
         case .commandFailed(_, let output):
-            return output.isEmpty ? "codex-profile command failed" : LogRedactor.excerpt(output)
+            return Self.helperFailureMessage(from: output)
         case .switchRolledBack(let message):
             return message
         case .switchCommittedButLaunchFailed(let message):
@@ -1355,6 +1355,34 @@ enum CodexBridgeError: LocalizedError {
         case .stateUpdateFailed(let message):
             return message
         }
+    }
+
+    private static func helperFailureMessage(from output: String) -> String {
+        guard !output.isEmpty else { return "codex-profile command failed" }
+
+        let boilerplatePrefixes = [
+            "Starting local login server",
+            "If your browser did not open",
+            "https://auth.openai.com/oauth/authorize",
+            "On a remote or headless machine?",
+            "Starting isolated login for profile ",
+        ]
+        let lines = output
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if let meaningful = lines.reversed().first(where: { line in
+            line != "Successfully logged in" &&
+                !boilerplatePrefixes.contains(where: line.hasPrefix)
+        }) {
+            if meaningful.hasPrefix("Error: ") {
+                return String(meaningful.dropFirst("Error: ".count))
+            }
+            return meaningful
+        }
+
+        return LogRedactor.excerpt(output)
     }
 
     var isUserCancelled: Bool {

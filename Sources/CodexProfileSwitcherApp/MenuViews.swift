@@ -72,7 +72,8 @@ final class ToastState: ObservableObject {
             withAnimation(.easeIn(duration: 0.3)) { self?.isVisible = false }
         }
         self.hideTask = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+        let duration = style == .error ? 7.0 : 2.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
     }
 }
 
