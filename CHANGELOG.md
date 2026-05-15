@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.6 -- 2026-05-15
+
+### Fixed
+
+- Fix false duplicate-account detection for separate OpenAI users that share an account/workspace context
+- Improve login failure messages in Settings and keep error toasts visible longer
+
 ### Added
 
 - In-app update checking via Sparkle 2.9.1 — DMG users are notified when a new version is available
