@@ -18,9 +18,14 @@ APP_ENTITLEMENTS_BASE="${CODEX_PROFILE_APP_ENTITLEMENTS:-$ROOT_DIR/CodexProfileS
 HELPER_ENTITLEMENTS_BASE="${CODEX_PROFILE_HELPER_ENTITLEMENTS:-$ROOT_DIR/CodexProfileHelper.entitlements}"
 APP_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileSwitcher.signed.entitlements"
 HELPER_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileHelper.signed.entitlements"
+APP_SWIFT_FLAGS=()
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app
+fi
+
+if [[ "${CODEX_PROFILE_ENABLE_KEYCHAIN_PROBE:-0}" == "1" ]]; then
+  APP_SWIFT_FLAGS=(-Xswiftc -D -Xswiftc KEYCHAIN_PROBE)
 fi
 
 log() {
@@ -144,6 +149,7 @@ swift build \
   -c release \
   --product CodexProfileSwitcher \
   --scratch-path "$PACKAGE_SCRATCH" \
+  "${APP_SWIFT_FLAGS[@]}" \
   -Xswiftc -F -Xswiftc "$SPARKLE_DIR" \
   -Xlinker -F -Xlinker "$SPARKLE_DIR" \
   -Xlinker -framework -Xlinker Sparkle \

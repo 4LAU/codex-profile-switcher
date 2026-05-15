@@ -59,7 +59,7 @@ assert_same_file() {
   cmp -s "$actual" "$expected" || fail "$message"
 }
 
-"$ROOT_DIR/Scripts/package_app.sh"
+CODEX_PROFILE_ENABLE_KEYCHAIN_PROBE=1 "$ROOT_DIR/Scripts/package_app.sh"
 [[ -x "$APP_BIN" ]] || fail "packaged app binary missing at $APP_BIN"
 [[ -x "$HELPER" ]] || fail "packaged helper missing at $HELPER"
 

@@ -1326,7 +1326,7 @@ enum CodexBridgeError: LocalizedError {
         case .launchFailed(let message):
             return message
         case .commandFailed(_, let output):
-            return output.isEmpty ? "codex-profile command failed" : output
+            return output.isEmpty ? "codex-profile command failed" : LogRedactor.excerpt(output)
         case .switchRolledBack(let message):
             return message
         case .switchCommittedButLaunchFailed(let message):

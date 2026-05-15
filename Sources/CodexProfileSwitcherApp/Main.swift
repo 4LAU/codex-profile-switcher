@@ -6,9 +6,11 @@ import CodexProfileCore
 #endif
 enum Main {
     static func main() {
+        #if KEYCHAIN_PROBE
         if let probeStatus = KeychainProbeRunner.runIfRequested() {
             exit(probeStatus)
         }
+        #endif
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -75,6 +77,7 @@ enum Main {
     }
 }
 
+#if KEYCHAIN_PROBE
 private enum KeychainProbeRunner {
     static func runIfRequested() -> Int32? {
         guard let action = ProcessInfo.processInfo.environment["CODEX_PROFILE_KEYCHAIN_PROBE"] else {
@@ -151,3 +154,4 @@ private enum KeychainProbeRunner {
         }
     }
 }
+#endif
