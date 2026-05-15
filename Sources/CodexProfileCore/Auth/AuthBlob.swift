@@ -209,29 +209,24 @@ public enum AuthBlob {
 
         let accountId = tokenString(tokens, snakeCase: "account_id", camelCase: "accountId")
         let idToken = tokenString(tokens, snakeCase: "id_token", camelCase: "idToken")
-        let claims = idToken.flatMap(stableClaims(fromIDToken:)) ?? [:]
-
-        guard !claims.isEmpty else {
+        if var userIdentity = idToken.flatMap(userIdentity(fromIDToken:)) {
             if let accountId {
-                return [
-                    "kind": "oauth",
-                    "accountId": accountId,
-                ]
+                userIdentity["accountId"] = accountId
             }
-            return nil
+            return userIdentity
         }
 
-        var identity: [String: Any] = [
-            "kind": "oauth",
-            "idTokenClaims": claims,
-        ]
         if let accountId {
-            identity["accountId"] = accountId
+            return [
+                "kind": "oauth",
+                "accountId": accountId,
+            ]
         }
-        return identity
+
+        return nil
     }
 
-    private static func stableClaims(fromIDToken idToken: String) -> [String: String]? {
+    private static func userIdentity(fromIDToken idToken: String) -> [String: Any]? {
         let parts = idToken.split(separator: ".")
         guard parts.count >= 2,
               let payloadData = base64URLDecode(String(parts[1])),
@@ -239,22 +234,23 @@ public enum AuthBlob {
             return nil
         }
 
-        let stableKeys = [
-            "sub",
-            "email",
-            "https://api.openai.com/auth",
-            "https://api.openai.com/account_id",
-            "https://api.openai.com/user_id",
-            "https://api.openai.com/organization_id",
-        ]
-
-        var claims: [String: String] = [:]
-        for key in stableKeys {
+        for key in ["sub", "https://api.openai.com/user_id"] {
             if let value = payload[key] as? String, !value.isEmpty {
-                claims[key] = value
+                return [
+                    "kind": "oauth",
+                    "userId": value,
+                ]
             }
         }
-        return claims.isEmpty ? nil : claims
+
+        if let email = payload["email"] as? String, !email.isEmpty {
+            return [
+                "kind": "oauth",
+                "email": email.lowercased(),
+            ]
+        }
+
+        return nil
     }
 
     private static func base64URLDecode(_ value: String) -> Data? {

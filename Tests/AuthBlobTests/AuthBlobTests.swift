@@ -269,6 +269,34 @@ final class AuthBlobTests {
             "Different OAuth account IDs should not share a fingerprint")
     }
 
+    @Test
+    func testFingerprintDistinguishesDifferentUsersWithSameAccountID() throws {
+        let first = try oauthAuthData(
+            idToken: try idToken(subject: "first-user", email: "first@example.test", accountID: "acct-shared"),
+            accountID: "acct-shared")
+        let second = try oauthAuthData(
+            idToken: try idToken(subject: "second-user", email: "second@example.test", accountID: "acct-shared"),
+            accountID: "acct-shared")
+
+        try expect(
+            AuthBlob.identityFingerprint(from: first) != AuthBlob.identityFingerprint(from: second),
+            "Different OAuth users with the same account ID should not share a fingerprint")
+    }
+
+    @Test
+    func testFingerprintDistinguishesSameUserWithDifferentAccountID() throws {
+        let first = try oauthAuthData(
+            idToken: try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-first"),
+            accountID: "acct-first")
+        let second = try oauthAuthData(
+            idToken: try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-second"),
+            accountID: "acct-second")
+
+        try expect(
+            AuthBlob.identityFingerprint(from: first) != AuthBlob.identityFingerprint(from: second),
+            "Same OAuth user with different account IDs should not share a fingerprint")
+    }
+
     
     
     @Test

@@ -4,6 +4,7 @@ import Foundation
 enum ProfileHealthTier: Int, Comparable {
     case knownSwitchable
     case unknownUsage
+    case exhausted
     case notSwitchable
 
     static func < (lhs: ProfileHealthTier, rhs: ProfileHealthTier) -> Bool {
@@ -17,6 +18,7 @@ struct ProfileHealth {
     let isActive: Bool
     let isSwitchable: Bool
     let score: Int?
+    let weeklyScore: Int?
     let limitingWindowResetAt: Date?
     let tier: ProfileHealthTier
 
@@ -26,6 +28,7 @@ struct ProfileHealth {
         isActive: Bool,
         isSwitchable: Bool,
         score: Int?,
+        weeklyScore: Int?,
         limitingWindowResetAt: Date?,
         tier: ProfileHealthTier
     ) {
@@ -34,6 +37,7 @@ struct ProfileHealth {
         self.isActive = isActive
         self.isSwitchable = isSwitchable
         self.score = score
+        self.weeklyScore = weeklyScore
         self.limitingWindowResetAt = limitingWindowResetAt
         self.tier = tier
     }
@@ -86,6 +90,13 @@ struct ProfileHealth {
                 if lhs.element.tier != rhs.element.tier {
                     return lhs.element.tier < rhs.element.tier
                 }
+                if lhs.element.tier == .knownSwitchable || lhs.element.tier == .exhausted {
+                    return Self.isBetterRecommendation(
+                        lhs.element,
+                        than: rhs.element,
+                        lhsOffset: lhs.offset,
+                        rhsOffset: rhs.offset)
+                }
                 return lhs.offset < rhs.offset
             }
             .map(\.element)
@@ -106,8 +117,11 @@ struct ProfileHealth {
                 isActive: isActive,
                 isSwitchable: canActivateAuth,
                 score: healthScore.score,
+                weeklyScore: healthScore.weeklyScore,
                 limitingWindowResetAt: healthScore.resetAt,
-                tier: .knownSwitchable)
+                tier: !canActivateAuth
+                    ? .notSwitchable
+                    : Self.isExhausted(healthScore) ? .exhausted : .knownSwitchable)
         case .loading, .stale:
             self.init(
                 profile: profile,
@@ -115,6 +129,7 @@ struct ProfileHealth {
                 isActive: isActive,
                 isSwitchable: canActivateAuth,
                 score: nil,
+                weeklyScore: nil,
                 limitingWindowResetAt: nil,
                 tier: .unknownUsage)
         case .reloginNeeded:
@@ -124,6 +139,7 @@ struct ProfileHealth {
                 isActive: isActive,
                 isSwitchable: canActivateAuth,
                 score: nil,
+                weeklyScore: nil,
                 limitingWindowResetAt: nil,
                 tier: canActivateAuth ? .unknownUsage : .notSwitchable)
         case .needsMigration, .notSetUp:
@@ -133,22 +149,22 @@ struct ProfileHealth {
                 isActive: isActive,
                 isSwitchable: false,
                 score: nil,
+                weeklyScore: nil,
                 limitingWindowResetAt: nil,
                 tier: .notSwitchable)
         }
     }
 
-    private static func healthScore(for snapshot: UsageSnapshot) -> (score: Int, resetAt: Date?) {
-        if snapshot.primaryUsedPercent > snapshot.secondaryUsedPercent {
-            return (snapshot.primaryUsedPercent, snapshot.primaryResetAt)
-        }
-        if snapshot.secondaryUsedPercent > snapshot.primaryUsedPercent {
-            return (snapshot.secondaryUsedPercent, snapshot.secondaryResetAt)
-        }
-        return (
+    private static func healthScore(for snapshot: UsageSnapshot) -> (score: Int, weeklyScore: Int, resetAt: Date?) {
+        (
             snapshot.primaryUsedPercent,
-            Self.earlierReset(snapshot.primaryResetAt, snapshot.secondaryResetAt)
+            snapshot.secondaryUsedPercent,
+            snapshot.primaryResetAt
         )
+    }
+
+    private static func isExhausted(_ healthScore: (score: Int, weeklyScore: Int, resetAt: Date?)) -> Bool {
+        healthScore.score >= 100 || healthScore.weeklyScore >= 100
     }
 
     private static func isBetterRecommendation(
@@ -160,16 +176,13 @@ struct ProfileHealth {
         let lhsScore = lhs.score ?? Int.max
         let rhsScore = rhs.score ?? Int.max
         if lhsScore != rhsScore { return lhsScore < rhsScore }
+        let lhsWeeklyScore = lhs.weeklyScore ?? Int.max
+        let rhsWeeklyScore = rhs.weeklyScore ?? Int.max
+        if lhsWeeklyScore != rhsWeeklyScore { return lhsWeeklyScore < rhsWeeklyScore }
         if lhs.limitingWindowResetAt != rhs.limitingWindowResetAt {
             return Self.isEarlierReset(lhs.limitingWindowResetAt, than: rhs.limitingWindowResetAt)
         }
         return lhsOffset < rhsOffset
-    }
-
-    private static func earlierReset(_ lhs: Date?, _ rhs: Date?) -> Date? {
-        guard let lhs else { return rhs }
-        guard let rhs else { return lhs }
-        return min(lhs, rhs)
     }
 
     private static func isEarlierReset(_ lhs: Date?, than rhs: Date?) -> Bool {

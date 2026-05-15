@@ -33,8 +33,9 @@ final class ProfileHealthTests {
         let available = try record("available", in: records)
         #expect(available.tier == .knownSwitchable)
         #expect(available.isSwitchable)
-        #expect(available.score == 62)
-        #expect(available.limitingWindowResetAt == resetDate(20))
+        #expect(available.score == 35)
+        #expect(available.weeklyScore == 62)
+        #expect(available.limitingWindowResetAt == resetDate(10))
 
         let loading = try record("loading", in: records)
         #expect(loading.tier == .unknownUsage)
@@ -75,6 +76,7 @@ final class ProfileHealthTests {
             profile("best-early-later-config"),
             profile("unknown"),
             profile("not-switchable"),
+            profile("weekly-exhausted"),
         ]
         let records = ProfileHealth.build(
             profiles: profiles,
@@ -86,6 +88,7 @@ final class ProfileHealthTests {
                 "best-early-later-config": .available(snapshot(primary: 60, secondary: 20, primaryResetMinutes: 30)),
                 "unknown": .stale(snapshot(primary: 5, secondary: 7)),
                 "not-switchable": .available(snapshot(primary: 1, secondary: 2)),
+                "weekly-exhausted": .available(snapshot(primary: 1, secondary: 100)),
             ],
             activeProfileId: "active",
             canActivateAuth: { $0 != "not-switchable" })
