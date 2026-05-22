@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.1.9</title>
+            <pubDate>Thu, 21 May 2026 17:58:40 -0700</pubDate>
+            <sparkle:version>10</sparkle:version>
+            <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.9/CodexProfileSwitcher-0.1.9.dmg" length="3990538" type="application/octet-stream" sparkle:edSignature="+Fz3wJQbN2Bu+nBf7clVSurq/CE/INrlUF2aXhiLgW3F4bKdZbuR9pzHPUcgc7j1oMkcq4cWEsChEi0rQa6zAA=="/>
+        </item>
+        <item>
             <title>0.1.8</title>
             <pubDate>Thu, 21 May 2026 17:43:14 -0700</pubDate>
             <sparkle:version>9</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.7/CodexProfileSwitcher-0.1.7.dmg" length="3989645" type="application/octet-stream" sparkle:edSignature="XLJ2CTIzHQoGkALO4y+Y1RcrNso6mpTNlcQcc88+EYASx7n+bN/HsJjK3Jfk+rPfUPyyjeur4ecPl92TDUZGDA=="/>
-        </item>
-        <item>
-            <title>0.1.6</title>
-            <pubDate>Fri, 15 May 2026 01:05:55 -0700</pubDate>
-            <sparkle:version>7</sparkle:version>
-            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.6/CodexProfileSwitcher-0.1.6.dmg" length="3869919" type="application/octet-stream" sparkle:edSignature="tTnlJoo+VmDwlWgiGe5uv8XhLOuLh9cJLYApJ4rUhQZcvXTSTz+y0zr7Z2Yo+Ukb7+0ZKNvPaXBHEV5X2HcDCA=="/>
         </item>
     </channel>
 </rss>
