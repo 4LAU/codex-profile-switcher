@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.9 -- 2026-05-21
+
+### Changed
+
+- Reduce polite quit window from 15s to 5s before escalating to SIGTERM, making profile switches faster
+
 ## 0.1.8 -- 2026-05-21
 
 ### Fixed

@@ -7,7 +7,7 @@ import SwiftUI
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.1.8"
+    static let version = "0.1.9"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
@@ -1585,7 +1585,7 @@ enum CodexBridge {
         AppLogger.info("Quitting Codex before profile switch")
         _ = Self.runAndWait("/usr/bin/osascript", arguments: ["-e", "tell application \"Codex\" to quit"])
 
-        let attempts = Int(Self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 30
+        let attempts = Int(Self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 10
         let sleepSeconds = Double(Self.environment("CODEX_PROFILE_QUIT_SLEEP") ?? "") ?? 0.5
         for _ in 0..<attempts {
             if !Self.isCodexDesktopRunning() { return }
