@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.8 -- 2026-05-21
+
+### Fixed
+
+- Fix crash when profile switch fails: error alert was shown on a background thread instead of the main thread
+- Fix profile switch failing when Codex's app-server lingers after quit: escalate from polite quit to SIGTERM then SIGKILL
+
 ## 0.1.7 -- 2026-05-15
 
 ### Fixed

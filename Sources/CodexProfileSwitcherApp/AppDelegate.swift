@@ -385,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let storeRef = self.store!
         let workspacePath = self.store.relaunchWorkspacePath()
         storeRef.beginAuthMutation()
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             let result = await CodexBridge.switchToProfile(id, workspacePath: workspacePath) {
                 try storeRef.prepareProfileSwitch(
                     to: id,

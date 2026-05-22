@@ -7,7 +7,7 @@ import SwiftUI
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.1.7"
+    static let version = "0.1.8"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
@@ -1591,6 +1591,31 @@ enum CodexBridge {
             if !Self.isCodexDesktopRunning() { return }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }
+
+        AppLogger.warning("Codex still running after polite quit; sending SIGTERM")
+        _ = Self.runAndWait("/usr/bin/pkill", arguments: ["-TERM", "-x", "Codex"], quiet: true)
+        _ = Self.runAndWait(
+            "/usr/bin/pkill",
+            arguments: ["-TERM", "-f", "\(Self.codexBundledCLI()) app-server"],
+            quiet: true)
+
+        for _ in 0..<10 {
+            if !Self.isCodexDesktopRunning() { return }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        AppLogger.warning("Codex still running after SIGTERM; sending SIGKILL")
+        _ = Self.runAndWait("/usr/bin/pkill", arguments: ["-KILL", "-x", "Codex"], quiet: true)
+        _ = Self.runAndWait(
+            "/usr/bin/pkill",
+            arguments: ["-KILL", "-f", "\(Self.codexBundledCLI()) app-server"],
+            quiet: true)
+
+        for _ in 0..<6 {
+            if !Self.isCodexDesktopRunning() { return }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
         throw CodexBridgeError.stateUpdateFailed(
             "Codex or its app-server is still running. Quit Codex with Cmd+Q, then retry.")
     }
