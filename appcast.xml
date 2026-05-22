@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.1.8</title>
+            <pubDate>Thu, 21 May 2026 17:43:14 -0700</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.8/CodexProfileSwitcher-0.1.8.dmg" length="3990708" type="application/octet-stream" sparkle:edSignature="kUK2SzPCArBzq36XTW/p8Jd6QogFa9lpZgYe5MWE32nR5lUyX+zgnUlMDkTLqhqUu35gTt1KXfMVTwur/mssCA=="/>
+        </item>
+        <item>
             <title>0.1.7</title>
             <pubDate>Fri, 15 May 2026 01:48:06 -0700</pubDate>
             <sparkle:version>8</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.6/CodexProfileSwitcher-0.1.6.dmg" length="3869919" type="application/octet-stream" sparkle:edSignature="tTnlJoo+VmDwlWgiGe5uv8XhLOuLh9cJLYApJ4rUhQZcvXTSTz+y0zr7Z2Yo+Ukb7+0ZKNvPaXBHEV5X2HcDCA=="/>
-        </item>
-        <item>
-            <title>0.1.5</title>
-            <pubDate>Thu, 14 May 2026 13:31:11 -0700</pubDate>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.5/CodexProfileSwitcher-0.1.5.dmg" length="3858172" type="application/octet-stream" sparkle:edSignature="ZvE7uTOif2ISA/3e4lGCz3PMrGslNX1cLInoweFV+31UrBalKTttuNFAGjYDVPMxW9jA1nDe//vFn1edRSfgDg=="/>
         </item>
     </channel>
 </rss>
