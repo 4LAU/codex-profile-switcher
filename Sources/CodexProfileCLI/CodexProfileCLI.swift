@@ -110,7 +110,10 @@ enum CodexProfileCLI {
 
         let requestedWorkspace = args.dropFirst().first
         let workspace = try self.resolveWorkspace(requestedWorkspace)
-        let codexAppBin = try self.codexAppBinary()
+        let cli = self.codexBundledCLI()
+        guard self.fileManager.isExecutableFile(atPath: cli) else {
+            throw CLIError.message("Codex CLI not found at \(cli)")
+        }
         let transaction = try ProfileTransactionService(
             vault: self.vault,
             paths: self.paths,
@@ -124,7 +127,7 @@ enum CodexProfileCLI {
         try self.quitCodexApp()
         _ = try transaction.commit()
         do {
-            try self.launchCodexApp(codexAppBin, workspace: workspace)
+            try self.launchCodexApp(workspace: workspace)
         } catch {
             throw CLIError.message("Profile switched. Codex Desktop may need a manual restart.")
         }
@@ -369,7 +372,11 @@ enum CodexProfileCLI {
         return nil
     }
 
-    private static func launchCodexApp(_ path: String, workspace: String?) throws {
+    private static func launchCodexApp(workspace: String?) throws {
+        let cli = self.codexBundledCLI()
+        guard self.fileManager.isExecutableFile(atPath: cli) else {
+            throw CLIError.message("Codex CLI not found at \(cli)")
+        }
         let logDir = self.paths.liveCodexHome.appendingPathComponent("logs", isDirectory: true)
         try self.ensurePrivateDir(logDir)
         let logFile = logDir.appendingPathComponent("desktop.log")
@@ -384,8 +391,8 @@ enum CodexProfileCLI {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = workspace.map { [$0] } ?? []
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["app"] + (workspace.map { [$0] } ?? [])
         let handle = try FileHandle(forWritingTo: logFile)
         process.standardOutput = handle
         process.standardError = handle

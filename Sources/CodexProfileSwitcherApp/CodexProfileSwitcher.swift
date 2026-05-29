@@ -7,7 +7,7 @@ import SwiftUI
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.1.9"
+    static let version = "0.1.10"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }
 
@@ -1621,7 +1621,10 @@ enum CodexBridge {
     }
 
     private static func launchCodexApp(workspacePath: String?) throws {
-        let binary = try Self.codexAppBinary()
+        let cli = Self.codexBundledCLI()
+        guard FileManager.default.isExecutableFile(atPath: cli) else {
+            throw CodexBridgeError.launchFailed("Codex CLI not found at \(cli)")
+        }
         let logDir = AppPaths().liveCodexHome.appendingPathComponent("logs", isDirectory: true)
         try FileManager.default.createDirectory(
             at: logDir,
@@ -1634,8 +1637,8 @@ enum CodexBridge {
             attributes: [.posixPermissions: 0o600])
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = workspacePath.map { [$0] } ?? []
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["app"] + (workspacePath.map { [$0] } ?? [])
         let handle = try FileHandle(forWritingTo: logFile)
         process.standardOutput = handle
         process.standardError = handle
@@ -1646,14 +1649,6 @@ enum CodexBridge {
             try? handle.close()
             throw CodexBridgeError.launchFailed(error.localizedDescription)
         }
-    }
-
-    private static func codexAppBinary() throws -> String {
-        let path = Self.environment("CODEX_APP_BIN") ?? "\(Self.codexAppPath())/Contents/MacOS/Codex"
-        guard FileManager.default.isExecutableFile(atPath: path) else {
-            throw CodexBridgeError.launchFailed("Codex Desktop binary not found at \(path)")
-        }
-        return path
     }
 
     private static func codexAppPath() -> String {

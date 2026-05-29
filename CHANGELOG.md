@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.10 -- 2026-05-29
+
+### Fixed
+
+- Fix "Unable to find Electron app" error when relaunching Codex Desktop after a profile switch (compatibility with Codex CLI 0.134+)
+
 ## 0.1.9 -- 2026-05-21
 
 ### Changed
