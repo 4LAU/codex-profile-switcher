@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.11 -- 2026-05-29
+
+### Added
+
+- Show "Update to vX.Y.Z — restart now?" inline in the menu when a new version is downloaded, instead of requiring a manual check
+
 ## 0.1.10 -- 2026-05-29
 
 ### Fixed

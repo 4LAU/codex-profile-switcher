@@ -45,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.usageProvider.refreshAll()
         self.startPeriodicRefreshTimer()
 
+        self.sparkleUpdater.onUpdateReady = { [weak self] in
+            guard let self, self.isMenuOpen else { return }
+            self.rebuildMenu()
+        }
         self.sparkleUpdater.startIfBundledApp()
     }
 
