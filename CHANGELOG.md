@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- `best-auth` CLI command — selects the least-used configured profile and exports its credentials to a temp directory for `codex exec --ephemeral`
+- `mark-exhausted` CLI command — flags a profile as rate-limited so `best-auth` skips it
+- `import-auth` CLI command — imports refreshed credentials back from a temp directory with identity verification
+
+### Fixed
+
+- GUI app now preserves CLI-written exhaustion overrides when saving the usage cache
+- Profile removal and auth clearing now clean up exhaustion overrides
+
 ## 0.1.11 -- 2026-05-29
 
 ### Added
