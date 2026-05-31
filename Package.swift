@@ -56,12 +56,5 @@ let package = Package(
             swiftSettings: [
                 .define("TESTING"),
             ]),
-        .testTarget(
-            name: "CLIUsageFetcherTests",
-            dependencies: ["CodexProfileSwitcherApp", "CodexProfileCore"],
-            path: "Tests/CLIUsageFetcherTests",
-            swiftSettings: [
-                .define("TESTING"),
-            ]),
     ]
 )

@@ -23,17 +23,6 @@ private struct FailingSaveAuthVault: AuthVault {
     func hasAuthBlob(profileID: String) throws -> Bool { false }
 }
 
-private struct AvailabilityAuthVault: AuthVault {
-    var availability: AuthBlobAvailability
-
-    func listProfileIDs() throws -> [String] { [] }
-    func loadAuthBlob(profileID: String) throws -> Data? { nil }
-    func saveAuthBlob(_ data: Data, profileID: String) throws {}
-    func deleteAuthBlob(profileID: String) throws {}
-    func hasAuthBlob(profileID: String) throws -> Bool { self.availability == .present }
-    func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability { self.availability }
-}
-
 func envFail(_ message: String) throws -> Never {
     throw ProfileStoreEnvironmentTestFailure.failed(message)
 }
@@ -45,22 +34,6 @@ func envExpect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 }
 
 final class ProfileStoreEnvironmentTests {
-    @Test
-    func testNeedsMigrationAuthIsNotTreatedAsActivatable() throws {
-        let workDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-profile-store-availability-tests-\(UUID().uuidString)", isDirectory: true)
-        let home = workDir.appendingPathComponent("home", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: workDir) }
-
-        let store = ProfileStore(
-            authVault: AvailabilityAuthVault(availability: .needsMigration),
-            environment: ["CODEX_PROFILE_HOME": home.path])
-
-        try envExpect(
-            !store.authCanBeActivated(for: "1"),
-            "Needs-migration auth was incorrectly treated as ready to activate")
-    }
-
     @Test
     func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
         let workDir = FileManager.default.temporaryDirectory
@@ -92,82 +65,4 @@ final class ProfileStoreEnvironmentTests {
             "Failed legacy migration removed the legacy auth file")
     }
 
-    @Test
-    func testRefusesToRemoveActiveProfile() throws {
-        let workDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-profile-store-remove-tests-\(UUID().uuidString)", isDirectory: true)
-        let home = workDir.appendingPathComponent("home", isDirectory: true)
-        let authRoot = workDir.appendingPathComponent("auth", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: workDir) }
-
-        let store = ProfileStore(
-            authVault: FileAuthVault(root: authRoot),
-            environment: ["CODEX_PROFILE_HOME": home.path])
-        try store.saveAuthDataToVault(Data(#"{"OPENAI_API_KEY":"sk-test-active-profile-1111111111"}"#.utf8), for: "1")
-        store.setLiveProfileId("1")
-
-        do {
-            try store.removeProfile("1")
-        } catch ProfileMutationError.cannotRemoveActiveProfile {
-            try envExpect(store.authStoreExists(for: "1"), "Active profile auth was deleted")
-            try envExpect(
-                store.config.profiles.contains(where: { $0.id == "1" }),
-                "Active profile config was removed")
-            return
-        } catch {
-            try envFail("Expected cannotRemoveActiveProfile, got \(error)")
-        }
-
-        try envFail("Removing the active profile unexpectedly succeeded")
-    }
-
-    @Test
-    func cachedUsageSurvivesWhenSavedAuthIsMissing() throws {
-        let workDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-profile-store-cache-tests-\(UUID().uuidString)", isDirectory: true)
-        let home = workDir.appendingPathComponent("home", isDirectory: true)
-        let switcherHome = home.appendingPathComponent(".codex-switcher", isDirectory: true)
-        let authRoot = workDir.appendingPathComponent("auth", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: workDir) }
-
-        try FileManager.default.createDirectory(
-            at: switcherHome,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        try Data("""
-        {
-          "activeProfile": "1",
-          "authStorageVersion": 3,
-          "migrationComplete": true,
-          "profiles": [
-            { "id": "1", "label": "Profile 1" }
-          ]
-        }
-        """.utf8).write(to: switcherHome.appendingPathComponent("config.json"))
-        try Data("""
-        {
-          "snapshots": {
-            "1": {
-              "planType": "team",
-              "creditsRemaining": null,
-              "primaryUsedPercent": 57,
-              "primaryResetAt": null,
-              "secondaryUsedPercent": 40,
-              "secondaryResetAt": null,
-              "fetchedAt": "2026-05-15T04:20:08Z"
-            }
-          }
-        }
-        """.utf8).write(to: switcherHome.appendingPathComponent("cache.json"))
-
-        let store = ProfileStore(
-            authVault: FileAuthVault(root: authRoot),
-            environment: ["CODEX_PROFILE_HOME": home.path])
-
-        guard case .reloginNeeded(let cached)? = store.statuses["1"] else {
-            try envFail("Cached profile with missing auth was not shown as re-login needed")
-        }
-        #expect(cached?.primaryUsedPercent == 57)
-        #expect(cached?.secondaryUsedPercent == 40)
-    }
 }

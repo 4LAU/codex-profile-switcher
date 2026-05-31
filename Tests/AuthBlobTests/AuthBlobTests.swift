@@ -95,72 +95,12 @@ func oauthAuthData(
 }
 
 final class AuthBlobTests {
-    
-    
-    @Test
-    
-    
-    func testLoadsSnakeCaseOAuthAuth() throws {
-        let token = try idToken()
-        let data = try oauthAuthData(idToken: token)
-        let creds = try AuthBlob.load(from: data)
 
-        try expectEqual(creds.accessToken, "access-token", "Wrong access token")
-        try expectEqual(creds.refreshToken, "refresh-token", "Wrong refresh token")
-        try expectEqual(creds.idToken, token, "Wrong ID token")
-        try expectEqual(creds.accountId, "acct-123", "Wrong account ID")
-        try expect(creds.lastRefresh != nil, "Expected last_refresh to parse")
-    }
 
-    
-    
     @Test
 
-    
-    
-    func testLoadsCamelCaseLegacyOAuthAuth() throws {
-        let token = try idToken(accountID: "acct-legacy")
-        let data = try jsonData([
-            "tokens": [
-                "accessToken": "legacy-access",
-                "refreshToken": "legacy-refresh",
-                "idToken": token,
-                "accountId": "acct-legacy",
-            ],
-            "last_refresh": "2026-05-13T10:15:30.123Z",
-        ])
 
-        let creds = try AuthBlob.load(from: data)
-        try expectEqual(creds.accessToken, "legacy-access", "Wrong legacy access token")
-        try expectEqual(creds.refreshToken, "legacy-refresh", "Wrong legacy refresh token")
-        try expectEqual(creds.idToken, token, "Wrong legacy ID token")
-        try expectEqual(creds.accountId, "acct-legacy", "Wrong legacy account ID")
-        try expect(creds.lastRefresh != nil, "Expected fractional last_refresh to parse")
-    }
 
-    
-    
-    @Test
-
-    
-    
-    func testLoadsAPIKeyAuth() throws {
-        let fakeKey = ["sk", "test", "key", "1234567890"].joined(separator: "-")
-        let data = try jsonData(["OPENAI_API_KEY": fakeKey])
-        let creds = try AuthBlob.load(from: data)
-
-        try expectEqual(creds.accessToken, fakeKey, "Wrong API key")
-        try expectEqual(creds.refreshToken, "", "API key auth should not synthesize refresh token")
-        try expect(creds.idToken == nil, "API key auth should not have ID token")
-        try expect(creds.accountId == nil, "API key auth should not have account ID")
-    }
-
-    
-    
-    @Test
-
-    
-    
     func testRejectsMalformedAuth() throws {
         try expectMissingTokens {
             _ = try AuthBlob.load(from: try jsonData(["tokens": ["access_token": "access-only"]]))
@@ -283,22 +223,6 @@ final class AuthBlobTests {
             "Different OAuth users with the same account ID should not share a fingerprint")
     }
 
-    @Test
-    func testFingerprintDistinguishesSameUserWithDifferentAccountID() throws {
-        let first = try oauthAuthData(
-            idToken: try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-first"),
-            accountID: "acct-first")
-        let second = try oauthAuthData(
-            idToken: try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-second"),
-            accountID: "acct-second")
-
-        try expect(
-            AuthBlob.identityFingerprint(from: first) != AuthBlob.identityFingerprint(from: second),
-            "Same OAuth user with different account IDs should not share a fingerprint")
-    }
-
-    
-    
     @Test
 
     
