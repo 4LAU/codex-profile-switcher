@@ -38,6 +38,9 @@ enum CodexProfileCLI {
             case "doctor": try self.commandDoctor(args)
             case "migrate": try self.commandMigrate(args)
             case "keychain-repair": try self.commandKeychainRepair()
+            case "best-auth": try self.commandBestAuth(args)
+            case "mark-exhausted": try self.commandMarkExhausted(args)
+            case "import-auth": try self.commandImportAuth(args)
             case "help", "-h", "--help": self.usage()
             default: throw CLIError.message("Unknown command '\(command)'. See \(self.program) help.")
             }
@@ -65,6 +68,9 @@ enum CodexProfileCLI {
           \(self.program) doctor [--check-legacy]
           \(self.program) migrate --status|--all
           \(self.program) keychain-repair
+          \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]
+          \(self.program) mark-exhausted <profile> [--until <iso8601>]
+          \(self.program) import-auth --dir <path> --profile <id>
         """)
     }
 
@@ -219,6 +225,197 @@ enum CodexProfileCLI {
         let repaired = try self.vault.repairStoredAuthAccess()
         try self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
         self.note("Rewrote \(repaired) saved auth item(s) with current Keychain access settings.")
+    }
+
+    private static func commandBestAuth(_ args: [String]) throws {
+        var dir: String?
+        var excludeCSV: String?
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--dir":
+                guard i + 1 < args.count else {
+                    fputs("--dir requires a path argument\n", stderr)
+                    throw CLIError.exitStatus(2)
+                }
+                i += 1
+                dir = args[i]
+            case "--exclude":
+                guard i + 1 < args.count else {
+                    fputs("--exclude requires a comma-separated list\n", stderr)
+                    throw CLIError.exitStatus(2)
+                }
+                i += 1
+                excludeCSV = args[i]
+            default:
+                fputs(
+                    "Unknown argument: \(args[i]). Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]\n",
+                    stderr)
+                throw CLIError.exitStatus(2)
+            }
+            i += 1
+        }
+
+        guard let dir else {
+            fputs("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]\n", stderr)
+            throw CLIError.exitStatus(2)
+        }
+
+        let excludeIDs = Set((excludeCSV ?? "")
+            .split(separator: ",")
+            .map(String.init)
+            .filter { !$0.isEmpty })
+        let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
+        let cache = self.loadCache()
+        let allProfileIDs = try self.knownProfileIDs()
+        let eligibleProfiles = allProfileIDs
+            .map { id in
+                let label = config.profiles.first(where: { $0.id == id })?.label ?? "Profile \(id)"
+                return ProfileConfig(id: id, label: label)
+            }
+            .filter { profile in
+                let availability = try? self.vault.authBlobAvailability(profileID: profile.id)
+                return availability == .present || availability == .needsMigration
+            }
+
+        guard let result = ProfileSelector.selectBest(
+            profiles: eligibleProfiles,
+            cache: cache,
+            excludeIDs: excludeIDs
+        ) else {
+            fputs("No eligible profiles available\n", stderr)
+            throw CLIError.exitStatus(1)
+        }
+
+        let dirURL = URL(fileURLWithPath: dir)
+        try self.ensurePrivateDir(dirURL)
+
+        guard let authData = try self.vault.loadAuthBlobForActivation(profileID: result.profileID) else {
+            fputs("No auth data for profile '\(result.profileID)'\n", stderr)
+            throw CLIError.exitStatus(1)
+        }
+        try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+
+        let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
+        let destination = dirURL.appendingPathComponent("config.toml")
+        try? self.fileManager.removeItem(at: destination)
+        if self.fileManager.fileExists(atPath: liveConfig.path) {
+            try self.fileManager.copyItem(at: liveConfig, to: destination)
+        }
+
+        print(result.profileID)
+    }
+
+    private static func commandMarkExhausted(_ args: [String]) throws {
+        var profile: String?
+        var untilISO: String?
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--until":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--until requires an ISO 8601 timestamp")
+                }
+                i += 1
+                untilISO = args[i]
+            default:
+                if profile == nil {
+                    profile = args[i]
+                } else {
+                    throw CLIError.message("Unknown argument: \(args[i])")
+                }
+            }
+            i += 1
+        }
+
+        guard let profile else {
+            throw CLIError.message("Usage: \(self.program) mark-exhausted <profile> [--until <iso8601>]")
+        }
+        try self.validateProfile(profile)
+
+        let blockedUntil: Date
+        if let untilISO {
+            guard let parsed = ISO8601DateFormatter().date(from: untilISO) else {
+                throw CLIError.message("--until requires an ISO 8601 timestamp")
+            }
+            blockedUntil = parsed
+        } else {
+            blockedUntil = Date().addingTimeInterval(3600)
+        }
+
+        var cache = self.loadCache()
+        cache.exhaustionOverrides[profile] = ExhaustionOverride(
+            blockedUntil: blockedUntil,
+            reason: "rate_limit",
+            source: "codex_exec")
+
+        try self.saveCache(cache)
+        self.note("Marked '\(profile)' exhausted until \(ISO8601DateFormatter().string(from: blockedUntil))")
+    }
+
+    private static func commandImportAuth(_ args: [String]) throws {
+        var dir: String?
+        var profile: String?
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--dir":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--dir requires a path argument")
+                }
+                i += 1
+                dir = args[i]
+            case "--profile":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--profile requires a profile ID")
+                }
+                i += 1
+                profile = args[i]
+            default:
+                throw CLIError.message("Unknown argument: \(args[i])")
+            }
+            i += 1
+        }
+
+        guard let dir, let profile else {
+            throw CLIError.message("Usage: \(self.program) import-auth --dir <path> --profile <id>")
+        }
+        try self.validateProfile(profile)
+
+        let authURL = URL(fileURLWithPath: dir).appendingPathComponent("auth.json")
+        guard let updatedData = try? Data(contentsOf: authURL) else {
+            fputs("No auth data found at \(authURL.path)\n", stderr)
+            throw CLIError.exitStatus(1)
+        }
+        guard let existingData = try self.vault.loadAuthBlob(profileID: profile) else {
+            fputs("No existing auth data for profile '\(profile)'\n", stderr)
+            throw CLIError.exitStatus(1)
+        }
+        guard updatedData != existingData else { return }
+        guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
+            fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
+            throw CLIError.exitStatus(2)
+        }
+
+        do {
+            _ = try AuthBlob.load(from: updatedData)
+        } catch {
+            fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
+            throw CLIError.exitStatus(2)
+        }
+
+        let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
+        let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
+        guard let existingFingerprint, let updatedFingerprint else {
+            fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
+            throw CLIError.exitStatus(2)
+        }
+        if existingFingerprint != updatedFingerprint {
+            fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
+            throw CLIError.exitStatus(2)
+        }
+
+        try self.vault.saveAuthBlob(updatedData, profileID: profile)
     }
 
     private static func commandMigrate(_ args: [String]) throws {
@@ -502,6 +699,22 @@ enum CodexProfileCLI {
             at: url,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
+        try self.fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private static func loadCache() -> UsageCache {
+        let decoder = JSONDecoder.iso8601Decoder()
+        return (try? Data(contentsOf: self.paths.cacheURL))
+            .flatMap { try? decoder.decode(UsageCache.self, from: $0) }
+            ?? UsageCache(snapshots: [:])
+    }
+
+    private static func saveCache(_ cache: UsageCache) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(cache)
+        try AtomicFileWriter.write(data, to: self.paths.cacheURL)
     }
 
     private static func validateProfile(_ profile: String) throws {
@@ -617,5 +830,13 @@ enum CodexProfileCLI {
 
     private static func note(_ text: String) {
         print(text)
+    }
+}
+
+private extension JSONDecoder {
+    static func iso8601Decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }

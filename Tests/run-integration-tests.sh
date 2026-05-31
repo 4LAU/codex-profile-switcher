@@ -78,6 +78,21 @@ make_api_auth() {
   printf '{\n  "OPENAI_API_KEY" : "%s",\n  "marker" : "%s"\n}\n' "$key" "$marker" > "$path"
 }
 
+make_oauth_auth() {
+  local path="$1"
+  local access_token="$2"
+  local refresh_token="$3"
+  local account_id="$4"
+  printf '{\n  "tokens" : {\n    "access_token" : "%s",\n    "refresh_token" : "%s",\n    "account_id" : "%s"\n  }\n}\n' "$access_token" "$refresh_token" "$account_id" > "$path"
+}
+
+make_token_only_auth() {
+  local path="$1"
+  local access_token="$2"
+  local refresh_token="$3"
+  printf '{\n  "tokens" : {\n    "access_token" : "%s",\n    "refresh_token" : "%s"\n  }\n}\n' "$access_token" "$refresh_token" > "$path"
+}
+
 save_auth() {
   local profile="$1"
   local path="$2"
@@ -403,6 +418,175 @@ test_keychain_repair_preserves_saved_auth() {
   assert_same_file "$exported_b" "$saved_b" "keychain-repair modified RepairB auth"
 }
 
+test_best_auth_exports_lowest_usage_configured_profile() {
+  reset_home
+  local saved_a="$WORK_DIR/best-a.json"
+  local saved_b="$WORK_DIR/best-b.json"
+  local out_dir="$WORK_DIR/best-out"
+  make_api_auth "$saved_a" "sk-test-best-a-1111111111" "best-a"
+  make_api_auth "$saved_b" "sk-test-best-b-2222222222" "best-b"
+  save_auth "BestA" "$saved_a"
+  save_auth "BestB" "$saved_b"
+  save_auth "Unconfigured" "$saved_b"
+  printf 'model = "gpt-test"\n' > "$TEST_HOME/.codex/config.toml"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  cat > "$TEST_HOME/.codex-switcher/config.json" <<'JSON'
+{
+  "activeProfile" : "BestA",
+  "profiles" : [
+    {"id" : "BestA", "label" : "Best A"},
+    {"id" : "BestB", "label" : "Best B"}
+  ]
+}
+JSON
+  cat > "$TEST_HOME/.codex-switcher/cache.json" <<'JSON'
+{
+  "snapshots" : {
+    "BestA" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 90,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 90,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    },
+    "BestB" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 10,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 10,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    },
+    "Unconfigured" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 0,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 0,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    }
+  }
+}
+JSON
+  mkdir -p "$out_dir"
+  chmod 777 "$out_dir"
+
+  local selected
+  selected="$(run_helper best-auth --dir "$out_dir")"
+
+  [[ "$selected" == "BestB" ]] || fail "best-auth selected $selected instead of BestB"
+  assert_same_file "$out_dir/auth.json" "$saved_b" "best-auth exported wrong auth"
+  grep -Fq 'model = "gpt-test"' "$out_dir/config.toml" \
+    || fail "best-auth did not copy Codex config.toml"
+  [[ "$(stat -f '%Lp' "$out_dir")" == "700" ]] \
+    || fail "best-auth did not make existing output dir private"
+  [[ "$(stat -f '%Lp' "$out_dir/auth.json")" == "600" ]] \
+    || fail "best-auth did not write auth.json with 0600 permissions"
+
+  rm -f "$TEST_HOME/.codex/config.toml"
+  printf 'stale config\n' > "$out_dir/config.toml"
+  selected="$(run_helper best-auth --dir "$out_dir")"
+  [[ "$selected" == "BestB" ]] || fail "best-auth selected $selected on reused dir"
+  [[ ! -f "$out_dir/config.toml" ]] \
+    || fail "best-auth left stale config.toml in reused output dir"
+}
+
+test_mark_exhausted_persists_to_cache_and_best_auth_skips_it() {
+  reset_home
+  local saved_a="$WORK_DIR/exhaust-a.json"
+  local saved_b="$WORK_DIR/exhaust-b.json"
+  make_api_auth "$saved_a" "sk-test-exhaust-a-1111111111" "exhaust-a"
+  make_api_auth "$saved_b" "sk-test-exhaust-b-2222222222" "exhaust-b"
+  save_auth "ExhaustA" "$saved_a"
+  save_auth "ExhaustB" "$saved_b"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  cat > "$TEST_HOME/.codex-switcher/config.json" <<'JSON'
+{
+  "activeProfile" : "ExhaustA",
+  "profiles" : [
+    {"id" : "ExhaustA", "label" : "Exhaust A"},
+    {"id" : "ExhaustB", "label" : "Exhaust B"}
+  ]
+}
+JSON
+  cat > "$TEST_HOME/.codex-switcher/cache.json" <<'JSON'
+{
+  "snapshots" : {
+    "ExhaustA" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 1,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 1,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    },
+    "ExhaustB" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 50,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 50,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    }
+  }
+}
+JSON
+
+  run_helper mark-exhausted ExhaustA --until 2030-01-01T00:00:00Z >/dev/null
+  grep -Fq '"exhaustionOverrides"' "$TEST_HOME/.codex-switcher/cache.json" \
+    || fail "mark-exhausted did not persist overrides to cache.json"
+  grep -Fq '"ExhaustA"' "$TEST_HOME/.codex-switcher/cache.json" \
+    || fail "mark-exhausted did not persist ExhaustA override"
+
+  local selected
+  selected="$(run_helper best-auth --dir "$WORK_DIR/exhaust-out")"
+  [[ "$selected" == "ExhaustB" ]] || fail "best-auth did not skip exhausted profile"
+}
+
+test_import_auth_preserves_on_missing_identity() {
+  reset_home
+  local existing="$WORK_DIR/token-only-existing.json"
+  local updated="$WORK_DIR/token-only-updated.json"
+  local exported="$WORK_DIR/token-only-exported.json"
+  local import_dir="$WORK_DIR/token-only-import"
+  make_token_only_auth "$existing" "access-old" "refresh-old"
+  make_token_only_auth "$updated" "access-new" "refresh-new"
+  save_auth "TokenOnly" "$existing"
+  mkdir -p "$import_dir"
+  cp "$updated" "$import_dir/auth.json"
+
+  if run_helper import-auth --dir "$import_dir" --profile TokenOnly >/dev/null 2>"$WORK_DIR/import-token-only.err"; then
+    fail "import-auth accepted updated auth with unverifiable identity"
+  fi
+
+  export_auth "TokenOnly" "$exported"
+  assert_same_file "$exported" "$existing" "import-auth overwrote auth with unverifiable identity"
+}
+
+test_import_auth_accepts_same_identity_refresh() {
+  reset_home
+  local existing="$WORK_DIR/oauth-existing.json"
+  local updated="$WORK_DIR/oauth-updated.json"
+  local exported="$WORK_DIR/oauth-exported.json"
+  local import_dir="$WORK_DIR/oauth-import"
+  make_oauth_auth "$existing" "access-old" "refresh-old" "acct-1"
+  make_oauth_auth "$updated" "access-new" "refresh-new" "acct-1"
+  save_auth "OAuth" "$existing"
+  mkdir -p "$import_dir"
+  cp "$updated" "$import_dir/auth.json"
+
+  run_helper import-auth --dir "$import_dir" --profile OAuth >/dev/null
+
+  export_auth "OAuth" "$exported"
+  assert_same_file "$exported" "$updated" "import-auth did not save refreshed same-identity auth"
+}
+
 test_switch_preserves_outgoing_auth
 test_switch_rolls_back_after_auth_write_failure
 test_switch_rolls_back_after_config_write_failure
@@ -414,5 +598,9 @@ test_switch_uses_active_profile_to_disambiguate_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
 test_login_rejects_duplicate_auth_and_preserves_target_auth
 test_keychain_repair_preserves_saved_auth
+test_best_auth_exports_lowest_usage_configured_profile
+test_mark_exhausted_persists_to_cache_and_best_auth_skips_it
+test_import_auth_preserves_on_missing_identity
+test_import_auth_accepts_same_identity_refresh
 
 printf 'Integration tests: all tests passed\n'
