@@ -235,30 +235,24 @@ enum CodexProfileCLI {
             switch args[i] {
             case "--dir":
                 guard i + 1 < args.count else {
-                    fputs("--dir requires a path argument\n", stderr)
-                    throw CLIError.exitStatus(2)
+                    throw CLIError.message("--dir requires a path argument")
                 }
                 i += 1
                 dir = args[i]
             case "--exclude":
                 guard i + 1 < args.count else {
-                    fputs("--exclude requires a comma-separated list\n", stderr)
-                    throw CLIError.exitStatus(2)
+                    throw CLIError.message("--exclude requires a comma-separated list")
                 }
                 i += 1
                 excludeCSV = args[i]
             default:
-                fputs(
-                    "Unknown argument: \(args[i]). Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]\n",
-                    stderr)
-                throw CLIError.exitStatus(2)
+                throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]")
             }
             i += 1
         }
 
         guard let dir else {
-            fputs("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]\n", stderr)
-            throw CLIError.exitStatus(2)
+            throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]")
         }
 
         let excludeIDs = Set((excludeCSV ?? "")
@@ -267,12 +261,7 @@ enum CodexProfileCLI {
             .filter { !$0.isEmpty })
         let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
         let cache = self.loadCache()
-        let allProfileIDs = try self.knownProfileIDs()
-        let eligibleProfiles = allProfileIDs
-            .map { id in
-                let label = config.profiles.first(where: { $0.id == id })?.label ?? "Profile \(id)"
-                return ProfileConfig(id: id, label: label)
-            }
+        let eligibleProfiles = config.profiles
             .filter { profile in
                 let availability = try? self.vault.authBlobAvailability(profileID: profile.id)
                 return availability == .present || availability == .needsMigration

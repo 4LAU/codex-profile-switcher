@@ -497,6 +497,7 @@ final class ProfileStore {
         self.statuses.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
+        self.cache.exhaustionOverrides.removeValue(forKey: id)
         self.saveConfig()
         self.saveCache()
     }
@@ -697,6 +698,7 @@ final class ProfileStore {
 
         try self.authVault.deleteAuthBlob(profileID: id)
         self.cache.snapshots.removeValue(forKey: id)
+        self.cache.exhaustionOverrides.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.statuses[id] = .notSetUp
         self.saveCache()
@@ -798,6 +800,15 @@ final class ProfileStore {
 
     private func saveCache() {
         do {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let diskData = try? Data(contentsOf: self.cacheURL),
+               let diskCache = try? decoder.decode(UsageCache.self, from: diskData),
+               !diskCache.exhaustionOverrides.isEmpty {
+                for (id, override) in diskCache.exhaustionOverrides where self.cache.exhaustionOverrides[id] == nil {
+                    self.cache.exhaustionOverrides[id] = override
+                }
+            }
             let data = try Self.cacheEncoder.encode(self.cache)
             try data.write(to: self.cacheURL, options: .atomic)
         } catch {
