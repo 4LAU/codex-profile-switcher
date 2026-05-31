@@ -3,11 +3,9 @@ import Foundation
 public enum AuthBlobAvailability: Equatable {
     case present
     case missing
-    case needsMigration
 }
 
 public enum AuthVaultBackend: String, Equatable {
-    case dataProtectionShared
     case legacyACL
     case file
     case custom
@@ -15,25 +13,15 @@ public enum AuthVaultBackend: String, Equatable {
 
 public struct AuthVaultDiagnostics: Equatable {
     public var activeBackend: AuthVaultBackend
-    public var accessGroup: String?
-    public var dataProtectionProbe: String?
 
-    public init(
-        activeBackend: AuthVaultBackend,
-        accessGroup: String? = nil,
-        dataProtectionProbe: String? = nil
-    ) {
+    public init(activeBackend: AuthVaultBackend) {
         self.activeBackend = activeBackend
-        self.accessGroup = accessGroup
-        self.dataProtectionProbe = dataProtectionProbe
     }
 }
 
 public protocol AuthVault {
     func listProfileIDs() throws -> [String]
     func loadAuthBlob(profileID: String) throws -> Data?
-    func loadAuthBlobForActivation(profileID: String) throws -> Data?
-    func loadAuthBlobForDuplicateCheck(profileID: String) throws -> Data?
     func saveAuthBlob(_ data: Data, profileID: String) throws
     func deleteAuthBlob(profileID: String) throws
     func hasAuthBlob(profileID: String) throws -> Bool
@@ -43,14 +31,6 @@ public protocol AuthVault {
 }
 
 public extension AuthVault {
-    func loadAuthBlobForActivation(profileID: String) throws -> Data? {
-        try self.loadAuthBlob(profileID: profileID)
-    }
-
-    func loadAuthBlobForDuplicateCheck(profileID: String) throws -> Data? {
-        try self.loadAuthBlob(profileID: profileID)
-    }
-
     func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability {
         try self.hasAuthBlob(profileID: profileID) ? .present : .missing
     }

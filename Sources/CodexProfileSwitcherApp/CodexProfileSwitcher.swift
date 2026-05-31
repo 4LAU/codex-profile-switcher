@@ -178,7 +178,6 @@ enum ProfileStatus {
     case loading
     case stale(UsageSnapshot?)
     case reloginNeeded(UsageSnapshot?)
-    case needsMigration
     case notSetUp
 
     var snapshot: UsageSnapshot? {
@@ -352,8 +351,7 @@ final class ProfileStore {
             self.config = AppConfig(
                 profiles: [],
                 activeProfile: "1",
-                authStorageVersion: nil,
-                migrationComplete: true)
+                authStorageVersion: nil)
             isFirstLaunch = true
         }
 
@@ -362,23 +360,11 @@ final class ProfileStore {
             self.authVault = authVault
             self.authStorageDescription = "custom auth vault"
         } else {
-            let accessGroup = KeychainAccessGroupResolver.configuredAccessGroup(environment: environment)
-            let vault = MigratingAuthVault(
-                service: keychainService,
-                accessGroup: accessGroup,
-                migrationComplete: self.config.migrationComplete == true
-            )
+            let vault = LegacyKeychainAuthVault(service: keychainService)
             self.authVault = vault
-            self.authStorageDescription = Self.authStorageDescription(
-                service: keychainService,
-                diagnostics: vault.diagnostics()
-            )
+            self.authStorageDescription = "macOS Keychain (\(keychainService))"
             AppLogger.info("Auth vault selected",
-                           metadata: [
-                               "backend": vault.diagnostics().activeBackend.rawValue,
-                               "access_group": vault.diagnostics().accessGroup ?? "<none>",
-                               "probe": vault.diagnostics().dataProtectionProbe ?? "<none>",
-                           ])
+                           metadata: ["backend": "legacyACL"])
         }
 
         let cacheDecoder = JSONDecoder()
@@ -408,23 +394,7 @@ final class ProfileStore {
         if let service = environment["CODEX_PROFILE_KEYCHAIN_SERVICE"], !service.isEmpty {
             return service
         }
-        return KeychainAuthVault.defaultService
-    }
-
-    private static func authStorageDescription(
-        service: String,
-        diagnostics: AuthVaultDiagnostics
-    ) -> String {
-        switch diagnostics.activeBackend {
-        case .dataProtectionShared:
-            return "macOS data protection Keychain (\(service))"
-        case .legacyACL:
-            return "macOS legacy ACL Keychain (\(service))"
-        case .file:
-            return "file auth vault"
-        case .custom:
-            return "custom auth vault"
-        }
+        return LegacyKeychainAuthVault.defaultService
     }
 
     static func userHome(environment: [String: String]) -> URL {
@@ -463,9 +433,6 @@ final class ProfileStore {
             id: "\(nextId)",
             label: Self.nextDefaultProfileLabel(after: self.config.profiles))
         self.config.profiles.append(profile)
-        if self.authVault.diagnostics().activeBackend == .legacyACL {
-            self.config.migrationComplete = false
-        }
         self.statuses[profile.id] = .notSetUp
         self.saveConfig()
         return profile
@@ -515,7 +482,7 @@ final class ProfileStore {
     }
 
     func syncSavedAuthToLive(for profileId: String) throws {
-        guard let data = try self.authVault.loadAuthBlobForActivation(profileID: profileId) else {
+        guard let data = try self.authVault.loadAuthBlob(profileID: profileId) else {
             throw AuthError.notFound
         }
         try self.replaceFile(at: self.codexAuthPath, with: data)
@@ -586,10 +553,6 @@ final class ProfileStore {
             profileID: profileId,
             profiles: self.config.profiles,
             vault: self.authVault)
-        if self.authVault.diagnostics().activeBackend == .legacyACL {
-            self.config.migrationComplete = false
-            self.saveConfig()
-        }
     }
 
     func relaunchWorkspacePath() -> String? {
@@ -616,14 +579,11 @@ final class ProfileStore {
             "cache: \(self.cacheURL.path)",
             "auth_storage: \(self.authStorageDescription)",
             "auth_storage_backend: \(diagnostics.activeBackend.rawValue)",
-            "keychain_access_group: \(diagnostics.accessGroup ?? "<none>")",
-            "data_protection_probe: \(diagnostics.dataProtectionProbe ?? "<none>")",
             "legacy_auth_store: \(self.authStoreDir.path)",
             "codex_home: \(self.codexHome.path)",
             "codex_auth_exists: \(self.liveAuthExists())",
             "config_active_profile: \(self.config.activeProfile)",
             "auth_storage_version: \(self.config.authStorageVersion.map(String.init) ?? "<none>")",
-            "migration_complete: \(self.config.migrationComplete == true)",
             "live_profile_id: \(self.liveProfileId ?? "<none>")",
             "profile_count: \(self.config.profiles.count)",
         ]
@@ -641,7 +601,7 @@ final class ProfileStore {
             let availability = self.authStoreAvailability(for: profile.id)
             lines.append(
                 "profile[\(profile.id)]: label=\"\(profile.label)\" status=\(Self.debugStatusName(status)) " +
-                    "auth_saved=\(availability == .present) auth_availability=\(Self.debugAvailabilityName(availability)) " +
+                    "auth_saved=\(availability == .present) " +
                     "cache_age=\(cacheText) " +
                     "last_attempted_source=\(attemptedSource) last_successful_source=\(successfulSource) " +
                     "last_fallback_reason=\(fallbackReason) last_decision=\(decision) last_error=\(error)")
@@ -826,8 +786,6 @@ final class ProfileStore {
                 } else {
                     self.statuses[profile.id] = .loading
                 }
-            case .needsMigration:
-                self.statuses[profile.id] = .needsMigration
             case .missing:
                 self.statuses[profile.id] = self.missingAuthStatus(cached: self.cache.snapshots[profile.id])
             }
@@ -989,16 +947,7 @@ final class ProfileStore {
         case .loading: return "loading"
         case .stale(let snapshot): return snapshot == nil ? "stale-no-cache" : "stale"
         case .reloginNeeded: return "relogin-needed"
-        case .needsMigration: return "needs-migration"
         case .notSetUp: return "not-set-up"
-        }
-    }
-
-    private static func debugAvailabilityName(_ availability: AuthBlobAvailability) -> String {
-        switch availability {
-        case .present: return "present"
-        case .missing: return "missing"
-        case .needsMigration: return "needs-migration"
         }
     }
 
@@ -1107,7 +1056,7 @@ final class UsageProvider {
         if !force,
            self.store.statuses.values.allSatisfy({
                switch $0 {
-               case .notSetUp, .needsMigration: return true
+               case .notSetUp: return true
                default: return false
                }
            }) {
@@ -1261,16 +1210,6 @@ final class UsageProvider {
         }
 
         do {
-            if id != activeProfileId, self.store.authStoreAvailability(for: id) == .needsMigration {
-                diagnostics.lastDecision = "needs-migration"
-                diagnostics.lastError = nil
-                let updatedDiagnostics = diagnostics
-                await MainActor.run {
-                    self.store.updateRefreshDiagnostics(id, updatedDiagnostics)
-                    self.store.updateStatus(id, .needsMigration)
-                }
-                return
-            }
             guard self.canUseAuth(for: id, activeProfileId: activeProfileId) else {
                 await finalize(.notSetUp, decision: "not-set-up")
                 return

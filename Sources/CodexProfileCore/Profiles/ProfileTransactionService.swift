@@ -163,7 +163,7 @@ public struct ProfileTransactionService {
 
     public func prepareSwitch(to profileID: String) throws -> PreparedProfileSwitch {
         try ProfileValidator.validate(profileID)
-        guard var targetData = try self.vault.loadAuthBlobForActivation(profileID: profileID) else {
+        guard var targetData = try self.vault.loadAuthBlob(profileID: profileID) else {
             throw ProfileTransactionError.missingSavedAuth(profileID)
         }
 
@@ -224,7 +224,7 @@ public struct ProfileTransactionService {
         let active = ProfileConfigStore(paths: self.paths, fileManager: self.fileManager).loadConfig()?.activeProfile ?? ""
         let liveFingerprint = AuthBlob.identityFingerprint(from: liveData)
         if ProfileValidator.isValid(active),
-           let data = try self.vault.loadAuthBlobForActivation(profileID: active),
+           let data = try self.vault.loadAuthBlob(profileID: active),
            let savedFingerprint = AuthBlob.identityFingerprint(from: data),
            savedFingerprint == liveFingerprint {
             return active
@@ -275,17 +275,6 @@ public struct ProfileConfigStore {
     public func markAuthStorageVersion(_ version: Int) throws {
         guard var config = self.loadConfig() else { return }
         config.authStorageVersion = max(config.authStorageVersion ?? version, version)
-        let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
-        try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
-    }
-
-    public func markMigrationComplete(_ complete: Bool) throws {
-        try AtomicFileWriter.ensurePrivateDirectory(self.paths.switcherHome, fileManager: self.fileManager)
-        var config = self.loadConfig() ?? AppConfig(
-            profiles: [],
-            activeProfile: "1",
-            authStorageVersion: Self.keychainAuthStorageVersion)
-        config.migrationComplete = complete
         let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
         try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
     }

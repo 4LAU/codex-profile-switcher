@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.1.13 -- 2026-05-30
+
+### Changed
+
+- Switched from data protection Keychain to legacy ACL Keychain — `swift build` now produces a fully working binary without entitlements or provisioning profiles
+- Removed `migrate` CLI command and all migration machinery
+
+### Removed
+
+- Data protection Keychain backend (`DataProtectionKeychainAuthVault`)
+- Dual-backend migration wrapper (`MigratingAuthVault`)
+- Provisioning profile discovery and embedding in `package_app.sh`
+- "Migration needed" profile status in the UI
+
+### Breaking
+
+- Existing profiles stored in the data protection Keychain are no longer accessible — re-login each profile with `codex-profile login <name>`
+
 ## 0.1.12 -- 2026-05-30
 
 ### Added

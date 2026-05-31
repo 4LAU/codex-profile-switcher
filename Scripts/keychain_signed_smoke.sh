@@ -11,10 +11,14 @@ FAKE_APP="$WORK_DIR/fake-codex-app"
 FAKE_CODEX="$WORK_DIR/fake-codex"
 LAUNCH_LOG="$WORK_DIR/fake-app-launch.log"
 SERVICE="${CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE:-com.4lau.codex-profile-switcher.smoke.$(date +%s).$$}"
+LEGACY_ACL_SERVICE="$SERVICE.legacy-acl"
 
 cleanup() {
-  security delete-generic-password -s "$SERVICE" >/dev/null 2>&1 || true
-  while security delete-generic-password -s "$SERVICE" >/dev/null 2>&1; do :; done
+  local service
+  for service in "$SERVICE" "$LEGACY_ACL_SERVICE"; do
+    security delete-generic-password -s "$service" >/dev/null 2>&1 || true
+    while security delete-generic-password -s "$service" >/dev/null 2>&1; do :; done
+  done
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -59,7 +63,7 @@ assert_same_file() {
   cmp -s "$actual" "$expected" || fail "$message"
 }
 
-CODEX_PROFILE_ENABLE_KEYCHAIN_PROBE=1 "$ROOT_DIR/Scripts/package_app.sh"
+"$ROOT_DIR/Scripts/package_app.sh"
 [[ -x "$APP_BIN" ]] || fail "packaged app binary missing at $APP_BIN"
 [[ -x "$HELPER" ]] || fail "packaged helper missing at $HELPER"
 
@@ -107,43 +111,36 @@ COMMON_ENV=(
   CODEX_CLI="$FAKE_CODEX"
   FAKE_APP_LAUNCH_LOG="$LAUNCH_LOG"
 )
-if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
-  COMMON_ENV+=(CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP="$CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP")
-fi
 
 run_helper() {
   run_with_timeout 120 env "${COMMON_ENV[@]}" "$@"
 }
 
-run_app_probe() {
-  local action="$1"
-  local profile="$2"
-  local marker="$3"
+run_legacy_acl_interop() {
+  local test_home="$WORK_DIR/legacy-acl-home"
+  local test_auth="$WORK_DIR/legacy-acl-auth.json"
+  local status_file="$WORK_DIR/legacy-acl.status"
+
+  printf '==> Legacy ACL interop: helper write -> helper read\n'
+  mkdir -p "$test_home/.codex"
+  make_api_auth "$test_auth" "sk-test-smoke-helper-write-3333333333333333" "helper-write"
+
   run_with_timeout 120 env "${COMMON_ENV[@]}" \
-    CODEX_PROFILE_KEYCHAIN_PROBE="$action" \
-    CODEX_PROFILE_KEYCHAIN_PROBE_PROFILE="$profile" \
-    CODEX_PROFILE_KEYCHAIN_PROBE_MARKER="$marker" \
-    "$APP_BIN"
+    CODEX_PROFILE_HOME="$test_home" \
+    CODEX_PROFILE_KEYCHAIN_SERVICE="$LEGACY_ACL_SERVICE" \
+    FAKE_CODEX_LOGIN_AUTH="$test_auth" \
+    "$HELPER" login HelperWrites >/dev/null
+
+  run_with_timeout 120 env "${COMMON_ENV[@]}" \
+    CODEX_PROFILE_HOME="$test_home" \
+    CODEX_PROFILE_KEYCHAIN_SERVICE="$LEGACY_ACL_SERVICE" \
+    "$HELPER" status HelperWrites > "$status_file"
+  grep -Fq "HelperWrites: Saved API key auth" "$status_file" \
+    || fail "helper could not read back its legacy ACL Keychain write"
+
+  security delete-generic-password -s "$LEGACY_ACL_SERVICE" -a "HelperWrites" >/dev/null 2>&1 || true
+  printf '==> Legacy ACL interop: cleanup done\n'
 }
-
-if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
-  AUTH_HELPER_PROBE="$WORK_DIR/helper-probe.json"
-  make_api_auth "$AUTH_HELPER_PROBE" "sk-test-smoke-helper-probe-3333333333333333" "helper-to-app"
-
-  run_app_probe write AppWrites "app-to-helper" >/dev/null
-  run_helper "$HELPER" status AppWrites > "$WORK_DIR/app-writes.status"
-  grep -Fq "AppWrites: Saved API key auth" "$WORK_DIR/app-writes.status" \
-    || fail "helper could not read app-written data-protection Keychain item"
-
-  run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_HELPER_PROBE" "$HELPER" login HelperWrites >/dev/null
-  run_app_probe read HelperWrites "helper-to-app" >/dev/null
-
-  run_app_probe delete AppWrites "app-to-helper" >/dev/null
-  run_app_probe delete HelperWrites "helper-to-app" >/dev/null
-  run_helper "$HELPER" status AppWrites > "$WORK_DIR/app-writes-deleted.status"
-  grep -Fq "AppWrites: Not set up" "$WORK_DIR/app-writes-deleted.status" \
-    || fail "helper still sees app-written probe item after app delete"
-fi
 
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_A" "$HELPER" login SmokeA >/dev/null
 run_helper FAKE_CODEX_LOGIN_AUTH="$AUTH_B" "$HELPER" login SmokeB >/dev/null
@@ -160,9 +157,6 @@ assert_same_file "$TEST_HOME/.codex/auth.json" "$AUTH_A" "SmokeA was not restore
 run_helper "$HELPER" app SmokeB "$WORK_DIR" >/dev/null
 assert_same_file "$TEST_HOME/.codex/auth.json" "$AUTH_B" "repeat SmokeB switch did not restore live auth"
 
-if [[ -n "${CODEX_PROFILE_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
-  run_app_probe delete SmokeA "smoke-a" >/dev/null
-  run_app_probe delete SmokeB "smoke-b" >/dev/null
-fi
+run_legacy_acl_interop
 
 printf 'Signed Keychain smoke passed. Launch log: %s\n' "$LAUNCH_LOG"

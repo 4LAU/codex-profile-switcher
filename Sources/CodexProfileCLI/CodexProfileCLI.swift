@@ -36,7 +36,6 @@ enum CodexProfileCLI {
             case "list": try self.commandList()
             case "path": try self.commandPath(args)
             case "doctor": try self.commandDoctor(args)
-            case "migrate": try self.commandMigrate(args)
             case "keychain-repair": try self.commandKeychainRepair()
             case "best-auth": try self.commandBestAuth(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
@@ -65,8 +64,7 @@ enum CodexProfileCLI {
           \(self.program) status [profile]
           \(self.program) list
           \(self.program) path <profile>
-          \(self.program) doctor [--check-legacy]
-          \(self.program) migrate --status|--all
+          \(self.program) doctor
           \(self.program) keychain-repair
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]
           \(self.program) mark-exhausted <profile> [--until <iso8601>]
@@ -176,10 +174,8 @@ enum CodexProfileCLI {
     }
 
     private static func commandDoctor(_ args: [String]) throws {
-        let checkLegacy = args.contains("--check-legacy")
-        let unknownArgs = args.filter { $0 != "--check-legacy" }
-        guard unknownArgs.isEmpty else {
-            throw CLIError.message("Usage: \(self.program) doctor [--check-legacy]")
+        guard args.isEmpty else {
+            throw CLIError.message("Usage: \(self.program) doctor")
         }
 
         self.note("Codex profile doctor")
@@ -202,10 +198,16 @@ enum CodexProfileCLI {
         self.note("Auth storage:")
         self.note("  backend: \(diagnostics.activeBackend.rawValue)")
         self.note("  keychain service: \(self.keychainService)")
-        self.note("  keychain access group: \(diagnostics.accessGroup ?? "<none>")")
-        self.note("  data protection probe: \(diagnostics.dataProtectionProbe ?? "<none>")")
-        self.note("  embedded keychain access groups: \(self.embeddedAccessGroupsDescription())")
-        self.note("  migration complete: \(self.configStore.loadConfig()?.migrationComplete == true)")
+
+        let configProfiles = self.configStore.loadConfig()?.profiles ?? []
+        let savedIDs = Set(try self.vault.listProfileIDs().filter(ProfileValidator.isValid))
+        let orphanedSlots = configProfiles.filter { !savedIDs.contains($0.id) }
+        if !orphanedSlots.isEmpty {
+            self.note("")
+            self.note("Warning: \(orphanedSlots.count) configured profile(s) have no saved auth.")
+            self.note("  This may happen after upgrading from a data-protection Keychain build.")
+            self.note("  Re-login with: \(self.program) login <profile>")
+        }
 
         self.note("")
         self.note("Saved profiles:")
@@ -213,12 +215,6 @@ enum CodexProfileCLI {
         self.note("")
         self.note("Saved auth status (vault metadata only):")
         try self.printMetadataStatuses(vault: self.vault)
-
-        if checkLegacy {
-            self.note("")
-            self.note("Legacy auth inspection (may prompt):")
-            try self.printMetadataStatuses(vault: self.makeLegacyInspectionVault())
-        }
     }
 
     private static func commandKeychainRepair() throws {
@@ -264,8 +260,13 @@ enum CodexProfileCLI {
         let eligibleProfiles = config.profiles
             .filter { profile in
                 let availability = try? self.vault.authBlobAvailability(profileID: profile.id)
-                return availability == .present || availability == .needsMigration
+                return availability == .present
             }
+
+        if config.profiles.isEmpty {
+            fputs("No profiles configured\n", stderr)
+            throw CLIError.exitStatus(3)
+        }
 
         guard let result = ProfileSelector.selectBest(
             profiles: eligibleProfiles,
@@ -279,7 +280,7 @@ enum CodexProfileCLI {
         let dirURL = URL(fileURLWithPath: dir)
         try self.ensurePrivateDir(dirURL)
 
-        guard let authData = try self.vault.loadAuthBlobForActivation(profileID: result.profileID) else {
+        guard let authData = try self.vault.loadAuthBlob(profileID: result.profileID) else {
             fputs("No auth data for profile '\(result.profileID)'\n", stderr)
             throw CLIError.exitStatus(1)
         }
@@ -407,51 +408,8 @@ enum CodexProfileCLI {
         try self.vault.saveAuthBlob(updatedData, profileID: profile)
     }
 
-    private static func commandMigrate(_ args: [String]) throws {
-        guard args.count == 1, let mode = args.first, ["--status", "--all"].contains(mode) else {
-            throw CLIError.message("Usage: \(self.program) migrate --status|--all")
-        }
-
-        let legacyVault = self.makeLegacyInspectionVault()
-        if mode == "--status" {
-            self.note("Legacy auth migration status (may prompt):")
-            try self.printMetadataStatuses(vault: legacyVault)
-            return
-        }
-
-        guard self.vault.diagnostics().activeBackend == .dataProtectionShared else {
-            throw CLIError.message("Data protection Keychain is not active; cannot migrate legacy items.")
-        }
-
-        let profiles = try legacyVault.listProfileIDs()
-            .filter(ProfileValidator.isValid)
-            .sorted()
-        if profiles.isEmpty {
-            try self.configStore.markMigrationComplete(true)
-            self.note("No legacy auth items found. Marked migration complete.")
-            return
-        }
-
-        var migrated = 0
-        var cleaned = 0
-        for profile in profiles {
-            if try self.migrateLegacyProfile(profile, legacyVault: legacyVault) {
-                migrated += 1
-            } else {
-                cleaned += 1
-            }
-        }
-        try self.configStore.ensureProfiles(profiles)
-        try self.configStore.markMigrationComplete(true)
-        self.note("Migrated \(migrated) legacy auth item(s) to the data protection Keychain; cleaned \(cleaned) stale legacy item(s).")
-    }
-
     private static func printStatus(_ profile: String) throws {
         let availability = try self.vault.authBlobAvailability(profileID: profile)
-        if availability == .needsMigration {
-            print("  \(profile): Needs migration")
-            return
-        }
         if availability == .missing {
             print("  \(profile): Not set up")
             return
@@ -496,37 +454,10 @@ enum CodexProfileCLI {
             switch try vault.authBlobAvailability(profileID: profile) {
             case .present:
                 print("  \(profile): Saved auth")
-            case .needsMigration:
-                print("  \(profile): Needs migration")
             case .missing:
                 print("  \(profile): Not set up")
             }
         }
-    }
-
-    private static func migrateLegacyProfile(_ profile: String, legacyVault: AuthVault) throws -> Bool {
-        if let existingData = try self.vault.loadAuthBlob(profileID: profile) {
-            try legacyVault.deleteAuthBlob(profileID: profile)
-            try self.vault.saveAuthBlob(existingData, profileID: profile)
-            guard try self.vault.loadAuthBlob(profileID: profile) == existingData else {
-                throw CLIError.message("Could not verify preserved auth for profile '\(profile)'")
-            }
-            return false
-        }
-
-        guard let legacyData = try legacyVault.loadAuthBlob(profileID: profile) else {
-            return false
-        }
-        try self.vault.saveAuthBlob(legacyData, profileID: profile)
-        guard try self.vault.loadAuthBlob(profileID: profile) == legacyData else {
-            throw CLIError.message("Could not verify migrated auth for profile '\(profile)'")
-        }
-        try legacyVault.deleteAuthBlob(profileID: profile)
-        try self.vault.saveAuthBlob(legacyData, profileID: profile)
-        guard try self.vault.loadAuthBlob(profileID: profile) == legacyData else {
-            throw CLIError.message("Could not verify migrated auth after legacy cleanup for profile '\(profile)'")
-        }
-        return true
     }
 
     private static func resolveWorkspace(_ requested: String?) throws -> String? {
@@ -751,17 +682,6 @@ enum CodexProfileCLI {
         if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
             return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
         }
-        return MigratingAuthVault(
-            service: self.keychainService,
-            accessGroup: KeychainAccessGroupResolver.configuredAccessGroup(),
-            migrationComplete: self.configStore.loadConfig()?.migrationComplete == true
-        )
-    }
-
-    private static func makeLegacyInspectionVault() -> AuthVault {
-        if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
-            return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
-        }
         return LegacyKeychainAuthVault(service: self.keychainService)
     }
 
@@ -776,13 +696,7 @@ enum CodexProfileCLI {
     }
 
     private static func knownProfileIDs(vault: AuthVault = Self.vault) throws -> [String] {
-        var ids = Set(try vault.listProfileIDs().filter(ProfileValidator.isValid))
-        if vault.diagnostics().activeBackend == .dataProtectionShared {
-            for profile in self.configStore.loadConfig()?.profiles ?? [] where ProfileValidator.isValid(profile.id) {
-                ids.insert(profile.id)
-            }
-        }
-        return ids.sorted()
+        try vault.listProfileIDs().filter(ProfileValidator.isValid).sorted()
     }
 
     private static func duplicateCheckProfiles(including profileID: String) throws -> [ProfileConfig] {
@@ -801,20 +715,13 @@ enum CodexProfileCLI {
 
     private static func authStorageLabel() -> String {
         switch self.vault.diagnostics().activeBackend {
-        case .dataProtectionShared:
-            return "macOS data protection Keychain"
         case .legacyACL:
-            return "macOS legacy ACL Keychain"
+            return "macOS Keychain"
         case .file:
             return "file auth vault"
         case .custom:
             return "custom auth vault"
         }
-    }
-
-    private static func embeddedAccessGroupsDescription() -> String {
-        let groups = KeychainAccessGroupResolver.embeddedKeychainAccessGroups()
-        return groups.isEmpty ? "<none>" : groups.joined(separator: ",")
     }
 
     private static func note(_ text: String) {

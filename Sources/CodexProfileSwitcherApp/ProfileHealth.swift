@@ -142,7 +142,7 @@ struct ProfileHealth {
                 weeklyScore: nil,
                 limitingWindowResetAt: nil,
                 tier: canActivateAuth ? .unknownUsage : .notSwitchable)
-        case .needsMigration, .notSetUp:
+        case .notSetUp:
             self.init(
                 profile: profile,
                 status: status,

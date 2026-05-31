@@ -16,13 +16,10 @@
 Scripts/package_app.sh
 ```
 
-`build.sh` creates loose development binaries. Use the packaged `.app` when
-testing real saved profiles because macOS Keychain access depends on the app's
-bundle identity and entitlements. For the official bundle ID,
-`Scripts/package_app.sh` requires the public keychain access group
-`W3ZHLSH96F.com.4lau.codex-profile-switcher` when signing with the Developer ID
-identity, auto-discovers a matching local provisioning profile, and fails if the
-final app/helper are not entitled to read the shared Keychain items.
+`build.sh` creates loose development binaries that can read and write saved
+profiles through the standard macOS Keychain. Use `Scripts/package_app.sh` when
+you need a signed `.app` bundle, Sparkle integration, or release-like Gatekeeper
+behavior.
 
 ## Test
 

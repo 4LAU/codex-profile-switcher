@@ -325,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.store.setLiveProfileId(nil)
         let allNotSetUp = self.store.statuses.values.allSatisfy {
             switch $0 {
-            case .notSetUp, .needsMigration: return true
+            case .notSetUp: return true
             default: return false
             }
         }

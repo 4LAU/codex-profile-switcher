@@ -429,7 +429,6 @@ struct ProfilesTab: View {
         case .loading: return "Refreshing"
         case .stale: return "Cached"
         case .reloginNeeded: return "Re-login needed"
-        case .needsMigration: return "Migration needed"
         case .notSetUp: return "Not set up"
         }
     }
@@ -440,7 +439,6 @@ struct ProfilesTab: View {
         case .loading: return Palette.accent
         case .stale: return .secondary
         case .reloginNeeded: return Palette.warning
-        case .needsMigration: return Palette.warning
         case .notSetUp: return .secondary.opacity(0.5)
         }
     }

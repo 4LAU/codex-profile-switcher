@@ -26,7 +26,7 @@ public enum DuplicateAwareAuthSaver {
         }
 
         for profile in profiles where profile.id != targetProfileID {
-            guard let existingData = try vault.loadAuthBlobForDuplicateCheck(profileID: profile.id),
+            guard let existingData = try vault.loadAuthBlob(profileID: profile.id),
                   AuthBlob.identityFingerprint(from: existingData) == newFingerprint else {
                 continue
             }

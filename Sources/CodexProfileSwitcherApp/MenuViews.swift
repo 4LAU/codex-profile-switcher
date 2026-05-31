@@ -284,10 +284,6 @@ struct ProfileCardView: View {
                     .font(.system(size: 10))
             }
             .foregroundStyle(Palette.warning)
-        case .needsMigration:
-            Text("Migration needed")
-                .font(.system(size: 10))
-                .foregroundStyle(Palette.warning)
         case .notSetUp:
             Text("Click to set up")
                 .font(.system(size: 10))

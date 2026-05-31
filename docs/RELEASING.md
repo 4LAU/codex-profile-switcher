@@ -81,61 +81,6 @@ The script:
 
 The output is written under `.build/release/`.
 
-## Optional Validated Keychain Access Group
-
-The shared data-protection Keychain entitlement is opt-in until the production
-entitlement path has been proven. Normal contributor and ad-hoc builds should
-not set these variables.
-
-To build with a validated shared Keychain access group:
-
-1. In Apple Developer Certificates, Identifiers & Profiles, create or update the
-   macOS app identifier for the bundle ID and enable the Keychain Sharing
-   capability with the intended access group.
-2. Generate a macOS provisioning profile for the same distribution identity and
-   app identifier, then download it to the release machine.
-   Keep this file private and out of git. A good local path is:
-   `~/Developer/AppleProfiles/Codex_Profile_Switcher_Developer_ID.provisionprofile`.
-3. Build with the Developer ID identity:
-
-```bash
-APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
-SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
-Scripts/package_app.sh
-```
-
-For the official `com.4lau.codex-profile-switcher` bundle ID,
-`package_app.sh` automatically requires the public keychain access group
-`W3ZHLSH96F.com.4lau.codex-profile-switcher`. It discovers a local provisioning
-profile from standard Apple profile locations, verifies that the profile
-authorizes the group, embeds it at `Contents/embedded.provisionprofile`, signs
-both the app and helper with generated entitlements, and fails the build if the
-final signed app or helper is missing the group.
-
-The provisioning profile itself stays private and out of git. If it is not in a
-standard location, pass it explicitly:
-
-```bash
-APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
-CODEX_PROFILE_PROVISIONING_PROFILE="/path/to/CodexProfileSwitcher.provisionprofile" \
-Scripts/package_app.sh
-```
-
-With `CODEX_PROFILE_REQUIRE_SIGNING=1`, any missing identity, entitlement file,
-provisioning profile, or unauthorized access group fails the build instead of
-falling back to ad-hoc signing.
-
-Useful release verification commands:
-
-```bash
-codesign --verify --strict --verbose=2 CodexProfileSwitcher.app
-codesign -d --entitlements :- CodexProfileSwitcher.app
-codesign --verify --strict --verbose=2 CodexProfileSwitcher.app/Contents/Helpers/codex-profile
-codesign -d --entitlements :- CodexProfileSwitcher.app/Contents/Helpers/codex-profile
-security cms -D -i CodexProfileSwitcher.app/Contents/embedded.provisionprofile | \
-  plutil -extract Entitlements.keychain-access-groups raw -o - -
-```
-
 After the release, commit and push the updated `appcast.xml` so the feed URL
 serves the new version:
 
@@ -217,9 +162,7 @@ APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 Scripts/keychain_signed_smoke.sh
 ```
 
-For the official bundle ID, the signed smoke inherits the same fail-closed
-keychain sharing checks from `package_app.sh`. The smoke uses a disposable
-`CODEX_PROFILE_KEYCHAIN_SERVICE` value by default and performs a launched helper
+For the official bundle ID, the signed smoke performs a launched helper
 Keychain round-trip. Run it manually only; it can trigger interactive macOS
 password prompts.
 
@@ -239,7 +182,8 @@ For a normal release, users should expect:
 
 1. A standard first-open macOS warning because the app was downloaded from the
    internet.
-2. A Keychain prompt when profile auth is first saved or first accessed.
+2. A one-time Keychain prompt when each profile's auth is first saved or accessed.
+   After clicking "Always Allow", subsequent access is silent.
 3. No recurring password prompt on every ordinary profile switch after access is
    approved.
 
