@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.1.12</title>
+            <pubDate>Sat, 30 May 2026 18:32:07 -0700</pubDate>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>0.1.12</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.12/CodexProfileSwitcher-0.1.12.dmg" length="4042250" type="application/octet-stream" sparkle:edSignature="b77bdrBH5M/T6exktg6l00rD/oTSYAxy1C8MZbUizmcdzYIn1jBDu9lfC7zE4a0QeRVjdcWeaxOd7W89wHB4DQ=="/>
+        </item>
+        <item>
             <title>0.1.11</title>
             <pubDate>Fri, 29 May 2026 13:48:23 -0700</pubDate>
             <sparkle:version>12</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.10/CodexProfileSwitcher-0.1.10.dmg" length="3990407" type="application/octet-stream" sparkle:edSignature="MqBu5R5M+3qJLI9jD1LceEl3tpEFQNDNqebCwmO4Y7wl7LUm5yPyajRGgBp7gYAEG5QmUOnjU8j9Ax6qW13hAA=="/>
-        </item>
-        <item>
-            <title>0.1.9</title>
-            <pubDate>Thu, 21 May 2026 17:58:40 -0700</pubDate>
-            <sparkle:version>10</sparkle:version>
-            <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.1.9/CodexProfileSwitcher-0.1.9.dmg" length="3990538" type="application/octet-stream" sparkle:edSignature="+Fz3wJQbN2Bu+nBf7clVSurq/CE/INrlUF2aXhiLgW3F4bKdZbuR9pzHPUcgc7j1oMkcq4cWEsChEi0rQa6zAA=="/>
         </item>
     </channel>
 </rss>
