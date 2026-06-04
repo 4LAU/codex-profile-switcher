@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.2.1 -- 2026-06-04
+
+### Fixed
+
+- Reduced Keychain password prompts from 36 to 12 (one per profile, one-time after binary change) by eliminating redundant reads during save and refresh
+- ACL repair now retries on next launch if any profiles were denied — previously a partial failure was treated as complete
+- Added crash-window recovery files so credentials survive a process kill during repair
+- CLI auto-repair runs before auth-reading commands (`best-auth`, `status`, `import-auth`, `login`, `app`) — no longer requires explicit `keychain-repair`
+
 ## 0.2.0 -- 2026-06-02
 
 ### Changed
