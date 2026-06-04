@@ -297,7 +297,7 @@ struct SettingsActionError: LocalizedError {
 
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
-    private static let keychainAccessRepairVersion = 3
+    private static let keychainAccessRepairVersion = 4
 
     private let paths: AppPaths
     private let configDir: URL
@@ -553,6 +553,20 @@ final class ProfileStore {
             profileID: profileId,
             profiles: self.config.profiles,
             vault: self.authVault)
+    }
+
+    func saveRefreshedAuthToVault(_ data: Data, for profileId: String, originalData: Data) throws {
+        let originalFingerprint = AuthBlob.identityFingerprint(from: originalData)
+        let refreshedFingerprint = AuthBlob.identityFingerprint(from: data)
+        guard let orig = originalFingerprint, let refreshed = refreshedFingerprint else {
+            try self.saveAuthDataToVault(data, for: profileId)
+            return
+        }
+        guard orig == refreshed else {
+            try self.saveAuthDataToVault(data, for: profileId)
+            return
+        }
+        try self.authVault.saveAuthBlob(data, profileID: profileId)
     }
 
     func relaunchWorkspacePath() -> String? {
@@ -873,12 +887,18 @@ final class ProfileStore {
               currentVersion < Self.keychainAccessRepairVersion else { return }
 
         do {
-            let repaired = try self.authVault.repairStoredAuthAccess()
-            self.config.authStorageVersion = Self.keychainAccessRepairVersion
-            try self.saveConfigThrowing()
-            if repaired > 0 {
+            let result = try self.authVault.repairStoredAuthAccess()
+            if result.isComplete {
+                self.config.authStorageVersion = Self.keychainAccessRepairVersion
+                try self.saveConfigThrowing()
+            }
+            if result.repaired > 0 {
                 AppLogger.info("Repaired saved auth Keychain access",
-                               metadata: ["profile_count": "\(repaired)"])
+                               metadata: [
+                                   "complete": "\(result.isComplete)",
+                                   "repaired": "\(result.repaired)",
+                                   "total": "\(result.total)",
+                               ])
             }
         } catch {
             AppLogger.error("Failed to repair saved auth Keychain access",
@@ -1142,8 +1162,8 @@ final class UsageProvider {
                 currentAuthData: {
                     try self.store.currentSavedAuthData(for: id)
                 },
-                saveUpdatedAuthData: { data in
-                    try self.store.saveAuthDataToVault(data, for: id)
+                saveUpdatedAuthData: { [authData] data in
+                    try self.store.saveRefreshedAuthToVault(data, for: id, originalData: authData)
                 })
 
             let response = try await UsageFetcher.fetch(

@@ -342,8 +342,8 @@ test_switch_uses_active_profile_to_disambiguate_live_auth() {
   run_helper app PreferredB "$WORK_DIR" >/dev/null
 
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected profile auth was not restored after disambiguated switch"
-  grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
-    || fail "profile switch downgraded authStorageVersion"
+  grep -Fq '"authStorageVersion" : 4' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "profile switch did not preserve repaired authStorageVersion"
   export_auth "PreferredA" "$exported_a"
   export_auth "PreferredClone" "$exported_clone"
   assert_same_file "$exported_a" "$duplicate_a" "non-active duplicate was overwritten during disambiguated switch"
@@ -410,8 +410,8 @@ test_keychain_repair_preserves_saved_auth() {
 
   run_helper keychain-repair >/dev/null
 
-  grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
-    || fail "keychain-repair did not mark authStorageVersion 3"
+  grep -Fq '"authStorageVersion" : 4' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "keychain-repair did not mark authStorageVersion 4"
   export_auth "RepairA" "$exported_a"
   export_auth "RepairB" "$exported_b"
   assert_same_file "$exported_a" "$saved_a" "keychain-repair modified RepairA auth"

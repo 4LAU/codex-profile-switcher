@@ -23,7 +23,7 @@ enum CodexProfileCLI {
     private static let keychainService = Self.environment("CODEX_PROFILE_KEYCHAIN_SERVICE")
         ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
-    private static let keychainAccessRepairVersion = 3
+    private static let keychainAccessRepairVersion = 4
 
     static func main() {
         do {
@@ -77,6 +77,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) login <profile> [codex-login-args...]")
         }
         try self.validateProfile(profile)
+        self.repairKeychainAccessIfNeeded()
 
         let tempHome = try self.makeTempHome(profile: profile)
         defer { try? self.fileManager.removeItem(at: tempHome) }
@@ -111,6 +112,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) app <profile> [workspace]")
         }
         try self.validateProfile(profile)
+        let repairComplete = self.repairKeychainAccessIfNeeded(markComplete: false)
 
         let requestedWorkspace = args.dropFirst().first
         let workspace = try self.resolveWorkspace(requestedWorkspace)
@@ -124,12 +126,18 @@ enum CodexProfileCLI {
             isCodexDesktopRunning: self.codexDesktopRunning
         ).prepareSwitch(to: profile)
         if transaction.alreadyActive {
+            if repairComplete {
+                self.markKeychainAccessRepairComplete()
+            }
             self.note("Profile '\(profile)' is already active.")
             return
         }
 
         try self.quitCodexApp()
         _ = try transaction.commit()
+        if repairComplete {
+            self.markKeychainAccessRepairComplete()
+        }
         do {
             try self.launchCodexApp(workspace: workspace)
         } catch {
@@ -138,6 +146,8 @@ enum CodexProfileCLI {
     }
 
     private static func commandStatus(_ args: [String]) throws {
+        self.repairKeychainAccessIfNeeded()
+
         if let profile = args.first {
             try self.validateProfile(profile)
             try self.printStatus(profile)
@@ -218,9 +228,31 @@ enum CodexProfileCLI {
     }
 
     private static func commandKeychainRepair() throws {
-        let repaired = try self.vault.repairStoredAuthAccess()
-        try self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
-        self.note("Rewrote \(repaired) saved auth item(s) with current Keychain access settings.")
+        let result = try self.vault.repairStoredAuthAccess()
+        if result.isComplete {
+            try self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
+        }
+        self.note("Rewrote \(result.repaired)/\(result.total) saved auth item(s) with current Keychain access settings.")
+        if !result.isComplete {
+            self.note("Some items could not be repaired. Run again to retry.")
+        }
+    }
+
+    @discardableResult
+    private static func repairKeychainAccessIfNeeded(markComplete: Bool = true) -> Bool {
+        let currentVersion = self.configStore.loadConfig()?.authStorageVersion ?? 0
+        guard currentVersion >= 2,
+              currentVersion < Self.keychainAccessRepairVersion else { return false }
+
+        guard let result = try? self.vault.repairStoredAuthAccess() else { return false }
+        if result.isComplete, markComplete {
+            self.markKeychainAccessRepairComplete()
+        }
+        return result.isComplete
+    }
+
+    private static func markKeychainAccessRepairComplete() {
+        try? self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
     }
 
     private static func commandBestAuth(_ args: [String]) throws {
@@ -250,6 +282,7 @@ enum CodexProfileCLI {
         guard let dir else {
             throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]")
         }
+        self.repairKeychainAccessIfNeeded()
 
         let excludeIDs = Set((excludeCSV ?? "")
             .split(separator: ",")
@@ -371,6 +404,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) import-auth --dir <path> --profile <id>")
         }
         try self.validateProfile(profile)
+        self.repairKeychainAccessIfNeeded()
 
         let authURL = URL(fileURLWithPath: dir).appendingPathComponent("auth.json")
         guard let updatedData = try? Data(contentsOf: authURL) else {

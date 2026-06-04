@@ -66,64 +66,79 @@ public struct LegacyKeychainAuthVault: AuthVault {
     }
 
     public func saveAuthBlob(_ data: Data, profileID: String) throws {
-        let attributes = self.itemAttributes(data: data, profileID: profileID)
-        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
-
-        if addStatus == errSecSuccess {
+        let dataOnly: [CFString: Any] = [
+            kSecValueData: data,
+            kSecAttrLabel: self.label(profileID: profileID),
+        ]
+        let dataOnlyStatus = SecItemUpdate(
+            self.itemQuery(profileID: profileID) as CFDictionary,
+            dataOnly as CFDictionary)
+        if dataOnlyStatus == errSecSuccess {
             return
         }
 
-        if addStatus == errSecDuplicateItem {
-            if let existingData = try? self.loadAuthBlob(profileID: profileID) {
-                let replaceStatus = self.replaceExistingItem(
-                    data: data,
+        if dataOnlyStatus == errSecItemNotFound {
+            let addStatus = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw KeychainAuthVaultError.operationFailed(
+                    operation: "save auth blob",
                     profileID: profileID,
-                    rollbackData: existingData
+                    status: addStatus
                 )
-                if replaceStatus == errSecSuccess {
-                    return
-                }
             }
+            return
+        }
 
-            let updateStatus = self.updateExistingItem(data: data, profileID: profileID, repairAccess: true)
-            if updateStatus == errSecSuccess {
-                return
-            }
-
-            let valueOnlyStatus = self.updateExistingItem(data: data, profileID: profileID, repairAccess: false)
-            if valueOnlyStatus == errSecSuccess {
-                return
-            }
-
-            throw KeychainAuthVaultError.operationFailed(
-                operation: "update auth blob",
-                profileID: profileID,
-                status: valueOnlyStatus
-            )
+        let withAccessible: [CFString: Any] = [
+            kSecValueData: data,
+            kSecAttrLabel: self.label(profileID: profileID),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let accessibleStatus = SecItemUpdate(
+            self.itemQuery(profileID: profileID) as CFDictionary,
+            withAccessible as CFDictionary)
+        if accessibleStatus == errSecSuccess {
+            return
         }
 
         throw KeychainAuthVaultError.operationFailed(
-            operation: "save auth blob",
+            operation: "update auth blob",
             profileID: profileID,
-            status: addStatus
+            status: dataOnlyStatus
         )
     }
 
-    public func repairStoredAuthAccess() throws -> Int {
+    public func repairStoredAuthAccess() throws -> AuthVaultRepairResult {
+        self.restoreRepairRecoveryFiles()
+        let profileIDs = try self.listProfileIDs()
         var repaired = 0
-        for profileID in try self.listProfileIDs() {
-            guard let data = try self.loadAuthBlob(profileID: profileID) else { continue }
-            let status = self.replaceExistingItem(data: data, profileID: profileID, rollbackData: data)
-            guard status == errSecSuccess else {
-                throw KeychainAuthVaultError.operationFailed(
-                    operation: "repair auth blob access",
-                    profileID: profileID,
-                    status: status
-                )
+        for profileID in profileIDs {
+            let data: Data?
+            do {
+                data = try self.loadAuthBlob(profileID: profileID)
+            } catch {
+                CoreLogger.warning("Skipping repair for profile - load failed",
+                                   metadata: ["profile": profileID, "error": error.localizedDescription])
+                continue
             }
-            repaired += 1
+            guard let data else { continue }
+            guard self.writeRepairRecoveryFile(data: data, profileID: profileID) else { continue }
+            let status = self.replaceExistingItem(data: data, profileID: profileID, rollbackData: data)
+            if status == errSecSuccess {
+                if self.removeRepairRecoveryFile(profileID: profileID) {
+                    repaired += 1
+                }
+            } else {
+                let stillExists = (try? self.hasAuthBlob(profileID: profileID)) ?? false
+                CoreLogger.error("Repair failed for profile",
+                                 metadata: [
+                                     "profile": profileID,
+                                     "status": "\(status)",
+                                     "data_preserved": "\(stillExists)",
+                                 ])
+            }
         }
-        return repaired
+        return AuthVaultRepairResult(total: profileIDs.count, repaired: repaired)
     }
 
     public func deleteAuthBlob(profileID: String) throws {
@@ -274,22 +289,6 @@ public struct LegacyKeychainAuthVault: AuthVault {
         "Codex Profile Switcher: \(profileID)"
     }
 
-    private func updateExistingItem(data: Data, profileID: String, repairAccess: Bool) -> OSStatus {
-        var update: [CFString: Any] = [
-            kSecAttrLabel: self.label(profileID: profileID),
-            kSecValueData: data,
-        ]
-        if repairAccess {
-            update[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        }
-
-        return self.updateItem(self.itemQuery(profileID: profileID), update: update)
-    }
-
-    private func updateItem(_ query: [CFString: Any], update: [CFString: Any]) -> OSStatus {
-        SecItemUpdate(query as CFDictionary, update as CFDictionary)
-    }
-
     private func replaceExistingItem(data: Data, profileID: String, rollbackData: Data) -> OSStatus {
         let deleteStatus = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
         guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
@@ -302,10 +301,124 @@ public struct LegacyKeychainAuthVault: AuthVault {
         }
 
         if deleteStatus == errSecSuccess {
-            _ = SecItemAdd(self.itemAttributes(data: rollbackData, profileID: profileID) as CFDictionary, nil)
+            let rollbackStatus = SecItemAdd(
+                self.itemAttributes(data: rollbackData, profileID: profileID) as CFDictionary,
+                nil)
+            if rollbackStatus != errSecSuccess {
+                CoreLogger.error("Rollback failed after unsuccessful replace",
+                                 metadata: [
+                                     "profile": profileID,
+                                     "addStatus": "\(addStatus)",
+                                     "rollbackStatus": "\(rollbackStatus)",
+                                 ])
+            }
         }
 
         return addStatus
+    }
+
+    private func writeRepairRecoveryFile(data: Data, profileID: String) -> Bool {
+        do {
+            try self.ensureRepairRecoveryRoot()
+            let url = self.repairRecoveryURL(profileID: profileID)
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        } catch {
+            CoreLogger.error("Failed to write Keychain repair recovery file",
+                             metadata: ["profile": profileID, "error": error.localizedDescription])
+            return false
+        }
+    }
+
+    private func removeRepairRecoveryFile(profileID: String) -> Bool {
+        let url = self.repairRecoveryURL(profileID: profileID)
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        return self.removeRepairRecoveryFile(at: url, profileID: profileID)
+    }
+
+    private func restoreRepairRecoveryFiles() {
+        let root = self.repairRecoveryServiceRoot()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for file in files where file.pathExtension == "recovery" {
+            let encodedProfileID = file.deletingPathExtension().lastPathComponent
+            guard let profileID = Self.decodeRecoveryComponent(encodedProfileID),
+                  let data = try? Data(contentsOf: file) else { continue }
+            do {
+                if try self.hasAuthBlob(profileID: profileID) {
+                    self.removeRepairRecoveryFile(at: file, profileID: profileID)
+                    continue
+                }
+            } catch {
+                CoreLogger.warning("Could not check Keychain recovery target",
+                                   metadata: ["profile": profileID, "error": error.localizedDescription])
+                continue
+            }
+
+            let status = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
+            if status == errSecSuccess || status == errSecDuplicateItem {
+                self.removeRepairRecoveryFile(at: file, profileID: profileID)
+            } else {
+                CoreLogger.error("Failed to restore Keychain item from repair recovery file",
+                                 metadata: ["profile": profileID, "status": "\(status)"])
+            }
+        }
+    }
+
+    private func ensureRepairRecoveryRoot() throws {
+        try FileManager.default.createDirectory(
+            at: self.repairRecoveryServiceRoot(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+    }
+
+    private func repairRecoveryURL(profileID: String) -> URL {
+        self.repairRecoveryServiceRoot()
+            .appendingPathComponent(Self.encodeRecoveryComponent(profileID))
+            .appendingPathExtension("recovery")
+    }
+
+    @discardableResult
+    private func removeRepairRecoveryFile(at url: URL, profileID: String) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: url)
+            return true
+        } catch {
+            CoreLogger.error("Failed to remove Keychain repair recovery file",
+                             metadata: ["profile": profileID, "error": error.localizedDescription])
+            return false
+        }
+    }
+
+    private func repairRecoveryServiceRoot() -> URL {
+        AppPaths().tempRoot
+            .appendingPathComponent("keychain-repair-recovery", isDirectory: true)
+            .appendingPathComponent(Self.encodeRecoveryComponent(self.service), isDirectory: true)
+    }
+
+    private static func encodeRecoveryComponent(_ value: String) -> String {
+        Data(value.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func decodeRecoveryComponent(_ value: String) -> String? {
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = base64.count % 4
+        if padding > 0 {
+            base64.append(String(repeating: "=", count: 4 - padding))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 
