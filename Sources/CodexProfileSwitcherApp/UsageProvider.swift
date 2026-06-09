@@ -75,9 +75,23 @@ final class UsageProvider {
         guard !self.store.isAuthMutationInProgress() else { return }
         var diagnostics = ProfileRefreshDiagnostics(lastAttemptAt: Date())
 
-        func finalize(_ status: ProfileStatus, decision: String) {
+        // Snapshot the plain values the blocking reads need, on the main actor.
+        // `UsageAuthSource` carries only immutable value types (the vault is an
+        // immutable struct conformer), so the read can run off the main actor
+        // without touching ProfileStore's mutable state.
+        let source = self.store.usageAuthSource()
+        let isLive = id == activeProfileId
+
+        func finalize(_ status: ProfileStatus, decision: String) async {
             diagnostics.lastDecision = decision
-            if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
+            // Re-check whether auth was torn down while we fetched. Live profiles
+            // use a cheap main-safe file stat; non-live profiles re-query the
+            // vault, but off the main actor so a Keychain consent prompt cannot
+            // block the menu bar.
+            let stillAvailable = isLive
+                ? self.store.liveAuthExists()
+                : await Self.loadAuthAvailability(source: source, profileID: id)
+            if !stillAvailable {
                 let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
                 diagnostics.lastDecision = overrideDecision
                 self.store.updateRefreshDiagnostics(id, diagnostics)
@@ -89,47 +103,62 @@ final class UsageProvider {
         }
 
         do {
-            guard self.canUseAuth(for: id, activeProfileId: activeProfileId) else {
-                finalize(.notSetUp, decision: "not-set-up")
+            // Perform the potentially-blocking auth read off the main actor. A
+            // single read replaces the prior availability-check + load (two
+            // Keychain hits) while preserving the outcome: no auth -> notSetUp.
+            guard let authData = try await Self.loadAuthData(source: source, profileID: id, isLive: isLive) else {
+                await finalize(.notSetUp, decision: "not-set-up")
                 return
-            }
-            guard let authData = try self.store.authDataForUsage(profileId: id, activeProfileId: activeProfileId) else {
-                throw AuthError.notFound
             }
             let snapshot = try await CLIUsageFetcher.fetch(
                 profileId: id, authData: authData, codexConfigURL: self.store.codexConfigURL(),
                 clientVersion: AppInfo.version)
             diagnostics.lastError = nil
-            finalize(.available(snapshot), decision: "available")
+            await finalize(.available(snapshot), decision: "available")
             AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])
         } catch is CancellationError {
             return
         } catch let error as CodexRPCError where error.isAuthRequired {
             diagnostics.lastError = error.localizedDescription
-            finalize(.reloginNeeded(cached), decision: "relogin-needed")
+            await finalize(.reloginNeeded(cached), decision: "relogin-needed")
             AppLogger.warning("Usage refresh requires re-login",
                               metadata: ["profile": id, "error": error.localizedDescription])
         } catch let error as AuthError {
             if case .notFound = error {
                 diagnostics.lastError = error.localizedDescription
-                finalize(.notSetUp, decision: "not-set-up")
+                await finalize(.notSetUp, decision: "not-set-up")
             } else {
                 diagnostics.lastError = error.localizedDescription
-                finalize(.stale(cached), decision: "stale")
+                await finalize(.stale(cached), decision: "stale")
                 AppLogger.warning("Usage refresh failed",
                                   metadata: ["profile": id, "error": error.localizedDescription])
             }
         } catch {
             diagnostics.lastError = error.localizedDescription
-            finalize(.stale(cached), decision: "stale")
+            await finalize(.stale(cached), decision: "stale")
             AppLogger.warning("Usage refresh failed", metadata: ["profile": id, "error": error.localizedDescription])
         }
     }
 
-    private func canUseAuth(for id: String, activeProfileId: String) -> Bool {
-        if id == activeProfileId {
-            return self.store.liveAuthExists()
+    /// Loads the auth blob off the main actor. `nonisolated` so that awaiting it
+    /// from the main actor runs the body on the global concurrent executor,
+    /// keeping the potentially-blocking file/Keychain syscall off the main thread.
+    private nonisolated static func loadAuthData(
+        source: ProfileStore.UsageAuthSource, profileID: String, isLive: Bool
+    ) async throws -> Data? {
+        if isLive {
+            guard FileManager.default.fileExists(atPath: source.liveAuthURL.path) else { return nil }
+            return try Data(contentsOf: source.liveAuthURL)
         }
-        return self.store.authStoreExists(for: id)
+        return try source.vault.loadAuthBlob(profileID: profileID)
+    }
+
+    /// Checks a non-live profile's auth-blob availability off the main actor,
+    /// mirroring the threading of `loadAuthData` so a Keychain consent prompt
+    /// cannot block the main thread.
+    private nonisolated static func loadAuthAvailability(
+        source: ProfileStore.UsageAuthSource, profileID: String
+    ) async -> Bool {
+        ((try? source.vault.authBlobAvailability(profileID: profileID)) ?? .missing) == .present
     }
 }

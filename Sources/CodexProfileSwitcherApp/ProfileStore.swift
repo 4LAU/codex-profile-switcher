@@ -245,12 +245,17 @@ final class ProfileStore {
         self.fileManager.fileExists(atPath: self.codexAuthPath.path)
     }
 
-    func authDataForUsage(profileId: String, activeProfileId: String) throws -> Data? {
-        if profileId == activeProfileId {
-            guard self.fileManager.fileExists(atPath: self.codexAuthPath.path) else { return nil }
-            return try Data(contentsOf: self.codexAuthPath)
-        }
-        return try self.authVault.loadAuthBlob(profileID: profileId)
+    /// Plain, `Sendable` values needed to perform the potentially-blocking auth
+    /// reads (file or Keychain) off the main actor. The vault conformers are
+    /// immutable structs, and the URL is a value type, so this carries no
+    /// reference to `ProfileStore`'s mutable state.
+    struct UsageAuthSource: Sendable {
+        let vault: AuthVault
+        let liveAuthURL: URL
+    }
+
+    func usageAuthSource() -> UsageAuthSource {
+        UsageAuthSource(vault: self.authVault, liveAuthURL: self.codexAuthPath)
     }
 
     func saveAuthDataToVault(_ data: Data, for profileId: String) throws {

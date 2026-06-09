@@ -30,7 +30,7 @@ public struct AuthVaultRepairResult: Equatable {
     }
 }
 
-public protocol AuthVault {
+public protocol AuthVault: Sendable {
     func listProfileIDs() throws -> [String]
     func loadAuthBlob(profileID: String) throws -> Data?
     func saveAuthBlob(_ data: Data, profileID: String) throws

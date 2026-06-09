@@ -2,7 +2,10 @@ import Foundation
 
 public struct FileAuthVault: AuthVault {
     public let root: URL
-    private let fileManager = FileManager.default
+    // Computed rather than stored: `FileManager` is a non-Sendable reference
+    // type, and storing it would make this `Sendable` vault non-Sendable.
+    // `FileManager.default` is documented thread-safe.
+    private var fileManager: FileManager { .default }
 
     public init(root: URL) {
         self.root = root
