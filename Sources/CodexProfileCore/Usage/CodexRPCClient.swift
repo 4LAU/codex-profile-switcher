@@ -29,8 +29,6 @@ public enum CodexRPCError: LocalizedError {
             "log in",
             "login required",
             "unauthorized",
-            "401",
-            "403",
             "token expired",
             "expired token",
             "invalid_grant",
