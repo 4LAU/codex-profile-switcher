@@ -43,6 +43,10 @@ let package = Package(
             dependencies: ["CodexProfileCore"],
             path: "Tests/AuthBlobTests"),
         .testTarget(
+            name: "ProfileSelectorTests",
+            dependencies: ["CodexProfileCore"],
+            path: "Tests/ProfileSelectorTests"),
+        .testTarget(
             name: "LogRedactorTests",
             dependencies: ["CodexProfileSwitcherApp", "CodexProfileCore"],
             path: "Tests/LogRedactorTests",
