@@ -45,9 +45,19 @@ final class UsageProvider {
 
         self.refreshTask = Task {
             await withTaskGroup(of: Void.self) { group in
-                for (id, cached) in contexts {
+                var pending = contexts[...]
+                let initialBatch = min(3, pending.count)
+                for _ in 0..<initialBatch {
+                    let (id, cached) = pending.removeFirst()
                     group.addTask {
                         await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
+                    }
+                }
+                for await _ in group {
+                    if let (id, cached) = pending.popFirst() {
+                        group.addTask {
+                            await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
+                        }
                     }
                 }
             }
@@ -68,14 +78,15 @@ final class UsageProvider {
 
         func finalize(_ status: ProfileStatus, decision: String) async {
             diagnostics.lastDecision = decision
-            let snapshot = diagnostics
             await MainActor.run {
                 if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
-                    self.store.updateRefreshDiagnostics(id, snapshot)
+                    let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
+                    diagnostics.lastDecision = overrideDecision
+                    self.store.updateRefreshDiagnostics(id, diagnostics)
                     self.store.updateStatus(id, cached.map { .reloginNeeded($0) } ?? .notSetUp)
                     return
                 }
-                self.store.updateRefreshDiagnostics(id, snapshot)
+                self.store.updateRefreshDiagnostics(id, diagnostics)
                 self.store.updateStatus(id, status)
             }
         }
@@ -89,7 +100,8 @@ final class UsageProvider {
                 throw AuthError.notFound
             }
             let snapshot = try await CLIUsageFetcher.fetch(
-                profileId: id, authData: authData, codexConfigURL: self.store.codexConfigURL())
+                profileId: id, authData: authData, codexConfigURL: self.store.codexConfigURL(),
+                clientVersion: AppInfo.version)
             diagnostics.lastError = nil
             await finalize(.available(snapshot), decision: "available")
             AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])

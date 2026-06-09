@@ -24,8 +24,19 @@ public enum CodexRPCError: LocalizedError {
 
     public var isAuthRequired: Bool {
         guard case .requestFailed(let message) = self else { return false }
-        return message.localizedCaseInsensitiveContains("authentication required")
-            || message.localizedCaseInsensitiveContains("log in")
+        let terms = [
+            "authentication required",
+            "log in",
+            "login required",
+            "unauthorized",
+            "401",
+            "403",
+            "token expired",
+            "expired token",
+            "invalid_grant",
+            "refresh token",
+        ]
+        return terms.contains { message.localizedCaseInsensitiveContains($0) }
     }
 }
 
@@ -370,7 +381,7 @@ public enum CLIUsageFetcher {
         codexConfigURL: URL,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         clientName: String = "CodexProfileSwitcher",
-        clientVersion: String = "0.1.5") async throws -> UsageSnapshot
+        clientVersion: String) async throws -> UsageSnapshot
     {
         let executablePath = CodexCLIResolver.resolvePath(environment: environment)
         guard let executablePath else { throw CodexRPCError.cliNotFound }
