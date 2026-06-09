@@ -36,13 +36,16 @@ public enum ProfileSelector {
         public let tier: ProfileCandidate.ProfileTier
     }
 
-    public static func selectBest(
+    /// Scores every non-excluded profile (including ineligible ones) without
+    /// applying the winner filter. Additive surface used to build the
+    /// `best-auth --json` candidate list; does not change `selectBest`.
+    public static func candidates(
         profiles: [ProfileConfig],
         cache: UsageCache,
         excludeIDs: Set<String> = [],
         now: Date = Date()
-    ) -> Result? {
-        let candidates = profiles
+    ) -> [ProfileCandidate] {
+        profiles
             .filter { !excludeIDs.contains($0.id) }
             .map { profile -> ProfileCandidate in
                 if let override = cache.exhaustionOverrides[profile.id],
@@ -70,6 +73,19 @@ public enum ProfileSelector {
                     fetchedAt: snapshot.fetchedAt,
                     tier: tier)
             }
+    }
+
+    public static func selectBest(
+        profiles: [ProfileConfig],
+        cache: UsageCache,
+        excludeIDs: Set<String> = [],
+        now: Date = Date()
+    ) -> Result? {
+        let candidates = self.candidates(
+            profiles: profiles,
+            cache: cache,
+            excludeIDs: excludeIDs,
+            now: now)
 
         let sorted = candidates
             .filter { $0.tier != .ineligible }

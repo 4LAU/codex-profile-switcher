@@ -51,7 +51,7 @@ enum CodexProfileCLI {
             case "app": try self.commandApp(args)
             case "login": try self.commandLogin(args)
             case "status": try self.commandStatus(args)
-            case "list": try self.commandList()
+            case "list": try self.commandList(args)
             case "path": try self.commandPath(args)
             case "doctor": try self.commandDoctor(args)
             case "keychain-repair": try self.commandKeychainRepair()
@@ -79,14 +79,24 @@ enum CodexProfileCLI {
         Usage:
           \(self.program) app <profile> [workspace]
           \(self.program) login <profile> [codex-login-args...]
-          \(self.program) status [profile]
-          \(self.program) list
+          \(self.program) status [profile] [--json]
+          \(self.program) list [--json]
           \(self.program) path <profile>
           \(self.program) doctor
           \(self.program) keychain-repair
-          \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]
-          \(self.program) mark-exhausted <profile> [--until <iso8601>]
+          \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
           \(self.program) import-auth --dir <path> --profile <id>
+
+        best-auth picks the profile with the most remaining quota for scripted
+        account rotation. It fetches live usage (falling back to the cached
+        usage file per profile) and prints the selected profile ID on stdout, or
+        a machine-readable report with --json. Exit codes: 0 selected; 2 no
+        eligible profile; 3 no profiles configured; 4 usage data unavailable;
+        6 keychain interaction required (run once from a terminal to grant
+        access); 7 watchdog timeout.
+
+        import-auth writes back a refreshed auth.json for <id> only when its
+        identity matches the stored credential (exit 5 on identity mismatch).
         """)
     }
 
@@ -163,33 +173,90 @@ enum CodexProfileCLI {
         }
     }
 
+    private struct StatusEntry: Codable {
+        let id: String
+        let state: String
+        let account: String?
+    }
+
+    private struct ListEntry: Codable {
+        let id: String
+        let location: String
+    }
+
     private static func commandStatus(_ args: [String]) throws {
+        let json = args.contains("--json")
+        let positional = args.filter { $0 != "--json" }
         self.repairKeychainAccessIfNeeded()
 
-        if let profile = args.first {
+        let profiles: [String]
+        if let profile = positional.first {
             try self.validateProfile(profile)
-            try self.printStatus(profile)
-            return
+            profiles = [profile]
+        } else {
+            profiles = try self.knownProfileIDs()
+            if profiles.isEmpty, !json {
+                self.note("No saved auth profiles. Create one with: \(self.program) login <profile>")
+                return
+            }
         }
 
-        let profiles = try self.knownProfileIDs()
-        if profiles.isEmpty {
-            self.note("No saved auth profiles. Create one with: \(self.program) login <profile>")
+        let entries = try profiles.map { try self.statusEntry($0) }
+        if json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(entries), as: UTF8.self))
             return
         }
-        for profile in profiles {
-            try self.printStatus(profile)
+        for entry in entries {
+            print("  \(entry.id): \(self.statusText(entry))")
         }
     }
 
-    private static func commandList() throws {
+    private static func commandList(_ args: [String]) throws {
+        let json = args.contains("--json")
         let profiles = try self.knownProfileIDs()
-        if profiles.isEmpty {
+        if profiles.isEmpty, !json {
             self.note("No saved auth profiles. Create one with: \(self.program) login <profile>")
+            return
+        }
+        if json {
+            let entries = profiles.map { ListEntry(id: $0, location: self.vaultLocation(profile: $0)) }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(entries), as: UTF8.self))
             return
         }
         for profile in profiles {
             print("  \(profile) -> \(self.vaultLocation(profile: profile))")
+        }
+    }
+
+    /// Computes a profile's status as structured data shared by text and JSON
+    /// output. `state` is one of: not-set-up, api-key, account, unknown.
+    private static func statusEntry(_ profile: String) throws -> StatusEntry {
+        let availability = try self.vault.authBlobAvailability(profileID: profile)
+        if availability == .missing {
+            return StatusEntry(id: profile, state: "not-set-up", account: nil)
+        }
+        guard let data = try self.vault.loadAuthBlob(profileID: profile) else {
+            return StatusEntry(id: profile, state: "not-set-up", account: nil)
+        }
+        if let accountID = self.readAccountID(from: data) {
+            if accountID == "api-key" {
+                return StatusEntry(id: profile, state: "api-key", account: nil)
+            }
+            return StatusEntry(id: profile, state: "account", account: accountID)
+        }
+        return StatusEntry(id: profile, state: "unknown", account: nil)
+    }
+
+    private static func statusText(_ entry: StatusEntry) -> String {
+        switch entry.state {
+        case "not-set-up": return "Not set up"
+        case "api-key": return "Saved API key auth"
+        case "account": return "Saved account \(entry.account ?? "")"
+        default: return "Saved auth (account unknown)"
         }
     }
 
@@ -239,7 +306,7 @@ enum CodexProfileCLI {
 
         self.note("")
         self.note("Saved profiles:")
-        try self.commandList()
+        try self.commandList([])
         self.note("")
         self.note("Saved auth status (vault metadata only):")
         try self.printMetadataStatuses(vault: self.vault)
@@ -357,7 +424,7 @@ enum CodexProfileCLI {
             self.repairKeychainAccessIfNeeded()
         }
 
-        let cache = self.loadCache()
+        var cache = self.loadCache()
         let eligibleProfiles: [ProfileConfig]
         do {
             eligibleProfiles = try config.profiles.filter { profile in
@@ -370,6 +437,35 @@ enum CodexProfileCLI {
             throw error
         }
 
+        // Data reads can trigger a non-suppressible ACL prompt for legacy
+        // trusted-app Keychain items, so bound them in non-interactive mode.
+        let readBound: TimeInterval? = interactive ? nil : 5
+
+        // Self-fetch live usage before ranking so we never silently rank against
+        // a stale/empty cache (e.g. when the menu bar app isn't running).
+        let fetchResult = self.selfFetchUsage(
+            profiles: eligibleProfiles,
+            activeProfile: config.activeProfile,
+            cache: cache,
+            vault: bestAuthVault,
+            readBound: readBound,
+            interactive: interactive)
+        cache = fetchResult.cache
+        self.persistCacheMerge(cache)
+
+        // If no live fetch succeeded and the cache has no snapshot for any
+        // eligible profile, there is no usable usage data at all.
+        let haveAnySnapshot = eligibleProfiles.contains { cache.snapshots[$0.id] != nil }
+        if !fetchResult.fetchedAny, !haveAnySnapshot {
+            fputs("usage data unavailable\n", stderr)
+            throw CLIError.exitStatus(ExitCode.usageDataUnavailable)
+        }
+
+        let candidates = ProfileSelector.candidates(
+            profiles: eligibleProfiles,
+            cache: cache,
+            excludeIDs: excludeIDs)
+
         guard let result = ProfileSelector.selectBest(
             profiles: eligibleProfiles,
             cache: cache,
@@ -379,9 +475,6 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(ExitCode.noEligibleProfile)
         }
 
-        // Data reads can trigger a non-suppressible ACL prompt for legacy
-        // trusted-app Keychain items, so bound them in non-interactive mode.
-        let readBound: TimeInterval? = interactive ? nil : 5
         let authData: Data?
         do {
             switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
@@ -412,7 +505,181 @@ enum CodexProfileCLI {
             try self.fileManager.copyItem(at: liveConfig, to: destination)
         }
 
-        print(result.profileID)
+        if options.json {
+            let report = self.makeBestAuthReport(
+                result: result,
+                candidates: candidates,
+                cache: cache,
+                fetchedAny: fetchResult.fetchedAny)
+            print(try report.jsonString())
+        } else {
+            print(result.profileID)
+        }
+    }
+
+    private struct SelfFetchResult {
+        var cache: UsageCache
+        var fetchedAny: Bool
+    }
+
+    /// Fetches live usage for each eligible profile (bounded concurrency 3) and
+    /// merges fresh snapshots into a copy of `cache`. A per-profile failure
+    /// (fetch error, or a Keychain read that needs interaction) falls back to
+    /// that profile's existing cached snapshot — stale beats none — and never
+    /// escalates to exit 6. Exhaustion overrides are preserved untouched.
+    ///
+    /// In non-interactive mode the vault is probed once: if a Keychain data read
+    /// would block on a consent prompt, ALL vault reads are skipped (the live
+    /// profile, read from a file, is still fetched). This avoids spawning a
+    /// prompt per profile, which would otherwise stall the whole command.
+    private static func selfFetchUsage(
+        profiles: [ProfileConfig],
+        activeProfile: String,
+        cache: UsageCache,
+        vault: AuthVault,
+        readBound: TimeInterval?,
+        interactive: Bool
+    ) -> SelfFetchResult {
+        guard !profiles.isEmpty else { return SelfFetchResult(cache: cache, fetchedAny: false) }
+
+        let configURL = self.paths.liveCodexHome.appendingPathComponent("config.toml")
+        let liveAuthURL = self.paths.liveAuthURL
+        let version = self.version
+
+        // One-time decision: are vault data reads usable without a prompt?
+        let vaultReadable = interactive || self.vaultDataReadsAvailable(
+            profiles: profiles,
+            activeProfile: activeProfile,
+            vault: vault,
+            bound: readBound)
+
+        let fresh = self.runBlocking { () -> [String: UsageSnapshot] in
+            await withTaskGroup(of: (String, UsageSnapshot?).self) { group in
+                var pending = profiles[...]
+                var inFlight = 0
+                var results: [String: UsageSnapshot] = [:]
+
+                func authData(for id: String) -> Data? {
+                    if id == activeProfile,
+                       FileManager.default.fileExists(atPath: liveAuthURL.path) {
+                        return try? Data(contentsOf: liveAuthURL)
+                    }
+                    guard vaultReadable else { return nil }
+                    switch (try? self.loadAuthBlobBounded(vault, profileID: id, bound: readBound)) {
+                    case .data(let data): return data
+                    default: return nil
+                    }
+                }
+
+                func enqueueNext() {
+                    guard let profile = pending.popFirst() else { return }
+                    inFlight += 1
+                    let id = profile.id
+                    let data = authData(for: id)
+                    group.addTask {
+                        guard let data else { return (id, nil) }
+                        let snapshot = try? await CLIUsageFetcher.fetch(
+                            profileId: id,
+                            authData: data,
+                            codexConfigURL: configURL,
+                            clientVersion: version)
+                        return (id, snapshot)
+                    }
+                }
+
+                for _ in 0..<min(3, profiles.count) { enqueueNext() }
+                while inFlight > 0 {
+                    if let (id, snapshot) = await group.next() {
+                        inFlight -= 1
+                        if let snapshot { results[id] = snapshot }
+                        enqueueNext()
+                    }
+                }
+                return results
+            }
+        }
+
+        var merged = cache
+        for (id, snapshot) in fresh {
+            merged.snapshots[id] = snapshot
+        }
+        return SelfFetchResult(cache: merged, fetchedAny: !fresh.isEmpty)
+    }
+
+    /// Probes whether vault data reads return without a consent prompt, using a
+    /// single bounded read against the first non-live profile. Returns false if
+    /// that read blocks (prompt up) so the caller skips all vault reads. A
+    /// timed-out probe leaves one blocked thread holding a prompt; the process
+    /// exits shortly after, dismissing it.
+    private static func vaultDataReadsAvailable(
+        profiles: [ProfileConfig],
+        activeProfile: String,
+        vault: AuthVault,
+        bound: TimeInterval?
+    ) -> Bool {
+        guard let probe = profiles.first(where: { $0.id != activeProfile }) else { return true }
+        switch (try? self.loadAuthBlobBounded(vault, profileID: probe.id, bound: bound)) {
+        case .interactionRequired: return false
+        default: return true
+        }
+    }
+
+    /// Runs an async closure to completion from synchronous CLI code.
+    private static func runBlocking<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ResultBox<T>()
+        Task.detached {
+            box.value = await body()
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return box.value!
+    }
+
+    private final class ResultBox<T>: @unchecked Sendable {
+        var value: T?
+    }
+
+    /// Writes the merged cache using the same atomic-write + override-preserving
+    /// semantics the app and `mark-exhausted` use. Best-effort: a write failure
+    /// must not fail the command (the selection is still valid).
+    private static func persistCacheMerge(_ cache: UsageCache) {
+        var toWrite = cache
+        // Preserve any overrides already on disk that aren't in our copy.
+        if let diskData = try? Data(contentsOf: self.paths.cacheURL),
+           let diskCache = try? JSONDecoder.iso8601Decoder().decode(UsageCache.self, from: diskData) {
+            for (id, override) in diskCache.exhaustionOverrides where toWrite.exhaustionOverrides[id] == nil {
+                toWrite.exhaustionOverrides[id] = override
+            }
+        }
+        try? self.saveCache(toWrite)
+    }
+
+    private static func makeBestAuthReport(
+        result: ProfileSelector.Result,
+        candidates: [ProfileCandidate],
+        cache: UsageCache,
+        fetchedAny: Bool,
+        now: Date = Date()
+    ) -> BestAuthReport {
+        let candidateReports = candidates
+            .sorted { $0.profileID < $1.profileID }
+            .map { candidate -> BestAuthReport.Candidate in
+                let age = cache.snapshots[candidate.profileID].map {
+                    Int(now.timeIntervalSince($0.fetchedAt).rounded())
+                }
+                return BestAuthReport.Candidate(
+                    id: candidate.profileID,
+                    tier: candidate.tier.reportName,
+                    score: candidate.effectiveScore,
+                    snapshotAgeSeconds: age)
+            }
+        return BestAuthReport(
+            selected: result.profileID,
+            tier: result.tier.reportName,
+            score: result.effectiveScore,
+            candidates: candidateReports,
+            fetched: fetchedAny)
     }
 
     private static func commandMarkExhausted(_ args: [String]) throws {
@@ -504,50 +771,31 @@ enum CodexProfileCLI {
         guard updatedData != existingData else { return }
         guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
             fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(2)
+            throw CLIError.exitStatus(1)
         }
 
         do {
             _ = try AuthBlob.load(from: updatedData)
         } catch {
             fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(2)
+            throw CLIError.exitStatus(1)
         }
 
         let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
         let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
         guard let existingFingerprint, let updatedFingerprint else {
             fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(2)
+            throw CLIError.exitStatus(1)
         }
         if existingFingerprint != updatedFingerprint {
+            // Identity mismatch is the one case external rotation tooling must
+            // distinguish: the refreshed credential belongs to a different
+            // account. Exit 5 is reserved exclusively for this.
             fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(2)
+            throw CLIError.exitStatus(ExitCode.identityMismatch)
         }
 
         try self.vault.saveAuthBlob(updatedData, profileID: profile)
-    }
-
-    private static func printStatus(_ profile: String) throws {
-        let availability = try self.vault.authBlobAvailability(profileID: profile)
-        if availability == .missing {
-            print("  \(profile): Not set up")
-            return
-        }
-
-        guard let data = try self.vault.loadAuthBlob(profileID: profile) else {
-            print("  \(profile): Not set up")
-            return
-        }
-        if let accountID = self.readAccountID(from: data) {
-            if accountID == "api-key" {
-                print("  \(profile): Saved API key auth")
-            } else {
-                print("  \(profile): Saved account \(accountID)")
-            }
-        } else {
-            print("  \(profile): Saved auth (account unknown)")
-        }
     }
 
     private static func readAccountID(from data: Data) -> String? {

@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- `best-auth` now fetches live usage (Codex app-server, bounded concurrency) before ranking, instead of relying on the menu bar app's cached usage file. When the app isn't running it no longer silently picks alphabetically off a stale/empty cache. Per-profile fetch failures fall back to the cached snapshot, and fresh snapshots are merged back into the cache.
+- `best-auth --json` emits a stable machine-readable report (`selected`, `tier`, `score`, `candidates[]`, `fetched`). `status --json` and `list --json` emit structured output too. Default (non-JSON) `best-auth` output is unchanged: the bare selected profile ID.
+- `best-auth` now has documented, stable exit codes: 0 selected, 2 no eligible profile, 3 no profiles configured, 4 usage data unavailable, 6 keychain interaction required, 7 watchdog timeout.
+
 ### Changed
 
 - Usage polling now uses Codex's app-server exclusively; removes the reverse-engineered usage API client and OAuth refresh-on-poll.
+- `best-auth` and `import-auth` are now official supported commands. `import-auth` exits 5 only on an identity mismatch (a refreshed credential belonging to a different account) and 1 for other failures.
 
 ### Fixed
 
