@@ -34,7 +34,7 @@ func envExpect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 }
 
 final class ProfileStoreEnvironmentTests {
-    @Test
+    @Test @MainActor
     func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-migration-tests-\(UUID().uuidString)", isDirectory: true)

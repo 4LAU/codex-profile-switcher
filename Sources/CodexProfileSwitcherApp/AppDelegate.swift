@@ -2,6 +2,7 @@ import Cocoa
 import CodexProfileCore
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var store: ProfileStore!
@@ -80,8 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startPeriodicRefreshTimer() {
         self.periodicRefreshTimer?.invalidate()
         self.periodicRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            self?.syncActiveProfile()
-            self?.usageProvider.refreshAll()
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.syncActiveProfile()
+                self.usageProvider.refreshAll()
+            }
         }
     }
 

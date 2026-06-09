@@ -6,6 +6,7 @@ import SwiftUI
 // MARK: - Debug Info
 
 enum DebugInfoBuilder {
+    @MainActor
     static func build(store: ProfileStore) -> String {
         var lines: [String] = [
             "\(AppInfo.name) Debug Info",
@@ -26,6 +27,7 @@ enum DebugInfoBuilder {
         return LogRedactor.redact(lines.joined(separator: "\n"))
     }
 
+    @MainActor
     static func copyToPasteboard(store: ProfileStore) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Usage polling now uses Codex's app-server exclusively; removes the reverse-engineered usage API client and OAuth refresh-on-poll.
 
+### Fixed
+
+- Fixed a potential data race between background usage refreshes and profile state.
+
 ## 0.2.1 -- 2026-06-04
 
 ### Fixed

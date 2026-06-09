@@ -5,6 +5,7 @@ import SwiftUI
 
 // MARK: - ProfileStore
 
+@MainActor
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
     private static let keychainAccessRepairVersion = 4
@@ -20,7 +21,6 @@ final class ProfileStore {
     private let codexAuthPath: URL
     private let codexGlobalStateURL: URL
     private let fileManager = FileManager.default
-    private let authMutationLock = NSLock()
     private var authMutationInProgress = false
     private var cacheDirty = false
 
@@ -374,21 +374,15 @@ final class ProfileStore {
     }
 
     func beginAuthMutation() {
-        self.authMutationLock.lock()
         self.authMutationInProgress = true
-        self.authMutationLock.unlock()
     }
 
     func endAuthMutation() {
-        self.authMutationLock.lock()
         self.authMutationInProgress = false
-        self.authMutationLock.unlock()
     }
 
     func isAuthMutationInProgress() -> Bool {
-        self.authMutationLock.lock()
-        defer { self.authMutationLock.unlock() }
-        return self.authMutationInProgress
+        self.authMutationInProgress
     }
 
     func authFingerprint(for url: URL) -> String? {

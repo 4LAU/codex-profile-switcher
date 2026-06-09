@@ -3,6 +3,7 @@ import CodexProfileCore
 
 // MARK: - UsageProvider
 
+@MainActor
 final class UsageProvider {
     private let store: ProfileStore
     private var refreshTask: Task<Void, Never>?
@@ -43,30 +44,28 @@ final class UsageProvider {
             (p.id, self.store.cache.snapshots[p.id])
         }
 
-        self.refreshTask = Task {
+        self.refreshTask = Task { @MainActor in
             await withTaskGroup(of: Void.self) { group in
                 var pending = contexts[...]
                 let initialBatch = min(3, pending.count)
                 for _ in 0..<initialBatch {
                     let (id, cached) = pending.removeFirst()
-                    group.addTask {
+                    group.addTask { @MainActor in
                         await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
                     }
                 }
                 for await _ in group {
                     if let (id, cached) = pending.popFirst() {
-                        group.addTask {
+                        group.addTask { @MainActor in
                             await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
                         }
                     }
                 }
             }
-            await MainActor.run {
-                self.isRefreshing = false
-                self.refreshTask = nil
-                self.store.flushCacheIfDirty()
-                self.onRefreshComplete?()
-            }
+            self.isRefreshing = false
+            self.refreshTask = nil
+            self.store.flushCacheIfDirty()
+            self.onRefreshComplete?()
         }
     }
 
@@ -76,24 +75,22 @@ final class UsageProvider {
         guard !self.store.isAuthMutationInProgress() else { return }
         var diagnostics = ProfileRefreshDiagnostics(lastAttemptAt: Date())
 
-        func finalize(_ status: ProfileStatus, decision: String) async {
+        func finalize(_ status: ProfileStatus, decision: String) {
             diagnostics.lastDecision = decision
-            await MainActor.run {
-                if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
-                    let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
-                    diagnostics.lastDecision = overrideDecision
-                    self.store.updateRefreshDiagnostics(id, diagnostics)
-                    self.store.updateStatus(id, cached.map { .reloginNeeded($0) } ?? .notSetUp)
-                    return
-                }
+            if !self.canUseAuth(for: id, activeProfileId: activeProfileId) {
+                let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
+                diagnostics.lastDecision = overrideDecision
                 self.store.updateRefreshDiagnostics(id, diagnostics)
-                self.store.updateStatus(id, status)
+                self.store.updateStatus(id, cached.map { .reloginNeeded($0) } ?? .notSetUp)
+                return
             }
+            self.store.updateRefreshDiagnostics(id, diagnostics)
+            self.store.updateStatus(id, status)
         }
 
         do {
             guard self.canUseAuth(for: id, activeProfileId: activeProfileId) else {
-                await finalize(.notSetUp, decision: "not-set-up")
+                finalize(.notSetUp, decision: "not-set-up")
                 return
             }
             guard let authData = try self.store.authDataForUsage(profileId: id, activeProfileId: activeProfileId) else {
@@ -103,28 +100,28 @@ final class UsageProvider {
                 profileId: id, authData: authData, codexConfigURL: self.store.codexConfigURL(),
                 clientVersion: AppInfo.version)
             diagnostics.lastError = nil
-            await finalize(.available(snapshot), decision: "available")
+            finalize(.available(snapshot), decision: "available")
             AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])
         } catch is CancellationError {
             return
         } catch let error as CodexRPCError where error.isAuthRequired {
             diagnostics.lastError = error.localizedDescription
-            await finalize(.reloginNeeded(cached), decision: "relogin-needed")
+            finalize(.reloginNeeded(cached), decision: "relogin-needed")
             AppLogger.warning("Usage refresh requires re-login",
                               metadata: ["profile": id, "error": error.localizedDescription])
         } catch let error as AuthError {
             if case .notFound = error {
                 diagnostics.lastError = error.localizedDescription
-                await finalize(.notSetUp, decision: "not-set-up")
+                finalize(.notSetUp, decision: "not-set-up")
             } else {
                 diagnostics.lastError = error.localizedDescription
-                await finalize(.stale(cached), decision: "stale")
+                finalize(.stale(cached), decision: "stale")
                 AppLogger.warning("Usage refresh failed",
                                   metadata: ["profile": id, "error": error.localizedDescription])
             }
         } catch {
             diagnostics.lastError = error.localizedDescription
-            await finalize(.stale(cached), decision: "stale")
+            finalize(.stale(cached), decision: "stale")
             AppLogger.warning("Usage refresh failed", metadata: ["profile": id, "error": error.localizedDescription])
         }
     }
