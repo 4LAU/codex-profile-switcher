@@ -213,6 +213,22 @@ struct ProfileSelectorTests {
 
     // MARK: 6. Tie-break: equal score, equal fetchedAt → lexicographic profileID ascending
 
+    @Test("live secondary window higher than live primary → secondary score used (max wins)")
+    func liveSecondaryHigherThanPrimaryDrivesScore() {
+        // Both windows are live (future reset).  primary=20, secondary=80.
+        // effectiveScore = max(20, 80) = 80.
+        // "b" has primary=50 (secondary=0 by default, score=50).
+        // 80 > 50 → "b" wins; this freezes the max() semantic for the live-secondary path.
+        let profiles = [profile("a"), profile("b")]
+        let cache = UsageCache(snapshots: [
+            "a": snapshot(primary: 20, secondary: 80),  // score = max(20, 80) = 80
+            "b": snapshot(primary: 50),                 // score = max(50, 0)  = 50
+        ])
+        let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
+        #expect(result?.profileID == "b")
+        #expect(result?.effectiveScore == 50)
+    }
+
     @Test("tie-break: equal score and fetchedAt → lexicographic profileID (ascending)")
     func tieBreakLexicographic() {
         let fetchTime = now
