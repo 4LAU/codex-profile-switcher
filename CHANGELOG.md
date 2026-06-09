@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- Usage polling now uses Codex's app-server exclusively; removes the reverse-engineered usage API client and OAuth refresh-on-poll.
+
 ## 0.2.1 -- 2026-06-04
 
 ### Fixed

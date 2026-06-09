@@ -253,30 +253,12 @@ final class ProfileStore {
         return try self.authVault.loadAuthBlob(profileID: profileId)
     }
 
-    func currentSavedAuthData(for profileId: String) throws -> Data? {
-        try self.authVault.loadAuthBlob(profileID: profileId)
-    }
-
     func saveAuthDataToVault(_ data: Data, for profileId: String) throws {
         try DuplicateAwareAuthSaver.save(
             data,
             profileID: profileId,
             profiles: self.config.profiles,
             vault: self.authVault)
-    }
-
-    func saveRefreshedAuthToVault(_ data: Data, for profileId: String, originalData: Data) throws {
-        let originalFingerprint = AuthBlob.identityFingerprint(from: originalData)
-        let refreshedFingerprint = AuthBlob.identityFingerprint(from: data)
-        guard let orig = originalFingerprint, let refreshed = refreshedFingerprint else {
-            try self.saveAuthDataToVault(data, for: profileId)
-            return
-        }
-        guard orig == refreshed else {
-            try self.saveAuthDataToVault(data, for: profileId)
-            return
-        }
-        try self.authVault.saveAuthBlob(data, profileID: profileId)
     }
 
     func relaunchWorkspacePath() -> String? {
@@ -317,9 +299,7 @@ final class ProfileStore {
             let cacheAge = self.cache.snapshots[profile.id].map { Int(Date().timeIntervalSince($0.fetchedAt)) }
             let cacheText = cacheAge.map { "\($0)s" } ?? "<none>"
             let diagnostics = self.refreshDiagnostics[profile.id]
-            let attemptedSource = diagnostics?.lastAttemptedSource?.rawValue ?? "<none>"
-            let successfulSource = diagnostics?.lastSuccessfulSource?.rawValue ?? "<none>"
-            let fallbackReason = diagnostics?.lastFallbackReason ?? "<none>"
+            let lastAttemptAt = diagnostics?.lastAttemptAt.map { ISO8601DateFormatter().string(from: $0) } ?? "<none>"
             let decision = diagnostics?.lastDecision ?? "<none>"
             let error = diagnostics?.lastError.map { LogRedactor.excerpt($0, maxLength: 120) } ?? "<none>"
             let availability = self.authStoreAvailability(for: profile.id)
@@ -327,8 +307,7 @@ final class ProfileStore {
                 "profile[\(profile.id)]: label=\"\(profile.label)\" status=\(Self.debugStatusName(status)) " +
                     "auth_saved=\(availability == .present) " +
                     "cache_age=\(cacheText) " +
-                    "last_attempted_source=\(attemptedSource) last_successful_source=\(successfulSource) " +
-                    "last_fallback_reason=\(fallbackReason) last_decision=\(decision) last_error=\(error)")
+                    "last_attempt_at=\(lastAttemptAt) last_decision=\(decision) last_error=\(error)")
         }
 
         return lines

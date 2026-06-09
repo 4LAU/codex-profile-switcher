@@ -434,5 +434,3 @@ public enum CLIUsageFetcher {
             fetchedAt: Date())
     }
 }
-
-// MARK: - UsageProvider

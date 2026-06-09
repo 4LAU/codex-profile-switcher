@@ -83,27 +83,10 @@ enum ProfileStatus {
     }
 }
 
-enum UsageRefreshSource: String {
-    case auto
-    case oauth
-    case cli
-}
-
 struct ProfileRefreshDiagnostics {
-    var selectedMode: UsageRefreshSource = .auto
-    var lastAttemptedSource: UsageRefreshSource?
-    var lastSuccessfulSource: UsageRefreshSource?
-    var lastFallbackReason: String?
-    var lastDecision: String?
+    var lastAttemptAt: Date?
     var lastError: String?
-}
-
-enum OAuthFallbackReason: String {
-    case usageUnauthorized = "oauth-unauthorized"
-    case missingTokens = "oauth-missing-tokens"
-    case refreshExpired = "refresh-expired"
-    case refreshReused = "refresh-reused"
-    case refreshRevoked = "refresh-revoked"
+    var lastDecision: String?
 }
 
 func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String? {
