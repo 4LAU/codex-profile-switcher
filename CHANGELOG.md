@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - Fixed a potential data race between background usage refreshes and profile state.
+- `best-auth` no longer hangs forever in non-interactive shells (CI, command substitution, background tasks). When stdin is not a terminal (or `--non-interactive` is passed), a Keychain read that needs interactive consent now exits with a clear message (code 6) instead of blocking on a modal prompt with no UI. A global watchdog (`--timeout`, default 30s, exit 7) guarantees the command always terminates.
 
 ## 0.2.1 -- 2026-06-04
 

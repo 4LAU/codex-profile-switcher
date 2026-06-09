@@ -8,8 +8,16 @@ public struct LegacyKeychainAuthVault: AuthVault {
 
     public let service: String
 
-    public init(service: String = Self.defaultService) {
+    /// When `false`, all read queries set `kSecUseAuthenticationUI = .fail` so a
+    /// Keychain access that would otherwise show a modal consent prompt instead
+    /// returns `errSecInteractionNotAllowed`. This keeps the menu bar app's
+    /// default behavior (`true`) untouched while letting the CLI stay
+    /// non-interactive in non-TTY shells.
+    public let interactionAllowed: Bool
+
+    public init(service: String = Self.defaultService, interactionAllowed: Bool = true) {
         self.service = service
+        self.interactionAllowed = interactionAllowed
     }
 
     public func listProfileIDs() throws -> [String] {
@@ -160,6 +168,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         query[kSecReturnData] = kCFBooleanFalse
         query[kSecReturnAttributes] = kCFBooleanFalse
         query[kSecMatchLimit] = kSecMatchLimitOne
+        self.applyInteractionPolicy(to: &query)
 
         let status = SecItemCopyMatching(query as CFDictionary, nil)
 
@@ -186,6 +195,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         var query = self.baseServiceQuery()
         query[kSecReturnAttributes] = kCFBooleanTrue
         query[kSecMatchLimit] = kSecMatchLimitAll
+        self.applyInteractionPolicy(to: &query)
         return query
     }
 
@@ -193,7 +203,16 @@ public struct LegacyKeychainAuthVault: AuthVault {
         var query = self.itemQuery(profileID: profileID)
         query[kSecReturnData] = kCFBooleanTrue
         query[kSecMatchLimit] = kSecMatchLimitOne
+        self.applyInteractionPolicy(to: &query)
         return query
+    }
+
+    /// Adds the fail-closed authentication-UI flag to read queries when
+    /// `interactionAllowed == false`, so a Keychain ACL prompt is replaced by an
+    /// `errSecInteractionNotAllowed` error instead of a modal dialog.
+    private func applyInteractionPolicy(to query: inout [CFString: Any]) {
+        guard !self.interactionAllowed else { return }
+        query[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail
     }
 
     private func baseServiceQuery() -> [CFString: Any] {
@@ -443,6 +462,16 @@ public enum KeychainAuthVaultError: LocalizedError {
         case .unexpectedResult:
             return nil
         }
+    }
+
+    /// True when the failure is the Keychain refusing to prompt for interactive
+    /// consent (fail-closed mode). Callers in non-interactive contexts use this
+    /// to distinguish "needs a terminal once" from other Keychain errors.
+    public var isInteractionRequired: Bool {
+        if case let .operationFailed(_, _, status) = self {
+            return status == errSecInteractionNotAllowed
+        }
+        return false
     }
 
     public var recoverySuggestion: String? {

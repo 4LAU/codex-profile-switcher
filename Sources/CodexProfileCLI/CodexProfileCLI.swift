@@ -14,6 +14,18 @@ private enum CLIError: LocalizedError {
     }
 }
 
+/// Stable process exit codes. External tooling depends on these — keep stable.
+private enum ExitCode {
+    static let success: Int32 = 0
+    static let noEligibleProfile: Int32 = 2
+    static let noProfilesConfigured: Int32 = 3
+    static let usageDataUnavailable: Int32 = 4
+    static let identityMismatch: Int32 = 5
+    static let keychainInteractionRequired: Int32 = 6
+    static let watchdogTimeout: Int32 = 7
+    // 1 = generic failure (default in main()).
+}
+
 @main
 enum CodexProfileCLI {
     private static let program = URL(fileURLWithPath: CommandLine.arguments.first ?? "codex-profile").lastPathComponent
@@ -24,6 +36,12 @@ enum CodexProfileCLI {
         ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
     private static let keychainAccessRepairVersion = 4
+    private static let version = "0.2.1"
+
+    /// True when no controlling terminal is attached to stdin. In this mode the
+    /// CLI must never trigger a modal Keychain consent prompt (it would hang
+    /// with no UI to render).
+    private static var stdinIsTTY: Bool { isatty(0) != 0 }
 
     static func main() {
         do {
@@ -255,9 +273,16 @@ enum CodexProfileCLI {
         try? self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
     }
 
-    private static func commandBestAuth(_ args: [String]) throws {
+    private struct BestAuthOptions {
         var dir: String?
         var excludeCSV: String?
+        var nonInteractive = false
+        var json = false
+        var timeout: TimeInterval = 30
+    }
+
+    private static func parseBestAuthOptions(_ args: [String]) throws -> BestAuthOptions {
+        var options = BestAuthOptions()
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -266,39 +291,83 @@ enum CodexProfileCLI {
                     throw CLIError.message("--dir requires a path argument")
                 }
                 i += 1
-                dir = args[i]
+                options.dir = args[i]
             case "--exclude":
+                // An explicit empty value (`--exclude ""`) is a valid no-op
+                // exclusion, never a wait/prompt path. It is parsed into an
+                // empty set below.
                 guard i + 1 < args.count else {
                     throw CLIError.message("--exclude requires a comma-separated list")
                 }
                 i += 1
-                excludeCSV = args[i]
+                options.excludeCSV = args[i]
+            case "--non-interactive":
+                options.nonInteractive = true
+            case "--json":
+                options.json = true
+            case "--timeout":
+                guard i + 1 < args.count, let value = Double(args[i + 1]), value > 0 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds")
+                }
+                i += 1
+                options.timeout = value
             default:
-                throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]")
+                throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]")
             }
             i += 1
         }
+        return options
+    }
 
-        guard let dir else {
-            throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>]")
+    private static func commandBestAuth(_ args: [String]) throws {
+        let options = try self.parseBestAuthOptions(args)
+
+        guard let dir = options.dir else {
+            throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]")
         }
-        self.repairKeychainAccessIfNeeded()
 
-        let excludeIDs = Set((excludeCSV ?? "")
+        // Non-interactive whenever stdin is not a TTY or the caller asked. This
+        // selects the fail-closed Keychain vault so reads can never block on a
+        // modal consent prompt that has no UI to render.
+        let interactive = self.stdinIsTTY && !options.nonInteractive
+        let bestAuthVault = self.makeVault(interactionAllowed: interactive)
+
+        // Watchdog guarantees the process dies even if something below blocks,
+        // so callers in background shells are never stranded.
+        self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "best-auth timed out after \(Int(options.timeout))s; the command was unable to complete")
+
+        // `--exclude ""` and absent `--exclude` both parse to an empty set.
+        let excludeIDs = Set((options.excludeCSV ?? "")
             .split(separator: ",")
             .map(String.init)
             .filter { !$0.isEmpty })
-        let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
-        let cache = self.loadCache()
-        let eligibleProfiles = config.profiles
-            .filter { profile in
-                let availability = try? self.vault.authBlobAvailability(profileID: profile.id)
-                return availability == .present
-            }
 
+        let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
+
+        // Profiles-configured check is purely file-based and runs before any
+        // Keychain read, so exit 3 stays fast and prompt-free.
         if config.profiles.isEmpty {
             fputs("No profiles configured\n", stderr)
-            throw CLIError.exitStatus(3)
+            throw CLIError.exitStatus(ExitCode.noProfilesConfigured)
+        }
+
+        if interactive {
+            self.repairKeychainAccessIfNeeded()
+        }
+
+        let cache = self.loadCache()
+        let eligibleProfiles: [ProfileConfig]
+        do {
+            eligibleProfiles = try config.profiles.filter { profile in
+                try bestAuthVault.authBlobAvailability(profileID: profile.id) == .present
+            }
+        } catch {
+            if self.isKeychainInteractionRequired(error) {
+                self.exitKeychainInteractionRequired()
+            }
+            throw error
         }
 
         guard let result = ProfileSelector.selectBest(
@@ -307,16 +376,33 @@ enum CodexProfileCLI {
             excludeIDs: excludeIDs
         ) else {
             fputs("No eligible profiles available\n", stderr)
+            throw CLIError.exitStatus(ExitCode.noEligibleProfile)
+        }
+
+        // Data reads can trigger a non-suppressible ACL prompt for legacy
+        // trusted-app Keychain items, so bound them in non-interactive mode.
+        let readBound: TimeInterval? = interactive ? nil : 5
+        let authData: Data?
+        do {
+            switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
+            case .data(let data):
+                authData = data
+            case .interactionRequired:
+                self.exitKeychainInteractionRequired()
+            }
+        } catch {
+            if self.isKeychainInteractionRequired(error) {
+                self.exitKeychainInteractionRequired()
+            }
+            throw error
+        }
+        guard let authData else {
+            fputs("No auth data for profile '\(result.profileID)'\n", stderr)
             throw CLIError.exitStatus(1)
         }
 
         let dirURL = URL(fileURLWithPath: dir)
         try self.ensurePrivateDir(dirURL)
-
-        guard let authData = try self.vault.loadAuthBlob(profileID: result.profileID) else {
-            fputs("No auth data for profile '\(result.profileID)'\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
         try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
 
         let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
@@ -712,11 +798,11 @@ enum CodexProfileCLI {
         ProcessInfo.processInfo.environment[key]
     }
 
-    private static func makeVault() -> AuthVault {
+    private static func makeVault(interactionAllowed: Bool = true) -> AuthVault {
         if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
             return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
         }
-        return LegacyKeychainAuthVault(service: self.keychainService)
+        return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
     }
 
     private static func vaultLocation(profile: String) -> String {
@@ -760,6 +846,82 @@ enum CodexProfileCLI {
 
     private static func note(_ text: String) {
         print(text)
+    }
+
+    /// Arms a detached watchdog that force-exits the process after `seconds`.
+    /// Runs on its own thread so it fires even if the main path is blocked in a
+    /// syscall, guaranteeing callers in non-interactive shells are never
+    /// stranded. The thread is daemon-like: if the command finishes first the
+    /// process exits normally and the sleeping thread is torn down with it.
+    private static func armWatchdog(seconds: TimeInterval, diagnostic: String) {
+        let thread = Thread {
+            Thread.sleep(forTimeInterval: seconds)
+            fputs("\(diagnostic)\n", stderr)
+            exit(ExitCode.watchdogTimeout)
+        }
+        thread.stackSize = 512 * 1024
+        thread.start()
+    }
+
+    /// Maps a thrown error to the keychain-interaction exit path when the
+    /// failure is the Keychain refusing to prompt. Returns true if it handled
+    /// (and exited); callers rethrow otherwise.
+    private static func isKeychainInteractionRequired(_ error: Error) -> Bool {
+        (error as? KeychainAuthVaultError)?.isInteractionRequired ?? false
+    }
+
+    enum BlobReadOutcome {
+        case data(Data?)
+        case interactionRequired
+    }
+
+    /// Reads a profile's auth blob with a hard upper bound. The Keychain data
+    /// read for legacy trusted-application ACL items shows a modal consent
+    /// prompt that `kSecUseAuthenticationUIFail` does NOT suppress, so in
+    /// non-interactive mode we race the (synchronous, uncancellable) read on a
+    /// background thread against `bound`. If the bound wins, a prompt is up with
+    /// no UI to answer it: we report `.interactionRequired` and the caller maps
+    /// that to a clean exit instead of hanging. In interactive mode `bound` is
+    /// nil and the read proceeds normally so the user can answer the prompt.
+    private static func loadAuthBlobBounded(
+        _ vault: AuthVault,
+        profileID: String,
+        bound: TimeInterval?
+    ) throws -> BlobReadOutcome {
+        guard let bound else {
+            return .data(try vault.loadAuthBlob(profileID: profileID))
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ReadResultBox()
+        let thread = Thread {
+            do {
+                box.set(.data(try vault.loadAuthBlob(profileID: profileID)))
+            } catch {
+                box.setError(error)
+            }
+            semaphore.signal()
+        }
+        thread.start()
+
+        if semaphore.wait(timeout: .now() + bound) == .timedOut {
+            return .interactionRequired
+        }
+        if let error = box.error { throw error }
+        return box.outcome ?? .data(nil)
+    }
+
+    private final class ReadResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var outcome: BlobReadOutcome?
+        private(set) var error: Error?
+        func set(_ value: BlobReadOutcome) { self.lock.lock(); self.outcome = value; self.lock.unlock() }
+        func setError(_ value: Error) { self.lock.lock(); self.error = value; self.lock.unlock() }
+    }
+
+    private static func exitKeychainInteractionRequired() -> Never {
+        fputs("keychain interaction required; run codex-profile from a terminal once to grant access\n", stderr)
+        exit(ExitCode.keychainInteractionRequired)
     }
 }
 
