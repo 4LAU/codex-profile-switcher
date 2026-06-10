@@ -143,16 +143,7 @@ codex-profile best-auth --dir /tmp/codex-session --json
 ```
 
 ```json
-{
-  "candidates": [
-    {"id": "work", "score": 0.82, "snapshotAgeSeconds": 14, "tier": "live"},
-    {"id": "personal", "score": 0.21, "snapshotAgeSeconds": 47, "tier": "live"}
-  ],
-  "fetched": true,
-  "score": 0.82,
-  "selected": "work",
-  "tier": "live"
-}
+{"candidates":[{"id":"personal","score":21,"snapshotAgeSeconds":47,"tier":"preferred"},{"id":"work","score":18,"snapshotAgeSeconds":14,"tier":"preferred"}],"fetched":true,"score":18,"selected":"work","tier":"preferred"}
 ```
 
 **Excluding profiles:**
