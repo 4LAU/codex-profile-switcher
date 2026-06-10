@@ -461,15 +461,18 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(ExitCode.usageDataUnavailable)
         }
 
+        let now = Date()
         let candidates = ProfileSelector.candidates(
             profiles: eligibleProfiles,
             cache: cache,
-            excludeIDs: excludeIDs)
+            excludeIDs: excludeIDs,
+            now: now)
 
         guard let result = ProfileSelector.selectBest(
             profiles: eligibleProfiles,
             cache: cache,
-            excludeIDs: excludeIDs
+            excludeIDs: excludeIDs,
+            now: now
         ) else {
             fputs("No eligible profiles available\n", stderr)
             throw CLIError.exitStatus(ExitCode.noEligibleProfile)
@@ -510,7 +513,8 @@ enum CodexProfileCLI {
                 result: result,
                 candidates: candidates,
                 cache: cache,
-                fetchedAny: fetchResult.fetchedAny)
+                fetchedAny: fetchResult.fetchedAny,
+                now: now)
             print(try report.jsonString())
         } else {
             print(result.profileID)

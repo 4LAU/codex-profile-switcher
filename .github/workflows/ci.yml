@@ -38,3 +38,8 @@ jobs:
             echo "ERROR: version.env ($MARKETING_VERSION) != Sources/CodexProfileSwitcherApp/AppInfo.swift ($swift_ver)"
             exit 1
           fi
+          cli_ver=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' Sources/CodexProfileCLI/CodexProfileCLI.swift | head -1)
+          if [[ "$cli_ver" != "$MARKETING_VERSION" ]]; then
+            echo "ERROR: version.env ($MARKETING_VERSION) != Sources/CodexProfileCLI/CodexProfileCLI.swift ($cli_ver)"
+            exit 1
+          fi
