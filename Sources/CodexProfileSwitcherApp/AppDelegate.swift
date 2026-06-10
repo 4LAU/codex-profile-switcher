@@ -409,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.liveAuthWarning = nil
                 self.usageProvider.refreshAll(force: true)
                 self.updateIcon()
+                self.rebuildMenu()
             case .failure(let error):
                 self.syncActiveProfile(force: true)
                 self.updateIcon()

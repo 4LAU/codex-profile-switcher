@@ -83,12 +83,24 @@ final class UsageProvider {
         let isLive = id == activeProfileId
 
         func finalize(_ status: ProfileStatus, decision: String) async {
+            // Bail if the refresh was cancelled (e.g. by cancelRefreshes() during
+            // a profile switch). Prevents in-flight stale writes from landing.
+            guard !Task.isCancelled else { return }
+
+            // Re-derive liveness at finalize time. The snapshot was fetched under
+            // whichever credentials were live at refresh START; if the live
+            // profile changed mid-flight, this snapshot was read against the wrong
+            // auth.json and must not be written under `id`. The post-switch forced
+            // refreshAll will supply correct data, so we drop the result here.
+            let currentlyLive = id == (self.store.liveProfileId ?? "")
+            if isLive != currentlyLive { return }
+
             diagnostics.lastDecision = decision
             // Re-check whether auth was torn down while we fetched. Live profiles
             // use a cheap main-safe file stat; non-live profiles re-query the
             // vault, but off the main actor so a Keychain consent prompt cannot
             // block the menu bar.
-            let stillAvailable = isLive
+            let stillAvailable = currentlyLive
                 ? self.store.liveAuthExists()
                 : await Self.loadAuthAvailability(source: source, profileID: id)
             if !stillAvailable {

@@ -80,10 +80,20 @@ final class ProfileStore {
         let cacheDecoder = JSONDecoder()
         cacheDecoder.dateDecodingStrategy = .iso8601
         let cacheData = try? Data(contentsOf: self.cacheURL)
-        self.cache = cacheData.flatMap { try? cacheDecoder.decode(UsageCache.self, from: $0) }
-            ?? UsageCache(snapshots: [:])
-        if cacheData != nil, self.cache.snapshots.isEmpty {
-            AppLogger.warning("Cache exists but could not be decoded", metadata: ["path": self.cacheURL.path])
+        if let cacheData {
+            do {
+                self.cache = try cacheDecoder.decode(UsageCache.self, from: cacheData)
+            } catch {
+                // Distinguish a genuine decode failure (corrupt/incompatible file)
+                // from a legitimately empty cache: only warn when data existed but
+                // could not be decoded, and include the underlying error.
+                AppLogger.warning("Cache exists but could not be decoded",
+                                  metadata: ["path": self.cacheURL.path,
+                                             "error": error.localizedDescription])
+                self.cache = UsageCache(snapshots: [:])
+            }
+        } else {
+            self.cache = UsageCache(snapshots: [:])
         }
 
         if isFirstLaunch, self.legacyAuthStoreFiles().isEmpty {
@@ -176,7 +186,7 @@ final class ProfileStore {
         self.cache.snapshots.removeValue(forKey: id)
         self.cache.exhaustionOverrides.removeValue(forKey: id)
         self.saveConfig()
-        self.saveCache()
+        self.saveCache(excludingOverridesFor: id)
     }
 
     func authStoreExists(for profileId: String) -> Bool {
@@ -369,7 +379,7 @@ final class ProfileStore {
         self.cache.exhaustionOverrides.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.statuses[id] = .notSetUp
-        self.saveCache()
+        self.saveCache(excludingOverridesFor: id)
     }
 
     func flushCacheIfDirty() {
@@ -461,17 +471,36 @@ final class ProfileStore {
     }
 
     private func saveCache() {
+        self.saveCache(excludingOverridesFor: nil)
+    }
+
+    /// Persists the in-memory cache to disk.
+    ///
+    /// Concurrent-merge semantics: a CLI process (`mark-exhausted`) may write
+    /// exhaustion overrides to the same file between our reads, so we merge any
+    /// disk-only overrides into the write to avoid clobbering them. The merge is
+    /// purely additive and writes into a LOCAL copy — `self.cache` is never
+    /// mutated here, so a removal made in memory is not silently re-injected.
+    ///
+    /// Deletion exception: when a profile's override is removed in memory
+    /// (`clearSavedAuth`/`removeProfile`), pass its id as `excludingOverridesFor`
+    /// so the disk override for that id is NOT merged back. This makes the
+    /// removal stick on disk while still preserving concurrent overrides for
+    /// every OTHER profile.
+    private func saveCache(excludingOverridesFor excludedID: String?) {
         do {
+            var toWrite = self.cache
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if let diskData = try? Data(contentsOf: self.cacheURL),
                let diskCache = try? decoder.decode(UsageCache.self, from: diskData),
                !diskCache.exhaustionOverrides.isEmpty {
-                for (id, override) in diskCache.exhaustionOverrides where self.cache.exhaustionOverrides[id] == nil {
-                    self.cache.exhaustionOverrides[id] = override
+                for (id, override) in diskCache.exhaustionOverrides
+                where id != excludedID && toWrite.exhaustionOverrides[id] == nil {
+                    toWrite.exhaustionOverrides[id] = override
                 }
             }
-            let data = try Self.cacheEncoder.encode(self.cache)
+            let data = try Self.cacheEncoder.encode(toWrite)
             try data.write(to: self.cacheURL, options: .atomic)
         } catch {
             AppLogger.error("Failed to save usage cache", metadata: ["error": error.localizedDescription])
