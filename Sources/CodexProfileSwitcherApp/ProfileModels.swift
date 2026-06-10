@@ -1,7 +1,5 @@
-import Cocoa
+import Foundation
 import CodexProfileCore
-import CryptoKit
-import SwiftUI
 
 // MARK: - Models
 
@@ -96,13 +94,13 @@ func dictStringValue(_ dict: [String: Any], _ keys: String...) -> String? {
     return nil
 }
 
-let iso8601WithFractional: ISO8601DateFormatter = {
+private let iso8601WithFractional: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f
 }()
 
-let iso8601Plain: ISO8601DateFormatter = {
+private let iso8601Plain: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime]
     return f
@@ -114,14 +112,14 @@ func parseISO8601Date(_ raw: Any?) -> Date? {
     return iso8601Plain.date(from: value)
 }
 
-func shortIdentifier(_ value: String, head: Int = 10, tail: Int = 6) -> String {
+private func shortIdentifier(_ value: String, head: Int = 10, tail: Int = 6) -> String {
     guard value.count > head + tail + 1 else { return value }
     let start = value.prefix(head)
     let end = value.suffix(tail)
     return "\(start)…\(end)"
 }
 
-func shortHash(_ value: String, head: Int = 6, tail: Int = 4) -> String {
+private func shortHash(_ value: String, head: Int = 6, tail: Int = 4) -> String {
     shortIdentifier(value, head: head, tail: tail)
 }
 
@@ -132,10 +130,6 @@ extension DateFormatter {
         formatter.timeStyle = .short
         return formatter
     }()
-}
-
-func atomicWriteData(_ data: Data, to destination: URL) throws {
-    try AtomicFileWriter.write(data, to: destination)
 }
 
 enum LiveAuthWarning: Equatable {

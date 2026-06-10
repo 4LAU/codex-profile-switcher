@@ -1,7 +1,4 @@
-import Cocoa
-import CodexProfileCore
-import CryptoKit
-import SwiftUI
+import Foundation
 
 // MARK: - App Info
 

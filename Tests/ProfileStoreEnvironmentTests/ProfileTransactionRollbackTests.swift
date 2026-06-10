@@ -2,7 +2,9 @@
 import Foundation
 import Testing
 
-private final class RollbackAuthVault: AuthVault {
+// Test helper: mutated only from single-threaded test bodies, never shared
+// across tasks, so unchecked Sendable is safe here.
+private final class RollbackAuthVault: AuthVault, @unchecked Sendable {
     var blobs: [String: Data]
 
     init(blobs: [String: Data]) {

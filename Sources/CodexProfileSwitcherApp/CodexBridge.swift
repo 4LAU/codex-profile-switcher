@@ -1,7 +1,5 @@
-import Cocoa
+import Foundation
 import CodexProfileCore
-import CryptoKit
-import SwiftUI
 
 // MARK: - Helpers
 

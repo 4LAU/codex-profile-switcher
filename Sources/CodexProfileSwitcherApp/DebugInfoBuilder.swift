@@ -1,7 +1,5 @@
 import Cocoa
 import CodexProfileCore
-import CryptoKit
-import SwiftUI
 
 // MARK: - Debug Info
 
@@ -64,5 +62,3 @@ enum DebugInfoBuilder {
         NSWorkspace.shared.open(components?.url ?? AppInfo.issueURL)
     }
 }
-
-// MARK: - App Support
