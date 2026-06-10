@@ -65,7 +65,7 @@ public enum ProfileSelector {
                         tier: .lastResort)
                 }
 
-                let score = effectiveScore(for: snapshot, now: now)
+                let score = self.effectiveScore(for: snapshot, now: now)
                 let tier: ProfileCandidate.ProfileTier = score >= 100 ? .ineligible : .preferred
                 return ProfileCandidate(
                     profileID: profile.id,
@@ -113,11 +113,11 @@ public enum ProfileSelector {
 
     private static func effectiveScore(for snapshot: UsageSnapshot, now: Date) -> Int {
         max(
-            effectiveWindowScore(
+            self.effectiveWindowScore(
                 snapshot.primaryUsedPercent,
                 resetAt: snapshot.primaryResetAt,
                 now: now),
-            effectiveWindowScore(
+            self.effectiveWindowScore(
                 snapshot.secondaryUsedPercent,
                 resetAt: snapshot.secondaryResetAt,
                 now: now))

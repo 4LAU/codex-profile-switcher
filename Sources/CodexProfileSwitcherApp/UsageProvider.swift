@@ -48,7 +48,7 @@ final class UsageProvider {
             await withTaskGroup(of: Void.self) { group in
                 var pending = contexts[...]
                 let initialBatch = min(3, pending.count)
-                for _ in 0..<initialBatch {
+                for _ in 0 ..< initialBatch {
                     let (id, cached) = pending.removeFirst()
                     group.addTask { @MainActor in
                         await self.refreshProfile(id, activeProfileId: liveId, cached: cached)

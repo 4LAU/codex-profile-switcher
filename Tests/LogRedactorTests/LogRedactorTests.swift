@@ -34,11 +34,9 @@ func expectRedacted(_ raw: String, removes secrets: [String], keeps markers: [St
 }
 
 final class LogRedactorTests {
-    
-    
+
     @Test
-    
-    
+
     func testRedactsEmails() throws {
         try expectRedacted(
             "account user@example.test failed",
@@ -46,12 +44,8 @@ final class LogRedactorTests {
             keeps: ["<redacted-email>"])
     }
 
-    
-    
     @Test
 
-    
-    
     func testRedactsAuthorizationAndCookieHeaders() throws {
         try expectRedacted(
             """
@@ -62,12 +56,8 @@ final class LogRedactorTests {
             keeps: ["Authorization: <redacted>", "Cookie: <redacted>"])
     }
 
-    
-    
     @Test
 
-    
-    
     func testRedactsStandaloneBearerTokens() throws {
         try expectRedacted(
             "retrying with Bearer abcdefghijklmnop.qrstuvwxyz-123456",
@@ -75,12 +65,8 @@ final class LogRedactorTests {
             keeps: ["Bearer <redacted>"])
     }
 
-    
-    
     @Test
 
-    
-    
     func testRedactsOpenAIAPIKeys() throws {
         try expectRedacted(
             "OPENAI_API_KEY=sk-proj_abcdefghijklmnopqrstuvwxyz123456",
@@ -88,12 +74,8 @@ final class LogRedactorTests {
             keeps: ["<redacted-openai-key>"])
     }
 
-    
-    
     @Test
 
-    
-    
     func testRedactsJSONTokenFields() throws {
         try expectRedacted(
             #"{"access_token":"access-secret","refresh_token":"refresh-secret","id_token":"id-secret"}"#,
@@ -101,12 +83,8 @@ final class LogRedactorTests {
             keeps: [#""access_token":"<redacted>""#, #""refresh_token":"<redacted>""#, #""id_token":"<redacted>""#])
     }
 
-    
-    
     @Test
 
-    
-    
     func testRedactsOAuthQueryParameters() throws {
         try expectRedacted(
             "https://example.test/callback?code=secret-code&state=secret-state&access_token=secret-access&id_token=secret-id&safe=1",
@@ -114,12 +92,8 @@ final class LogRedactorTests {
             keeps: ["code=<redacted>", "state=<redacted>", "access_token=<redacted>", "id_token=<redacted>", "safe=1"])
     }
 
-    
-    
     @Test
 
-    
-    
     func testExcerptRedactsBeforeTruncating() throws {
         let secret = "user@example.test"
         let excerpt = LogRedactor.excerpt("prefix \(secret)\nAuthorization: Bearer token-secret-123456789", maxLength: 80)

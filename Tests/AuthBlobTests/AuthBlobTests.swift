@@ -96,10 +96,7 @@ func oauthAuthData(
 
 final class AuthBlobTests {
 
-
     @Test
-
-
 
     func testRejectsMalformedAuth() throws {
         try expectMissingTokens {
@@ -112,12 +109,8 @@ final class AuthBlobTests {
                    "Invalid JSON should not produce a fingerprint")
     }
 
-    
-    
     @Test
 
-    
-    
     func testUpdatedDataPreservesUnrelatedFields() throws {
         let oldToken = try idToken(accountID: "acct-old")
         let existing = try jsonData([
@@ -153,12 +146,8 @@ final class AuthBlobTests {
         try expect(object["last_refresh"] as? String != nil, "Missing last_refresh after update")
     }
 
-    
-    
     @Test
 
-    
-    
     func testFingerprintIgnoresRotatingOAuthTokenValues() throws {
         let token = try idToken(subject: "same-user", email: "same@example.test", accountID: "acct-same")
         let first = try oauthAuthData(accessToken: "access-1", refreshToken: "refresh-1", idToken: token)
@@ -170,12 +159,8 @@ final class AuthBlobTests {
             "OAuth fingerprint changed when only rotating token values changed")
     }
 
-    
-    
     @Test
 
-    
-    
     func testFingerprintUsesAccountIDWithoutIDToken() throws {
         let first = try jsonData([
             "tokens": [
@@ -225,8 +210,6 @@ final class AuthBlobTests {
 
     @Test
 
-    
-    
     func testAPIKeyFingerprintDistinguishesKeys() throws {
         let first = try jsonData(["OPENAI_API_KEY": "sk-test-key-1111111111111111"])
         let second = try jsonData(["OPENAI_API_KEY": "sk-test-key-2222222222222222"])

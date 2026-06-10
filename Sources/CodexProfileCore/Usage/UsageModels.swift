@@ -40,7 +40,7 @@ public struct ExhaustionOverride: Codable, Equatable {
     }
 
     public func isActive(now: Date = Date()) -> Bool {
-        now < blockedUntil
+        now < self.blockedUntil
     }
 }
 
@@ -85,7 +85,7 @@ public struct UsageCache: Codable, Equatable {
         }
         var merged = self
         for (id, override) in diskCache.exhaustionOverrides
-        where id != excludedID && merged.exhaustionOverrides[id] == nil {
+            where id != excludedID && merged.exhaustionOverrides[id] == nil {
             merged.exhaustionOverrides[id] = override
         }
         return merged

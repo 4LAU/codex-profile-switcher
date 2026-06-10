@@ -72,9 +72,9 @@ public enum AuthBlob {
         return AuthCredentials(
             accessToken: accessToken,
             refreshToken: refreshToken,
-            idToken: tokenString(tokens, snakeCase: "id_token", camelCase: "idToken"),
-            accountId: tokenString(tokens, snakeCase: "account_id", camelCase: "accountId"),
-            lastRefresh: parseLastRefresh(json["last_refresh"]))
+            idToken: self.tokenString(tokens, snakeCase: "id_token", camelCase: "idToken"),
+            accountId: self.tokenString(tokens, snakeCase: "account_id", camelCase: "accountId"),
+            lastRefresh: self.parseLastRefresh(json["last_refresh"]))
     }
 
     public static func updatedData(
@@ -83,12 +83,12 @@ public enum AuthBlob {
         lastRefresh: Date = Date()
     ) throws -> Data {
         var json = try parseTopLevelObject(from: existingData)
-        json["tokens"] = updatedTokens(
+        json["tokens"] = self.updatedTokens(
             preserving: json["tokens"] as? [String: Any],
             with: credentials)
-        json["last_refresh"] = iso8601Fractional.string(from: lastRefresh)
+        json["last_refresh"] = self.iso8601Fractional.string(from: lastRefresh)
 
-        guard isPlausibleAuthBlob(json) else {
+        guard self.isPlausibleAuthBlob(json) else {
             throw AuthError.missingTokens
         }
 
@@ -99,7 +99,7 @@ public enum AuthBlob {
 
     public static func isPlausibleAuthBlob(_ data: Data) -> Bool {
         guard let json = try? parseTopLevelObject(from: data) else { return false }
-        return isPlausibleAuthBlob(json)
+        return self.isPlausibleAuthBlob(json)
     }
 
     public static func identityFingerprint(from data: Data) -> String? {
@@ -149,19 +149,19 @@ public enum AuthBlob {
     }
 
     private static func isPlausibleAuthBlob(_ json: [String: Any]) -> Bool {
-        if nonEmptyString(json["OPENAI_API_KEY"]) != nil {
+        if self.nonEmptyString(json["OPENAI_API_KEY"]) != nil {
             return true
         }
 
         guard let tokens = json["tokens"] as? [String: Any] else {
             return false
         }
-        return hasUsableOAuthTokenFields(tokens)
+        return self.hasUsableOAuthTokenFields(tokens)
     }
 
     private static func hasUsableOAuthTokenFields(_ tokens: [String: Any]) -> Bool {
-        tokenString(tokens, snakeCase: "access_token", camelCase: "accessToken") != nil
-            && tokenString(tokens, snakeCase: "refresh_token", camelCase: "refreshToken") != nil
+        self.tokenString(tokens, snakeCase: "access_token", camelCase: "accessToken") != nil
+            && self.tokenString(tokens, snakeCase: "refresh_token", camelCase: "refreshToken") != nil
     }
 
     private static func tokenString(
@@ -169,7 +169,7 @@ public enum AuthBlob {
         snakeCase: String,
         camelCase: String
     ) -> String? {
-        nonEmptyString(tokens[snakeCase]) ?? nonEmptyString(tokens[camelCase])
+        self.nonEmptyString(tokens[snakeCase]) ?? self.nonEmptyString(tokens[camelCase])
     }
 
     private static func nonEmptyString(_ raw: Any?) -> String? {
@@ -193,7 +193,7 @@ public enum AuthBlob {
     private static func parseLastRefresh(_ raw: Any?) -> Date? {
         guard let value = nonEmptyString(raw) else { return nil }
         if let date = iso8601Fractional.date(from: value) { return date }
-        return iso8601Plain.date(from: value)
+        return self.iso8601Plain.date(from: value)
     }
 
     private static func authIdentity(from json: [String: Any]) -> [String: Any]? {
@@ -207,8 +207,8 @@ public enum AuthBlob {
 
         guard let tokens = json["tokens"] as? [String: Any] else { return nil }
 
-        let accountId = tokenString(tokens, snakeCase: "account_id", camelCase: "accountId")
-        let idToken = tokenString(tokens, snakeCase: "id_token", camelCase: "idToken")
+        let accountId = self.tokenString(tokens, snakeCase: "account_id", camelCase: "accountId")
+        let idToken = self.tokenString(tokens, snakeCase: "id_token", camelCase: "idToken")
         if var userIdentity = idToken.flatMap(userIdentity(fromIDToken:)) {
             if let accountId {
                 userIdentity["accountId"] = accountId

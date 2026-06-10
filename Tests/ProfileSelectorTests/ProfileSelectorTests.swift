@@ -59,7 +59,7 @@ struct ProfileSelectorTests {
     func score100IsIneligible() {
         let profiles = [profile("a"), profile("b")]
         let cache = UsageCache(snapshots: [
-            "a": snapshot(primary: 100),  // score >= 100 → ineligible
+            "a": snapshot(primary: 100), // score >= 100 → ineligible
             "b": snapshot(primary: 60),
         ])
         let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
@@ -91,7 +91,7 @@ struct ProfileSelectorTests {
                 "b": snapshot(primary: 40),
             ],
             exhaustionOverrides: [
-                "a": override(until: future),  // active
+                "a": override(until: future), // active
             ])
         let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
         #expect(result?.profileID == "b")
@@ -106,7 +106,7 @@ struct ProfileSelectorTests {
                 "b": snapshot(primary: 40),
             ],
             exhaustionOverrides: [
-                "a": override(until: past),  // expired (past < now)
+                "a": override(until: past), // expired (past < now)
             ])
         let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
         // "a" has lower score (10 < 40), override expired, so "a" wins
@@ -192,7 +192,7 @@ struct ProfileSelectorTests {
     func excludeIDsRespected() {
         let profiles = [profile("a"), profile("b"), profile("c")]
         let cache = UsageCache(snapshots: [
-            "a": snapshot(primary: 10),  // best score, but excluded
+            "a": snapshot(primary: 10), // best score, but excluded
             "b": snapshot(primary: 30),
             "c": snapshot(primary: 50),
         ])
@@ -221,8 +221,8 @@ struct ProfileSelectorTests {
         // 80 > 50 → "b" wins; this freezes the max() semantic for the live-secondary path.
         let profiles = [profile("a"), profile("b")]
         let cache = UsageCache(snapshots: [
-            "a": snapshot(primary: 20, secondary: 80),  // score = max(20, 80) = 80
-            "b": snapshot(primary: 50),                 // score = max(50, 0)  = 50
+            "a": snapshot(primary: 20, secondary: 80), // score = max(20, 80) = 80
+            "b": snapshot(primary: 50), // score = max(50, 0)  = 50
         ])
         let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
         #expect(result?.profileID == "b")
@@ -235,8 +235,8 @@ struct ProfileSelectorTests {
         let profiles = [profile("charlie"), profile("alpha"), profile("bravo")]
         let cache = UsageCache(snapshots: [
             "charlie": snapshot(primary: 30, fetchedAt: fetchTime),
-            "alpha":   snapshot(primary: 30, fetchedAt: fetchTime),
-            "bravo":   snapshot(primary: 30, fetchedAt: fetchTime),
+            "alpha": snapshot(primary: 30, fetchedAt: fetchTime),
+            "bravo": snapshot(primary: 30, fetchedAt: fetchTime),
         ])
         let result = ProfileSelector.selectBest(profiles: profiles, cache: cache, now: now)
         // All have same score (30) and fetchedAt → lexicographic: alpha < bravo < charlie
@@ -247,7 +247,7 @@ struct ProfileSelectorTests {
     func tieBreakFetchedAtMoreRecentWins() {
         // Sorting: `aFetch > bFetch` returns true → a comes first → more recent fetch wins
         let earlier = Date(timeIntervalSince1970: 3_000_000)
-        let later   = Date(timeIntervalSince1970: 4_000_000)
+        let later = Date(timeIntervalSince1970: 4_000_000)
         let profiles = [profile("a"), profile("b")]
         let cache = UsageCache(snapshots: [
             "a": snapshot(primary: 30, fetchedAt: earlier),

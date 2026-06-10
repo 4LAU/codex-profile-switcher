@@ -2,7 +2,11 @@ SHELL := /bin/bash
 
 BUILD_OUT ?= /tmp/codex-profile-switcher-build-check
 
-.PHONY: build check test test-unit test-integration
+.PHONY: build check test test-unit test-integration format
+
+# Requires swiftformat (brew install swiftformat). Config lives in .swiftformat.
+format:
+	swiftformat .
 
 build:
 	./build.sh "$(BUILD_OUT)"

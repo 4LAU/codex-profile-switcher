@@ -1,0 +1,8 @@
+# Matches the existing codebase style (AGENTS.md: 4-space indent, explicit self).
+# Conservative rule set: whitespace hygiene + explicit-self only. Opinionated
+# rewriting rules are disabled to keep diffs reviewable.
+--swiftversion 5.9
+--indent 4
+--self insert
+--maxwidth none
+--disable wrapArguments,wrapFunctionBodies,wrapPropertyBodies,wrapLoopBodies,wrapMultilineStatementBraces,redundantReturn,redundantStaticSelf,hoistPatternLet,hoistTry,sortImports,unusedArguments,docComments,conditionalAssignment,andOperator,trailingClosures,trailingCommas,blankLinesBetweenScopes,blankLinesAtStartOfScope,blankLinesAtEndOfScope,organizeDeclarations,extensionAccessControl,markTypes,swiftTestingTestCaseNames,numberFormatting,enumNamespaces,preferKeyPath,sortTypealiases,strongifiedSelf,typeSugar,redundantType,redundantNilInit,redundantPattern,redundantRawValues,redundantVoidReturnType,redundantOptionalBinding

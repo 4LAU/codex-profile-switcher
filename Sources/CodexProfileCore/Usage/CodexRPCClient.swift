@@ -162,7 +162,7 @@ public enum CodexCLIResolver {
 final class CodexRPCLineBuffer {
     private let lock = NSLock()
     private var buffer = Data()
-    private static let maxBufferBytes = 4 * 1024 * 1024  // 4 MB cap
+    private static let maxBufferBytes = 4 * 1024 * 1024 // 4 MB cap
 
     /// Returns complete newline-delimited lines drained from the buffer.
     /// If the buffer exceeds maxBufferBytes without a newline, it is cleared and
@@ -210,8 +210,7 @@ private final class CodexRPCClient {
         executablePath: String,
         environment: [String: String],
         initializeTimeoutSeconds: TimeInterval = 8,
-        requestTimeoutSeconds: TimeInterval = 3) throws
-    {
+        requestTimeoutSeconds: TimeInterval = 3) throws {
         self.initializeTimeoutSeconds = initializeTimeoutSeconds
         self.requestTimeoutSeconds = requestTimeoutSeconds
 
@@ -303,8 +302,7 @@ private final class CodexRPCClient {
     private func request(
         method: String,
         params: [String: Any]? = nil,
-        timeout: TimeInterval? = nil) async throws -> [String: Any]
-    {
+        timeout: TimeInterval? = nil) async throws -> [String: Any] {
         let id = self.nextID
         self.nextID += 1
         try self.sendRequest(id: id, method: method, params: params)
@@ -334,8 +332,7 @@ private final class CodexRPCClient {
     private func withTimeout<T: Sendable>(
         seconds: TimeInterval,
         method: String,
-        body: @escaping @Sendable () async throws -> T) async throws -> T
-    {
+        body: @escaping @Sendable () async throws -> T) async throws -> T {
         try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask {
                 try await body()
@@ -410,8 +407,7 @@ public enum CLIUsageFetcher {
         codexConfigURL: URL,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         clientName: String = "CodexProfileSwitcher",
-        clientVersion: String) async throws -> UsageSnapshot
-    {
+        clientVersion: String) async throws -> UsageSnapshot {
         let executablePath = CodexCLIResolver.resolvePath(environment: environment)
         guard let executablePath else { throw CodexRPCError.cliNotFound }
 

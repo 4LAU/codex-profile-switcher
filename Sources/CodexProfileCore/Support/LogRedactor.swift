@@ -33,13 +33,12 @@ public enum LogRedactor {
     }
 
     private static func makeRegex(_ pattern: String, options: NSRegularExpression.Options = [])
-        -> NSRegularExpression
-    {
+        -> NSRegularExpression {
         (try? NSRegularExpression(pattern: pattern, options: options)) ?? self.fallbackRegex
     }
 
     private static func replace(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
         return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
     }
 }

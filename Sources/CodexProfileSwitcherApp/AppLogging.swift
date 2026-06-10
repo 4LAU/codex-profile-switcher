@@ -95,6 +95,6 @@ enum AppLogger {
     }()
 
     private static func timestamp() -> String {
-        return timestampFormatter.string(from: Date())
+        return self.timestampFormatter.string(from: Date())
     }
 }

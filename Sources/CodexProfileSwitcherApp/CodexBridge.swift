@@ -110,7 +110,7 @@ enum CodexBridge {
         let candidates: [String?] = [
             Bundle.main.bundleURL.pathExtension == "app"
                 ? Bundle.main.bundleURL
-                    .appendingPathComponent("Contents/Helpers/codex-profile").path
+                .appendingPathComponent("Contents/Helpers/codex-profile").path
                 : nil,
             Bundle.main.executableURL?
                 .deletingLastPathComponent()
@@ -161,7 +161,7 @@ enum CodexBridge {
         proc.standardOutput = pipe
         proc.standardError = pipe
 
-        let drain = pipeDrain(for: pipe)
+        let drain = self.pipeDrain(for: pipe)
 
         proc.terminationHandler = { p in
             let output = drain.awaitOutput()
@@ -267,7 +267,7 @@ enum CodexBridge {
 
         let attempts = Int(Self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 10
         let sleepSeconds = Double(Self.environment("CODEX_PROFILE_QUIT_SLEEP") ?? "") ?? 0.5
-        for _ in 0..<attempts {
+        for _ in 0 ..< attempts {
             if !Self.isCodexDesktopRunning() { return }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }
@@ -279,7 +279,7 @@ enum CodexBridge {
             arguments: ["-TERM", "-f", "\(Self.codexBundledCLI()) app-server"],
             quiet: true)
 
-        for _ in 0..<10 {
+        for _ in 0 ..< 10 {
             if !Self.isCodexDesktopRunning() { return }
             Thread.sleep(forTimeInterval: 0.5)
         }
@@ -291,7 +291,7 @@ enum CodexBridge {
             arguments: ["-KILL", "-f", "\(Self.codexBundledCLI()) app-server"],
             quiet: true)
 
-        for _ in 0..<6 {
+        for _ in 0 ..< 6 {
             if !Self.isCodexDesktopRunning() { return }
             Thread.sleep(forTimeInterval: 0.5)
         }
@@ -417,7 +417,7 @@ enum CodexBridge {
         let active = ActiveLogin(process: proc)
         Self.activeLogins[profileId] = active
 
-        let drain = pipeDrain(for: pipe)
+        let drain = self.pipeDrain(for: pipe)
 
         proc.terminationHandler = { p in
             let output = drain.awaitOutput()

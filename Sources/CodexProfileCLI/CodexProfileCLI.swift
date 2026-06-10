@@ -580,7 +580,7 @@ enum CodexProfileCLI {
                         return try? Data(contentsOf: liveAuthURL)
                     }
                     guard vaultReadable else { return nil }
-                    switch (try? self.loadAuthBlobBounded(vault, profileID: id, bound: readBound)) {
+                    switch try? self.loadAuthBlobBounded(vault, profileID: id, bound: readBound) {
                     case .data(let data): return data
                     default: return nil
                     }
@@ -606,7 +606,7 @@ enum CodexProfileCLI {
                     }
                 }
 
-                for _ in 0..<min(3, profiles.count) { enqueueNext() }
+                for _ in 0 ..< min(3, profiles.count) { enqueueNext() }
                 while inFlight > 0 {
                     if let (id, snapshot, fetchError) = await group.next() {
                         inFlight -= 1
@@ -641,7 +641,7 @@ enum CodexProfileCLI {
         bound: TimeInterval?
     ) -> Bool {
         guard let probe = profiles.first(where: { $0.id != activeProfile }) else { return true }
-        switch (try? self.loadAuthBlobBounded(vault, profileID: probe.id, bound: bound)) {
+        switch try? self.loadAuthBlobBounded(vault, profileID: probe.id, bound: bound) {
         case .interactionRequired: return false
         default: return true
         }
@@ -911,7 +911,7 @@ enum CodexProfileCLI {
 
         let attempts = Int(self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 30
         let sleepSeconds = Double(self.environment("CODEX_PROFILE_QUIT_SLEEP") ?? "") ?? 0.5
-        for _ in 0..<attempts {
+        for _ in 0 ..< attempts {
             if !self.codexDesktopRunning() { return }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }

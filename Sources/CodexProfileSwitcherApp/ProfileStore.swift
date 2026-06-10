@@ -258,7 +258,7 @@ final class ProfileStore {
     /// reads (file or Keychain) off the main actor. The vault conformers are
     /// immutable structs, and the URL is a value type, so this carries no
     /// reference to `ProfileStore`'s mutable state.
-    struct UsageAuthSource: Sendable {
+    struct UsageAuthSource {
         let vault: AuthVault
         let liveAuthURL: URL
     }

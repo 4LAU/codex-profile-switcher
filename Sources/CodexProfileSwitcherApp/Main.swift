@@ -2,7 +2,7 @@ import Cocoa
 import CodexProfileCore
 
 #if !TESTING
-@main
+    @main
 #endif
 enum Main {
     static func main() {
