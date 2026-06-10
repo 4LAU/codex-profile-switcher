@@ -23,12 +23,19 @@ macOS Keychain
 | Target or path | Role |
 |---|---|
 | `CodexProfileSwitcherApp` | SwiftUI menu bar app, usage polling, settings UI |
-| `CodexProfileCLI` | CLI helper for login, app switching, status, and diagnostics |
+| `CodexProfileCLI` | CLI helper for login, app switching, status, diagnostics, and `best-auth`/`import-auth` automation |
 | `CodexProfileCore/Auth` | Auth token parsing plus Keychain and file-backed vaults |
 | `CodexProfileCore/Profiles` | Shared config, paths, validation, and profile switch transactions |
-| `CodexProfileCore/Usage` | UI-independent usage API, OAuth refresh, Codex CLI resolver, and JSON-RPC fallback |
+| `CodexProfileCore/Usage` | UI-independent usage fetching via Codex JSON-RPC, profile selection, and best-auth reporting |
 | `CodexProfileCore/Support` | Shared low-level helpers such as atomic file writes, redaction, and core log forwarding |
 | `CodexProfileSwitcherApp/AppDelegate.swift` | Menu bar lifecycle, status item ownership, refresh timers, and action dispatch |
+| `CodexProfileSwitcherApp/AppInfo.swift` | App version and bundle metadata |
+| `CodexProfileSwitcherApp/AppLogging.swift` | App-side log configuration and redaction setup |
+| `CodexProfileSwitcherApp/ProfileModels.swift` | View-layer profile and usage model types |
+| `CodexProfileSwitcherApp/ProfileStore.swift` | `@MainActor` profile state store — loads, saves, and publishes profile config |
+| `CodexProfileSwitcherApp/UsageProvider.swift` | `@MainActor` usage coordinator — schedules refreshes and merges snapshots |
+| `CodexProfileSwitcherApp/CodexBridge.swift` | Launches `codex app-server` and translates its JSON-RPC responses |
+| `CodexProfileSwitcherApp/DebugInfoBuilder.swift` | Assembles redacted debug info for clipboard copy |
 | `CodexProfileSwitcherApp/MenuViews.swift` | Menu card views and usage display helpers |
 | `CodexProfileSwitcherApp/SettingsViews.swift` | Settings window and profile management UI |
 
@@ -46,10 +53,14 @@ macOS Keychain
 
 ## Usage Polling
 
-The app coordinates refresh state through an app-local `UsageProvider`. UI-independent clients live in `CodexProfileCore/Usage`: OAuth profiles can refresh their tokens, the direct usage API fetcher reads OpenAI usage data, and the Codex JSON-RPC fallback runs `codex app-server` in a temporary environment when needed.
+Usage data is fetched via a single path: Codex's own `app-server` JSON-RPC endpoint. The CLI or app launches `codex app-server` in a temporary profile-scoped environment and reads quota from its JSON-RPC response. There is no direct OpenAI usage API call and no OAuth refresh on poll.
+
+The app coordinates refresh state through an app-local `UsageProvider` (`@MainActor`). Profile config is owned by `ProfileStore` (`@MainActor`). UI-independent fetching and profile selection logic live in `CodexProfileCore/Usage`.
+
+The `best-auth` CLI command runs the same fetch path independently (bounded concurrency of 3) so it never relies solely on a stale cache when the menu bar app is not running.
 
 ## Security
 
 - Auth tokens stored in macOS Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
 - Log output redacts emails, bearer tokens, cookies, API keys, and OAuth fields
-- No network calls except to OpenAI's usage API (authenticated per-profile)
+- No network calls except to Codex's `app-server` JSON-RPC endpoint (via a local process, authenticated per-profile)

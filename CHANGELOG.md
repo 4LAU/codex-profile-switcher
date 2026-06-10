@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Fixed false "re-auth needed" status for profiles with valid tokens (bare `401`/`403` substrings false-positived on unrelated error messages such as port numbers).
+- Fixed `best-auth` reporting a different tier/score from what was used for selection when a rate-limit reset boundary was crossed between the ranking and report steps.
 - Fixed a potential data race between background usage refreshes and profile state.
 - `best-auth` no longer hangs forever in non-interactive shells (CI, command substitution, background tasks). When stdin is not a terminal (or `--non-interactive` is passed), a Keychain read that needs interactive consent now exits with a clear message (code 6) instead of blocking on a modal prompt with no UI. A global watchdog (`--timeout`, default 30s, exit 7) guarantees the command always terminates.
 

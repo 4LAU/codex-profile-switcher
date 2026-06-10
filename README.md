@@ -94,6 +94,98 @@ codex-profile login 1
 codex-profile login 2
 ```
 
+## CLI Reference
+
+The `codex-profile` helper manages profiles from the terminal.
+
+```
+codex-profile app <profile> [workspace]
+codex-profile login <profile> [codex-login-args...]
+codex-profile status [profile] [--json]
+codex-profile list [--json]
+codex-profile path <profile>
+codex-profile doctor
+codex-profile keychain-repair
+codex-profile best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
+codex-profile import-auth --dir <path> --profile <id>
+```
+
+**Core commands**
+
+- `login` — runs an isolated Codex login and saves the resulting auth to the Keychain.
+- `app` — switches to a profile and relaunches Codex Desktop.
+- `status` — shows auth state for one or all profiles. `--json` emits a JSON array.
+- `list` — lists known profiles. `--json` emits a JSON array.
+- `path` — prints the Keychain location for a profile.
+- `doctor` — prints environment, installed Codex binaries, auth backend, and profile status.
+- `keychain-repair` — rewrites saved auth items with current Keychain access settings. Run once if repeated prompts appear after upgrading.
+
+### best-auth
+
+Selects the profile with the most remaining quota and writes its credentials to `--dir`. Designed for scripted account rotation with `codex exec --ephemeral`.
+
+Fetches live usage via `codex app-server` (bounded concurrency of 3) before ranking. Falls back to each profile's cached snapshot when a live fetch fails. Stores fresh snapshots back to the cache.
+
+**Non-interactive behavior.** When stdin is not a terminal (CI, command substitution, cron), or when `--non-interactive` is passed, Keychain reads that would show a modal consent prompt are skipped instead of blocking. A global watchdog exits the process after `--timeout` seconds (default 30) to guarantee termination.
+
+**Basic usage — bare profile ID on stdout:**
+
+```bash
+# Use in command substitution
+PROFILE=$(codex-profile best-auth --dir /tmp/codex-session)
+codex exec --ephemeral --dir /tmp/codex-session -- your-command
+```
+
+**JSON output:**
+
+```bash
+codex-profile best-auth --dir /tmp/codex-session --json
+```
+
+```json
+{
+  "candidates": [
+    {"id": "work", "score": 0.82, "snapshotAgeSeconds": 14, "tier": "live"},
+    {"id": "personal", "score": 0.21, "snapshotAgeSeconds": 47, "tier": "live"}
+  ],
+  "fetched": true,
+  "score": 0.82,
+  "selected": "work",
+  "tier": "live"
+}
+```
+
+**Excluding profiles:**
+
+```bash
+# Exclude a profile known to be rate-limited
+codex-profile best-auth --dir /tmp/codex-session --exclude work
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Profile selected and credentials written |
+| 1 | Generic failure |
+| 2 | No eligible profile (all excluded or exhausted) |
+| 3 | No profiles configured |
+| 4 | Usage data unavailable (no live fetch succeeded, no cached snapshots) |
+| 6 | Keychain interaction required — run `codex-profile best-auth` once from a terminal to grant access |
+| 7 | Watchdog timeout |
+
+### import-auth
+
+Writes a refreshed `auth.json` from `--dir` back to the stored credential for `--profile`. Intended as the write-back half of a `best-auth` rotation loop.
+
+**Identity guard.** Before overwriting, `import-auth` compares the identity fingerprint of the existing stored credential against the incoming file. If they belong to different accounts the write is refused and the command exits 5. This prevents a credential for one account from silently overwriting a different account's profile.
+
+```bash
+codex-profile import-auth --dir /tmp/codex-session --profile work
+```
+
+Exit code 5 means the refreshed credential belongs to a different account. All other failures exit 1.
+
 ## How It Works
 
 Codex Desktop still runs against its normal `~/.codex/` directory. This project
@@ -107,10 +199,9 @@ When you switch profiles, the helper:
 3. Restores the selected profile's saved auth to `~/.codex/auth.json`
 4. Relaunches Codex normally
 
-For usage data, the app tries the OAuth-backed usage API first. If that fails,
-it can fall back to `codex app-server` in a temporary profile-scoped environment.
-Inactive OAuth profiles are refreshed automatically so saved usage data stays
-current.
+For usage data, the app fetches quota via `codex app-server` in a temporary
+profile-scoped environment. The same path is used by the CLI's `best-auth`
+command when it self-fetches usage before ranking.
 
 ## macOS Permissions
 
