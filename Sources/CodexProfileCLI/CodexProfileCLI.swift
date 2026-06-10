@@ -323,6 +323,13 @@ enum CodexProfileCLI {
         }
     }
 
+    /// Repairs Keychain ACLs for stored auth items when the stored version is
+    /// out of date. MUST only be called on interactive paths (i.e. inside an
+    /// `if interactive` guard or from a command that always runs with a TTY).
+    /// The load-bearing `if interactive` guard in `commandBestAuth` is what
+    /// keeps this from being called in non-interactive mode — removing that
+    /// guard would cause a modal Keychain consent prompt to hang the process
+    /// with no UI to render it.
     @discardableResult
     private static func repairKeychainAccessIfNeeded(markComplete: Bool = true) -> Bool {
         let currentVersion = self.configStore.loadConfig()?.authStorageVersion ?? 0
@@ -373,8 +380,10 @@ enum CodexProfileCLI {
             case "--json":
                 options.json = true
             case "--timeout":
-                guard i + 1 < args.count, let value = Double(args[i + 1]), value > 0 else {
-                    throw CLIError.message("--timeout requires a positive number of seconds")
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
                 }
                 i += 1
                 options.timeout = value
@@ -457,7 +466,11 @@ enum CodexProfileCLI {
         // eligible profile, there is no usable usage data at all.
         let haveAnySnapshot = eligibleProfiles.contains { cache.snapshots[$0.id] != nil }
         if !fetchResult.fetchedAny, !haveAnySnapshot {
-            fputs("usage data unavailable\n", stderr)
+            if let lastError = fetchResult.lastFetchError {
+                fputs("usage data unavailable (last error: \(lastError))\n", stderr)
+            } else {
+                fputs("usage data unavailable\n", stderr)
+            }
             throw CLIError.exitStatus(ExitCode.usageDataUnavailable)
         }
 
@@ -497,7 +510,7 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(1)
         }
 
-        let dirURL = URL(fileURLWithPath: dir)
+        let dirURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL
         try self.ensurePrivateDir(dirURL)
         try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
 
@@ -524,6 +537,8 @@ enum CodexProfileCLI {
     private struct SelfFetchResult {
         var cache: UsageCache
         var fetchedAny: Bool
+        /// Description of the last per-profile fetch error, if any failed.
+        var lastFetchError: String?
     }
 
     /// Fetches live usage for each eligible profile (bounded concurrency 3) and
@@ -557,11 +572,12 @@ enum CodexProfileCLI {
             vault: vault,
             bound: readBound)
 
-        let fresh = self.runBlocking { () -> [String: UsageSnapshot] in
-            await withTaskGroup(of: (String, UsageSnapshot?).self) { group in
+        let fetchOutcome = self.runBlocking { () -> (snapshots: [String: UsageSnapshot], lastError: String?) in
+            await withTaskGroup(of: (String, UsageSnapshot?, String?).self) { group in
                 var pending = profiles[...]
                 var inFlight = 0
                 var results: [String: UsageSnapshot] = [:]
+                var lastError: String?
 
                 func authData(for id: String) -> Data? {
                     if id == activeProfile,
@@ -581,33 +597,41 @@ enum CodexProfileCLI {
                     let id = profile.id
                     let data = authData(for: id)
                     group.addTask {
-                        guard let data else { return (id, nil) }
-                        let snapshot = try? await CLIUsageFetcher.fetch(
-                            profileId: id,
-                            authData: data,
-                            codexConfigURL: configURL,
-                            clientVersion: version)
-                        return (id, snapshot)
+                        guard let data else { return (id, nil, nil) }
+                        do {
+                            let snapshot = try await CLIUsageFetcher.fetch(
+                                profileId: id,
+                                authData: data,
+                                codexConfigURL: configURL,
+                                clientVersion: version)
+                            return (id, snapshot, nil)
+                        } catch {
+                            return (id, nil, error.localizedDescription)
+                        }
                     }
                 }
 
                 for _ in 0..<min(3, profiles.count) { enqueueNext() }
                 while inFlight > 0 {
-                    if let (id, snapshot) = await group.next() {
+                    if let (id, snapshot, fetchError) = await group.next() {
                         inFlight -= 1
                         if let snapshot { results[id] = snapshot }
+                        if let fetchError { lastError = fetchError }
                         enqueueNext()
                     }
                 }
-                return results
+                return (results, lastError)
             }
         }
 
         var merged = cache
-        for (id, snapshot) in fresh {
+        for (id, snapshot) in fetchOutcome.snapshots {
             merged.snapshots[id] = snapshot
         }
-        return SelfFetchResult(cache: merged, fetchedAny: !fresh.isEmpty)
+        return SelfFetchResult(
+            cache: merged,
+            fetchedAny: !fetchOutcome.snapshots.isEmpty,
+            lastFetchError: fetchOutcome.lastError)
     }
 
     /// Probes whether vault data reads return without a consent prompt, using a
@@ -763,7 +787,7 @@ enum CodexProfileCLI {
         try self.validateProfile(profile)
         self.repairKeychainAccessIfNeeded()
 
-        let authURL = URL(fileURLWithPath: dir).appendingPathComponent("auth.json")
+        let authURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("auth.json")
         guard let updatedData = try? Data(contentsOf: authURL) else {
             fputs("No auth data found at \(authURL.path)\n", stderr)
             throw CLIError.exitStatus(1)
