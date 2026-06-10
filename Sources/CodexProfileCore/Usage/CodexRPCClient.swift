@@ -159,15 +159,29 @@ public enum CodexCLIResolver {
     }
 }
 
-private final class CodexRPCLineBuffer {
+final class CodexRPCLineBuffer {
     private let lock = NSLock()
     private var buffer = Data()
+    private static let maxBufferBytes = 4 * 1024 * 1024  // 4 MB cap
 
-    func appendAndDrainLines(_ data: Data) -> [Data] {
+    /// Returns complete newline-delimited lines drained from the buffer.
+    /// If the buffer exceeds maxBufferBytes without a newline, it is cleared and
+    /// `nil` is returned to signal a malformed-stream condition.
+    func appendAndDrainLines(_ data: Data) -> (lines: [Data], overflow: Bool) {
         self.lock.lock()
         defer { self.lock.unlock() }
 
         self.buffer.append(data)
+
+        if self.buffer.count > CodexRPCLineBuffer.maxBufferBytes {
+            let overflowBytes = self.buffer.count
+            self.buffer.removeAll(keepingCapacity: false)
+            CoreLogger.warning(
+                "CodexRPCLineBuffer: buffer exceeded 4 MB cap; clearing",
+                metadata: ["bytes": "\(overflowBytes)"])
+            return ([], true)
+        }
+
         var out: [Data] = []
         while let newline = self.buffer.firstIndex(of: 0x0A) {
             let line = Data(self.buffer[..<newline])
@@ -176,7 +190,7 @@ private final class CodexRPCLineBuffer {
                 out.append(line)
             }
         }
-        return out
+        return (out, false)
     }
 }
 
@@ -230,7 +244,13 @@ private final class CodexRPCClient {
                 return
             }
 
-            for line in stdoutBuffer.appendAndDrainLines(data) {
+            let result = stdoutBuffer.appendAndDrainLines(data)
+            if result.overflow {
+                handle.readabilityHandler = nil
+                stdoutContinuation.finish()
+                return
+            }
+            for line in result.lines {
                 stdoutContinuation.yield(line)
             }
         }
@@ -260,8 +280,19 @@ private final class CodexRPCClient {
     func shutdown() {
         self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
         self.stderrPipe.fileHandleForReading.readabilityHandler = nil
+        guard self.process.isRunning else { return }
+        self.process.terminate()
+
+        // Wait up to ~2 s for the process to exit before allowing the caller's
+        // defer to delete the temp CODEX_HOME the child may still be using.
+        let deadline = Date(timeIntervalSinceNow: 2.0)
+        while self.process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         if self.process.isRunning {
-            self.process.terminate()
+            kill(self.process.processIdentifier, SIGKILL)
+            // One short final wait so the OS can reclaim the PID.
+            Thread.sleep(forTimeInterval: 0.1)
         }
     }
 
@@ -330,17 +361,17 @@ private final class CodexRPCClient {
     }
 
     private func sendNotification(method: String, params: [String: Any]? = nil) throws {
-        try self.sendPayload(["method": method, "params": params ?? [:]])
+        try self.sendPayload(["jsonrpc": "2.0", "method": method, "params": params ?? [:]])
     }
 
     private func sendRequest(id: Int, method: String, params: [String: Any]?) throws {
-        try self.sendPayload(["id": id, "method": method, "params": params ?? [:]])
+        try self.sendPayload(["jsonrpc": "2.0", "id": id, "method": method, "params": params ?? [:]])
     }
 
     private func sendPayload(_ payload: [String: Any]) throws {
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        self.stdinPipe.fileHandleForWriting.write(data)
-        self.stdinPipe.fileHandleForWriting.write(Data([0x0A]))
+        var data = try JSONSerialization.data(withJSONObject: payload)
+        data.append(0x0A)
+        try self.stdinPipe.fileHandleForWriting.write(contentsOf: data)
     }
 
     private func readNextMessage() async throws -> [String: Any] {
