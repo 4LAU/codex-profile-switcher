@@ -1,7 +1,6 @@
-import Cocoa
+import Foundation
 import CodexProfileCore
 import CryptoKit
-import SwiftUI
 
 // MARK: - ProfileStore
 
@@ -489,17 +488,12 @@ final class ProfileStore {
     /// every OTHER profile.
     private func saveCache(excludingOverridesFor excludedID: String?) {
         do {
-            var toWrite = self.cache
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            if let diskData = try? Data(contentsOf: self.cacheURL),
-               let diskCache = try? decoder.decode(UsageCache.self, from: diskData),
-               !diskCache.exhaustionOverrides.isEmpty {
-                for (id, override) in diskCache.exhaustionOverrides
-                where id != excludedID && toWrite.exhaustionOverrides[id] == nil {
-                    toWrite.exhaustionOverrides[id] = override
-                }
-            }
+            let toWrite = self.cache.mergingDiskOverrides(
+                fromCacheAt: self.cacheURL,
+                excluding: excludedID,
+                decoder: decoder)
             let data = try Self.cacheEncoder.encode(toWrite)
             try data.write(to: self.cacheURL, options: .atomic)
         } catch {
@@ -671,7 +665,7 @@ final class ProfileStore {
     private func replaceFile(at destination: URL, with data: Data) throws {
         let dir = destination.deletingLastPathComponent()
         try self.fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        try atomicWriteData(data, to: destination)
+        try AtomicFileWriter.write(data, to: destination)
     }
 
     private static func isValidProfileId(_ id: String) -> Bool {

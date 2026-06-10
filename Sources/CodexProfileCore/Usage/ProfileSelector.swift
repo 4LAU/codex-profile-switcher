@@ -81,12 +81,18 @@ public enum ProfileSelector {
         excludeIDs: Set<String> = [],
         now: Date = Date()
     ) -> Result? {
-        let candidates = self.candidates(
+        self.selectBest(from: self.candidates(
             profiles: profiles,
             cache: cache,
             excludeIDs: excludeIDs,
-            now: now)
+            now: now))
+    }
 
+    /// Applies the winner filter/sort to an already-computed candidate list.
+    /// Callers that need both the full candidate list and the winner can score
+    /// once via `candidates(...)` and pass the result here, avoiding a redundant
+    /// recompute.
+    public static func selectBest(from candidates: [ProfileCandidate]) -> Result? {
         let sorted = candidates
             .filter { $0.tier != .ineligible }
             .sorted { a, b in

@@ -481,12 +481,7 @@ enum CodexProfileCLI {
             excludeIDs: excludeIDs,
             now: now)
 
-        guard let result = ProfileSelector.selectBest(
-            profiles: eligibleProfiles,
-            cache: cache,
-            excludeIDs: excludeIDs,
-            now: now
-        ) else {
+        guard let result = ProfileSelector.selectBest(from: candidates) else {
             fputs("No eligible profiles available\n", stderr)
             throw CLIError.exitStatus(ExitCode.noEligibleProfile)
         }
@@ -672,14 +667,10 @@ enum CodexProfileCLI {
     /// semantics the app and `mark-exhausted` use. Best-effort: a write failure
     /// must not fail the command (the selection is still valid).
     private static func persistCacheMerge(_ cache: UsageCache) {
-        var toWrite = cache
         // Preserve any overrides already on disk that aren't in our copy.
-        if let diskData = try? Data(contentsOf: self.paths.cacheURL),
-           let diskCache = try? JSONDecoder.iso8601Decoder().decode(UsageCache.self, from: diskData) {
-            for (id, override) in diskCache.exhaustionOverrides where toWrite.exhaustionOverrides[id] == nil {
-                toWrite.exhaustionOverrides[id] = override
-            }
-        }
+        let toWrite = cache.mergingDiskOverrides(
+            fromCacheAt: self.paths.cacheURL,
+            decoder: JSONDecoder.iso8601Decoder())
         try? self.saveCache(toWrite)
     }
 

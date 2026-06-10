@@ -22,8 +22,8 @@ struct BestAuthReportTests {
         #expect(json == "{\"candidates\":[{\"id\":\"1\",\"score\":0,\"snapshotAgeSeconds\":42,\"tier\":\"exhausted\"},{\"id\":\"2\",\"score\":14,\"snapshotAgeSeconds\":5,\"tier\":\"preferred\"}],\"fetched\":true,\"score\":14,\"selected\":\"2\",\"tier\":\"preferred\"}")
     }
 
-    @Test("snapshotAgeSeconds is nullable and round-trips")
-    func nullableAge() throws {
+    @Test("snapshotAgeSeconds is omitted when nil and round-trips")
+    func omittedAge() throws {
         let report = BestAuthReport(
             selected: "1",
             tier: "lastResort",
@@ -35,7 +35,9 @@ struct BestAuthReportTests {
         let decoded = try JSONDecoder().decode(BestAuthReport.self, from: data)
         #expect(decoded == report)
         #expect(decoded.candidates.first?.snapshotAgeSeconds == nil)
-        #expect(try report.jsonString().contains("\"snapshotAgeSeconds\":null"))
+        // The synthesized encoder omits the key entirely when nil; a decoder
+        // restores it to nil, so the contract stays stable for consumers.
+        #expect(!(try report.jsonString().contains("snapshotAgeSeconds")))
     }
 
     @Test("tier report names map from selector tiers")

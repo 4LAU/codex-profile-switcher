@@ -63,4 +63,31 @@ public struct UsageCache: Codable, Equatable {
             [String: ExhaustionOverride].self,
             forKey: .exhaustionOverrides) ?? [:]
     }
+
+    /// Returns a copy of this cache with any exhaustion overrides found on disk
+    /// (but absent in memory) merged back in. A concurrent writer
+    /// (`mark-exhausted`) may have added overrides between our reads, so this
+    /// keeps the upcoming write from clobbering them.
+    ///
+    /// The merge is purely additive: an override already present in this copy
+    /// wins, and `self` is never mutated. Pass `excluding` to skip merging a
+    /// specific profile's disk override — used when that profile's override was
+    /// deliberately removed in memory, so the removal still sticks on disk while
+    /// every other profile's concurrent override is preserved.
+    public func mergingDiskOverrides(
+        fromCacheAt url: URL,
+        excluding excludedID: String? = nil,
+        decoder: JSONDecoder
+    ) -> UsageCache {
+        guard let diskData = try? Data(contentsOf: url),
+              let diskCache = try? decoder.decode(UsageCache.self, from: diskData) else {
+            return self
+        }
+        var merged = self
+        for (id, override) in diskCache.exhaustionOverrides
+        where id != excludedID && merged.exhaustionOverrides[id] == nil {
+            merged.exhaustionOverrides[id] = override
+        }
+        return merged
+    }
 }
