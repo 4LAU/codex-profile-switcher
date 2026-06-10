@@ -87,14 +87,29 @@ public struct LegacyKeychainAuthVault: AuthVault {
 
         if dataOnlyStatus == errSecItemNotFound {
             let addStatus = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
+            if addStatus == errSecSuccess {
+                return
+            }
+            // A concurrent writer may have created the item between our update and
+            // add. The item now exists, so retry the data-only update once.
+            if addStatus == errSecDuplicateItem {
+                let retryStatus = SecItemUpdate(
+                    self.itemQuery(profileID: profileID) as CFDictionary,
+                    dataOnly as CFDictionary)
+                if retryStatus == errSecSuccess {
+                    return
+                }
                 throw KeychainAuthVaultError.operationFailed(
                     operation: "save auth blob",
                     profileID: profileID,
-                    status: addStatus
+                    status: retryStatus
                 )
             }
-            return
+            throw KeychainAuthVaultError.operationFailed(
+                operation: "save auth blob",
+                profileID: profileID,
+                status: addStatus
+            )
         }
 
         let withAccessible: [CFString: Any] = [

@@ -137,8 +137,7 @@ fi
   "$APPCAST_WORK_DIR"
 
 cp "$APPCAST_WORK_DIR/appcast.xml" "$ROOT_DIR/appcast.xml"
-if grep -q '<enclosure' "$ROOT_DIR/appcast.xml" &&
-  grep '<enclosure' "$ROOT_DIR/appcast.xml" | grep -vq 'sparkle:edSignature='; then
+if grep -q '<enclosure' "$ROOT_DIR/appcast.xml" && grep '<enclosure' "$ROOT_DIR/appcast.xml" | grep -v 'sparkle:edSignature=' | grep -q .; then
   fail "generated Sparkle appcast contains an unsigned update enclosure."
 fi
 log "Updated appcast.xml"

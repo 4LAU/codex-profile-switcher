@@ -34,18 +34,36 @@ public struct PreparedProfileSwitch {
     @discardableResult
     public func commit() throws -> ProfileSwitchCommitOutcome {
         let snapshots = try ProfileSwitchFileSnapshots.capture(paths: self.paths, fileManager: self.fileManager)
+        // Capture the outgoing profile's current vault blob before overwriting it
+        // so a rollback can restore the vault to match the restored files. If the
+        // capture fails or no blob existed, `preSaveOutgoingVaultBlob` is nil and
+        // rollback will best-effort delete the entry we are about to write.
+        var didSaveOutgoingVaultBlob = false
+        var preSaveOutgoingVaultBlob: Data?
         if let outgoingProfileID, let outgoingLiveData {
+            preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
             try self.vault.saveAuthBlob(outgoingLiveData, profileID: outgoingProfileID)
+            didSaveOutgoingVaultBlob = true
         }
         do {
             try AtomicFileWriter.write(self.targetData, to: self.paths.liveAuthURL, fileManager: self.fileManager)
         } catch {
-            throw self.rollbackWriteFailure(error, path: self.paths.liveAuthURL, snapshots: snapshots)
+            throw self.rollbackWriteFailure(
+                error,
+                path: self.paths.liveAuthURL,
+                snapshots: snapshots,
+                didSaveOutgoingVaultBlob: didSaveOutgoingVaultBlob,
+                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob)
         }
         do {
             try ProfileConfigStore(paths: self.paths, fileManager: self.fileManager).saveActiveProfile(self.profileID)
         } catch {
-            throw self.rollbackWriteFailure(error, path: self.paths.configURL, snapshots: snapshots)
+            throw self.rollbackWriteFailure(
+                error,
+                path: self.paths.configURL,
+                snapshots: snapshots,
+                didSaveOutgoingVaultBlob: didSaveOutgoingVaultBlob,
+                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob)
         }
         return .committed
     }
@@ -53,9 +71,24 @@ public struct PreparedProfileSwitch {
     private func rollbackWriteFailure(
         _ error: Error,
         path: URL,
-        snapshots: ProfileSwitchFileSnapshots
+        snapshots: ProfileSwitchFileSnapshots,
+        didSaveOutgoingVaultBlob: Bool,
+        preSaveOutgoingVaultBlob: Data?
     ) -> ProfileSwitchCommitError {
         snapshots.restore(fileManager: self.fileManager)
+        if didSaveOutgoingVaultBlob, let outgoingProfileID {
+            do {
+                if let preSaveOutgoingVaultBlob {
+                    try self.vault.saveAuthBlob(preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
+                } else {
+                    try self.vault.deleteAuthBlob(profileID: outgoingProfileID)
+                }
+            } catch {
+                CoreLogger.error(
+                    "Failed to roll back outgoing profile vault entry after switch write failure",
+                    metadata: ["profile": outgoingProfileID, "error": error.localizedDescription])
+            }
+        }
         return ProfileSwitchCommitError(
             outcome: .rolledBackAfterWriteFailure(
                 ProfileSwitchWriteFailure(path: path.path, underlyingError: error)))
@@ -245,8 +278,29 @@ public struct ProfileConfigStore {
     }
 
     public func loadConfig() -> AppConfig? {
-        guard let data = try? Data(contentsOf: self.paths.configURL) else { return nil }
-        return try? JSONDecoder().decode(AppConfig.self, from: data)
+        let configURL = self.paths.configURL
+        let data: Data
+        do {
+            data = try Data(contentsOf: configURL)
+        } catch {
+            // File absent is the common, expected case (no profile config yet) and
+            // is not logged. A present-but-unreadable file is surfaced so config
+            // corruption is not silently swallowed.
+            if self.fileManager.fileExists(atPath: configURL.path) {
+                CoreLogger.error(
+                    "Config file present but unreadable",
+                    metadata: ["path": configURL.path, "error": error.localizedDescription])
+            }
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(AppConfig.self, from: data)
+        } catch {
+            CoreLogger.error(
+                "Config file present but could not be decoded",
+                metadata: ["path": configURL.path, "error": error.localizedDescription])
+            return nil
+        }
     }
 
     public func saveActiveProfileIfMissing(_ profileID: String) throws {

@@ -30,7 +30,7 @@ public struct FileAuthVault: AuthVault {
     }
 
     public func loadAuthBlob(profileID: String) throws -> Data? {
-        let url = self.authURL(profileID: profileID)
+        let url = try self.authURL(profileID: profileID)
         guard self.fileManager.fileExists(atPath: url.path) else {
             return nil
         }
@@ -39,7 +39,7 @@ public struct FileAuthVault: AuthVault {
 
     public func saveAuthBlob(_ data: Data, profileID: String) throws {
         try self.ensureRoot()
-        let url = self.authURL(profileID: profileID)
+        let url = try self.authURL(profileID: profileID)
         let temp = self.root.appendingPathComponent(".\(profileID).json.tmp-\(UUID().uuidString)")
         try data.write(to: temp, options: .withoutOverwriting)
         do {
@@ -56,22 +56,29 @@ public struct FileAuthVault: AuthVault {
     }
 
     public func deleteAuthBlob(profileID: String) throws {
-        let url = self.authURL(profileID: profileID)
+        let url = try self.authURL(profileID: profileID)
         if self.fileManager.fileExists(atPath: url.path) {
             try self.fileManager.removeItem(at: url)
         }
     }
 
     public func hasAuthBlob(profileID: String) throws -> Bool {
-        self.fileManager.fileExists(atPath: self.authURL(profileID: profileID).path)
+        self.fileManager.fileExists(atPath: try self.authURL(profileID: profileID).path)
     }
 
     public func diagnostics() -> AuthVaultDiagnostics {
         AuthVaultDiagnostics(activeBackend: .file)
     }
 
-    private func authURL(profileID: String) -> URL {
-        self.root.appendingPathComponent("\(profileID).json")
+    // Defense-in-depth: reject profileIDs that fail the same rule
+    // `ProfileValidator` enforces so a malformed or path-traversing ID cannot
+    // escape the vault root. Throws `AuthError.notFound` (the closest existing
+    // error) rather than introducing a new case.
+    private func authURL(profileID: String) throws -> URL {
+        guard ProfileValidator.isValid(profileID) else {
+            throw AuthError.notFound
+        }
+        return self.root.appendingPathComponent("\(profileID).json")
     }
 
     private func ensureRoot() throws {
