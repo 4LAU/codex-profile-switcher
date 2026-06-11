@@ -68,6 +68,14 @@ final class ProfileStore {
         if let authVault {
             self.authVault = authVault
             self.authStorageDescription = "custom auth vault"
+        } else if !ProcessSigningIdentity.isStable {
+            // Unsigned dev builds never touch the real Keychain: every rebuild
+            // has a new code identity, which would trigger a consent prompt
+            // per saved profile. They get a separate file-based dev vault.
+            self.authVault = FileAuthVault(root: paths.devAuthStoreURL)
+            self.authStorageDescription = "file auth vault (unsigned dev build)"
+            AppLogger.info("Auth vault selected",
+                           metadata: ["backend": "file", "reason": "unsigned dev build"])
         } else {
             let vault = LegacyKeychainAuthVault(service: keychainService)
             self.authVault = vault

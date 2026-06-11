@@ -65,19 +65,19 @@ codex-profile-switcher
 The menu bar app is installed to `~/.local/bin/codex-profile-switcher`, and the
 matching Swift CLI helper is installed to `~/.local/bin/codex-profile`.
 
-**Keychain prompts when building from source.** Keychain item ACLs trust the
+**No Keychain prompts for source builds.** Keychain item ACLs trust the
 binary's code-signing identity. The DMG and Homebrew builds are Developer
 ID-signed, so the one-time "Always Allow" per profile holds across updates.
-Self-built binaries are ad-hoc signed by default — every rebuild looks like a
-new program to macOS, which re-prompts per profile. If you have any Apple
-signing certificate (a free Apple ID personal team works), install a stably
-signed CLI with:
+Self-built binaries are ad-hoc signed — every rebuild looks like a new program
+to macOS — so they never touch the real Keychain at all: they automatically use
+a separate file-based vault at `~/.codex-switcher/dev-auth-store` (0600 files,
+the same protection Codex itself uses for `~/.codex/auth.json`). No Apple
+account or certificate is needed, and no prompts appear. To build a CLI that
+shares the real Keychain profiles, sign it with any Apple certificate:
 
 ```bash
 make install-cli APP_IDENTITY="Apple Development: you@example.com (TEAMID)"
 ```
-
-Without one, expect a round of Keychain prompts after each rebuild.
 
 If Codex is not installed at `/Applications/Codex.app`, set `CODEX_APP` or
 `CODEX_CLI` before using the helper.

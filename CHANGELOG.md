@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Changed
+
+- Unsigned (ad-hoc) builds of the app and CLI no longer touch the macOS Keychain. Every rebuild of an unsigned binary has a new code identity, which made macOS show a consent prompt per saved profile after each rebuild. Unsigned builds now automatically use a separate file-based dev vault at `~/.codex-switcher/dev-auth-store` with a one-line notice; signed builds (releases, `make install-cli`) keep using the Keychain unchanged.
+
 ## 0.4.0 -- 2026-06-11
 
 ### Added

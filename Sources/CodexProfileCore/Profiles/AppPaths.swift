@@ -53,4 +53,10 @@ public struct AppPaths {
     public var tempRoot: URL {
         self.switcherHome.appendingPathComponent("tmp", isDirectory: true)
     }
+
+    /// File-based auth vault used by unsigned dev builds, which never touch
+    /// the real Keychain (see ProcessSigningIdentity).
+    public var devAuthStoreURL: URL {
+        self.switcherHome.appendingPathComponent("dev-auth-store", isDirectory: true)
+    }
 }

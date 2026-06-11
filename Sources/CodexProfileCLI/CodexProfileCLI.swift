@@ -1368,45 +1368,37 @@ enum CodexProfileCLI {
         ProcessInfo.processInfo.environment[key]
     }
 
+    /// Unsigned (ad-hoc) builds never touch the real Keychain: every rebuild
+    /// has a new code identity, which would trigger a macOS consent prompt per
+    /// saved profile. They get a separate file-based dev vault instead (the
+    /// CodexBar pattern). Signed builds (`make install-cli`, releases) use the
+    /// Keychain and share the real profiles.
+    private static let devVaultActive: Bool = {
+        if let path = ProcessInfo.processInfo.environment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"],
+           !path.isEmpty {
+            return false
+        }
+        return !ProcessSigningIdentity.isStable
+    }()
+
+    private static var didNoteDevVault = false
+
     private static func makeVault(interactionAllowed: Bool = true) -> AuthVault {
         if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
             return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
         }
-        self.warnIfAdHocSignedOnce()
+        if self.devVaultActive {
+            if !self.didNoteDevVault {
+                self.didNoteDevVault = true
+                fputs("""
+                notice: unsigned dev build - using file auth vault at \(self.paths.devAuthStoreURL.path) \
+                (the macOS Keychain is not touched). Build a signed CLI with `make install-cli` \
+                to share the real Keychain profiles.\n
+                """, stderr)
+            }
+            return FileAuthVault(root: self.paths.devAuthStoreURL)
+        }
         return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
-    }
-
-    private static var didWarnAdHocSigned = false
-
-    /// Keychain item ACLs trust the binary's stable signing identity. An
-    /// ad-hoc build has a unique per-build identity, so macOS shows a consent
-    /// prompt per saved profile on every rebuild. Warn loudly the first time a
-    /// real Keychain vault is created from such a binary; `make install-cli`
-    /// is the supported way to install a correctly signed CLI.
-    private static func warnIfAdHocSignedOnce() {
-        guard !self.didWarnAdHocSigned else { return }
-        self.didWarnAdHocSigned = true
-        guard self.binaryLacksStableSigningIdentity() else { return }
-        fputs("""
-        warning: this codex-profile binary is ad-hoc signed (no Developer ID team). \
-        macOS Keychain will re-prompt for every profile on every rebuild. \
-        Install a signed binary with `make install-cli`.\n
-        """, stderr)
-    }
-
-    private static func binaryLacksStableSigningIdentity() -> Bool {
-        var code: SecCode?
-        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
-              let staticCode else { return false }
-        var info: CFDictionary?
-        guard SecCodeCopySigningInformation(
-            staticCode,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
-            &info) == errSecSuccess,
-            let dict = info as? [String: Any] else { return false }
-        return dict[kSecCodeInfoTeamIdentifier as String] == nil
     }
 
     private static func vaultLocation(profile: String) -> String {
@@ -1415,6 +1407,9 @@ enum CodexProfileCLI {
                 .appendingPathComponent("\(profile).json")
                 .standardizedFileURL
                 .path
+        }
+        if self.devVaultActive {
+            return self.paths.devAuthStoreURL.appendingPathComponent("\(profile).json").path
         }
         return "keychain://\(self.keychainService)/\(profile)"
     }

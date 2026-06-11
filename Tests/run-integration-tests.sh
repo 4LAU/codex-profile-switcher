@@ -116,6 +116,17 @@ run_helper() {
     "$HELPER" "$@"
 }
 
+# Like run_helper but WITHOUT CODEX_PROFILE_TEST_AUTH_STORE_DIR, exercising the
+# real vault-selection path (unsigned test binary -> file dev vault).
+run_helper_dev() {
+  CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
+    CODEX_BUNDLED_CLI="$FAKE_APP" \
+    CODEX_CLI="$FAKE_CODEX" \
+    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
+    "$HELPER" "$@"
+}
+
 run_helper_with_app() {
   local app_bin="$1"
   shift
@@ -549,6 +560,28 @@ JSON
   [[ "$selected" == "ExhaustB" ]] || fail "best-auth did not skip exhausted profile"
 }
 
+test_unsigned_build_uses_dev_vault_not_keychain() {
+  # Only meaningful for an ad-hoc test binary; a signed binary would route to
+  # the real Keychain, which tests must never touch.
+  if ! codesign -dv "$HELPER" 2>&1 | grep -q "TeamIdentifier=not set"; then
+    printf 'skip: helper binary is signed; dev-vault gate not exercised\n'
+    return 0
+  fi
+  reset_home
+  local login="$WORK_DIR/dev-vault-login.json"
+  make_api_auth "$login" "sk-test-dev-vault-1111111111" "dev-vault"
+
+  FAKE_CODEX_LOGIN_AUTH="$login" run_helper_dev login DevVault \
+    >/dev/null 2>"$WORK_DIR/dev-vault.err" || fail "login via dev vault failed"
+
+  grep -q "unsigned dev build" "$WORK_DIR/dev-vault.err" \
+    || fail "dev-vault notice was not printed"
+  [[ -f "$TEST_HOME/.codex-switcher/dev-auth-store/DevVault.json" ]] \
+    || fail "auth was not saved to the file dev vault"
+  cmp -s "$TEST_HOME/.codex-switcher/dev-auth-store/DevVault.json" "$login" \
+    || fail "dev vault saved wrong auth content"
+}
+
 test_import_auth_preserves_on_missing_identity() {
   reset_home
   local existing="$WORK_DIR/token-only-existing.json"
@@ -753,6 +786,7 @@ test_exec_rotates_on_usage_limit
 test_exec_does_not_rotate_on_ordinary_failure
 test_exec_cleans_temp_home_when_command_missing
 test_exec_gives_up_when_all_profiles_limited
+test_unsigned_build_uses_dev_vault_not_keychain
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
 
