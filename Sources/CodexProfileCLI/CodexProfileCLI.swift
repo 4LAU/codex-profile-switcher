@@ -1372,7 +1372,41 @@ enum CodexProfileCLI {
         if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
             return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
         }
+        self.warnIfAdHocSignedOnce()
         return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
+    }
+
+    private static var didWarnAdHocSigned = false
+
+    /// Keychain item ACLs trust the binary's stable signing identity. An
+    /// ad-hoc build has a unique per-build identity, so macOS shows a consent
+    /// prompt per saved profile on every rebuild. Warn loudly the first time a
+    /// real Keychain vault is created from such a binary; `make install-cli`
+    /// is the supported way to install a correctly signed CLI.
+    private static func warnIfAdHocSignedOnce() {
+        guard !self.didWarnAdHocSigned else { return }
+        self.didWarnAdHocSigned = true
+        guard self.binaryLacksStableSigningIdentity() else { return }
+        fputs("""
+        warning: this codex-profile binary is ad-hoc signed (no Developer ID team). \
+        macOS Keychain will re-prompt for every profile on every rebuild. \
+        Install a signed binary with `make install-cli`.\n
+        """, stderr)
+    }
+
+    private static func binaryLacksStableSigningIdentity() -> Bool {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return false }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &info) == errSecSuccess,
+            let dict = info as? [String: Any] else { return false }
+        return dict[kSecCodeInfoTeamIdentifier as String] == nil
     }
 
     private static func vaultLocation(profile: String) -> String {
