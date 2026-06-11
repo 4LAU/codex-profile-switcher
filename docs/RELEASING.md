@@ -51,11 +51,23 @@ NOTARY_KEYCHAIN_PROFILE=notarytool
 ## One-Time Homebrew Dispatch Setup
 
 The source repository dispatches a workflow in `4LAU/homebrew-tap` after a
-GitHub Release is published. Add a fine-grained token as
-`HOMEBREW_TAP_TOKEN` in this repository's GitHub Actions secrets.
+GitHub Release is published. The dispatch token is gated behind a protected
+GitHub environment so it is only exposed to release runs:
 
-The token should only have access to `4LAU/homebrew-tap`, and only needs
-Actions read/write permission.
+1. Create a tag ruleset that restricts creation, update, and deletion of
+   `v*` tags to repository admins (Settings → Rules → Rulesets).
+2. Create an environment named `release` (Settings → Environments) and limit
+   its deployment branches and tags to the `v*` tag pattern plus the `main`
+   branch. `main` is required because the manual `workflow_dispatch` fallback
+   runs on the main branch ref.
+3. Create a fine-grained personal access token with access to only
+   `4LAU/homebrew-tap` and Actions read/write permission. Add it as an
+   **environment secret** named `HOMEBREW_TAP_TOKEN` under the `release`
+   environment — not as a repository-level secret.
+
+The `update-cask` job in `.github/workflows/update-homebrew.yml` declares
+`environment: release`, which is what makes GitHub apply the gating above
+before handing the token to a run.
 
 ## Build a Public DMG
 
