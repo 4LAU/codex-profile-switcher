@@ -569,6 +569,145 @@ test_import_auth_preserves_on_missing_identity() {
   assert_same_file "$exported" "$existing" "import-auth overwrote auth with unverifiable identity"
 }
 
+write_exec_test_state() {
+  # Two oauth profiles; RotateA has the most remaining quota so exec picks it
+  # first. Live usage fetches fail fast (fake codex), falling back to cache.
+  reset_home
+  local saved_a="$WORK_DIR/rotate-a.json"
+  local saved_b="$WORK_DIR/rotate-b.json"
+  make_oauth_auth "$saved_a" "access-rotate-a" "refresh-a" "acct-rotate-a"
+  make_oauth_auth "$saved_b" "access-rotate-b" "refresh-b" "acct-rotate-b"
+  save_auth "RotateA" "$saved_a"
+  save_auth "RotateB" "$saved_b"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  cat > "$TEST_HOME/.codex-switcher/config.json" <<'JSON'
+{
+  "activeProfile" : "RotateA",
+  "profiles" : [
+    {"id" : "RotateA", "label" : "Rotate A"},
+    {"id" : "RotateB", "label" : "Rotate B"}
+  ]
+}
+JSON
+  cat > "$TEST_HOME/.codex-switcher/cache.json" <<'JSON'
+{
+  "snapshots" : {
+    "RotateA" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 10,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 10,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    },
+    "RotateB" : {
+      "planType" : "team",
+      "creditsRemaining" : null,
+      "primaryUsedPercent" : 50,
+      "primaryResetAt" : "2030-01-01T00:00:00Z",
+      "secondaryUsedPercent" : 50,
+      "secondaryResetAt" : "2030-01-01T00:00:00Z",
+      "fetchedAt" : "2026-05-30T12:00:00Z"
+    }
+  }
+}
+JSON
+}
+
+has_exhaustion_override() {
+  plutil -extract "exhaustionOverrides.$1" json \
+    -o /dev/null "$TEST_HOME/.codex-switcher/cache.json" >/dev/null 2>&1
+}
+
+test_exec_rotates_on_usage_limit() {
+  write_exec_test_state
+  local attempt_log="$WORK_DIR/exec-attempts.log"
+  local target="$WORK_DIR/fake-exec-target"
+  local exported_b="$WORK_DIR/exported-rotate-b.json"
+  : > "$attempt_log"
+  cat > "$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if grep -q "access-rotate-a" "\$CODEX_HOME/auth.json"; then
+  echo "A" >> "$attempt_log"
+  echo "ERROR: 429 Too Many Requests - usage limit reached" >&2
+  exit 1
+fi
+echo "B" >> "$attempt_log"
+printf '{\n  "tokens" : {\n    "access_token" : "access-rotate-b-refreshed",\n    "refresh_token" : "refresh-b-2",\n    "account_id" : "acct-rotate-b"\n  }\n}\n' > "\$CODEX_HOME/auth.json"
+cat
+echo "rotate-ok"
+EOF
+  chmod +x "$target"
+
+  local out
+  out="$(printf 'stdin-marker\n' | run_helper exec --timeout 10 -- "$target" 2>"$WORK_DIR/exec-rotate.err")" \
+    || fail "exec did not succeed after rotation ($(cat "$WORK_DIR/exec-rotate.err"))"
+
+  grep -q "stdin-marker" <<<"$out" || fail "exec did not pass stdin through to the child"
+  grep -q "rotate-ok" <<<"$out" || fail "exec did not pass child stdout through"
+  [[ "$(cat "$attempt_log")" == "A
+B" ]] || fail "exec attempts were not RotateA then RotateB (got: $(tr '\n' ' ' < "$attempt_log"))"
+  has_exhaustion_override RotateA || fail "exec did not mark RotateA exhausted"
+  has_exhaustion_override RotateB && fail "exec wrongly marked RotateB exhausted"
+  export_auth "RotateB" "$exported_b"
+  grep -q "access-rotate-b-refreshed" "$exported_b" \
+    || fail "exec did not import the refreshed RotateB auth back"
+  [[ -z "$(ls -A "$TEST_HOME/.codex-switcher/tmp" 2>/dev/null)" ]] \
+    || fail "exec left temp homes behind"
+  [[ ! -f "$TEST_HOME/.codex/auth.json" ]] \
+    || fail "exec touched the live ~/.codex/auth.json"
+}
+
+test_exec_does_not_rotate_on_ordinary_failure() {
+  write_exec_test_state
+  local attempt_log="$WORK_DIR/exec-plain-fail.log"
+  local target="$WORK_DIR/fake-exec-plain-fail"
+  : > "$attempt_log"
+  cat > "$target" <<EOF
+#!/usr/bin/env bash
+echo "ran" >> "$attempt_log"
+echo "boom: ordinary failure" >&2
+exit 3
+EOF
+  chmod +x "$target"
+
+  local status=0
+  run_helper exec --timeout 10 -- "$target" >/dev/null 2>"$WORK_DIR/exec-plain-fail.err" || status=$?
+  [[ "$status" -eq 3 ]] || fail "exec did not pass through child exit code 3 (got $status)"
+  [[ "$(wc -l < "$attempt_log" | tr -d ' ')" == "1" ]] \
+    || fail "exec retried an ordinary (non-usage-limit) failure"
+  has_exhaustion_override RotateA && fail "exec marked RotateA exhausted on an ordinary failure"
+  has_exhaustion_override RotateB && fail "exec marked RotateB exhausted on an ordinary failure"
+  grep -q "boom: ordinary failure" "$WORK_DIR/exec-plain-fail.err" \
+    || fail "exec did not pass child stderr through"
+}
+
+test_exec_gives_up_when_all_profiles_limited() {
+  write_exec_test_state
+  local attempt_log="$WORK_DIR/exec-all-limited.log"
+  local target="$WORK_DIR/fake-exec-all-limited"
+  : > "$attempt_log"
+  cat > "$target" <<EOF
+#!/usr/bin/env bash
+echo "ran" >> "$attempt_log"
+echo "You've hit your usage limit." >&2
+exit 1
+EOF
+  chmod +x "$target"
+
+  if run_helper exec --max-attempts 2 --timeout 10 -- "$target" >/dev/null 2>"$WORK_DIR/exec-all-limited.err"; then
+    fail "exec succeeded even though every profile was usage-limited"
+  fi
+  [[ "$(wc -l < "$attempt_log" | tr -d ' ')" == "2" ]] \
+    || fail "exec did not run exactly --max-attempts times (got $(wc -l < "$attempt_log"))"
+  has_exhaustion_override RotateA || fail "exec did not mark RotateA exhausted"
+  has_exhaustion_override RotateB || fail "exec did not mark RotateB exhausted"
+  grep -q "usage limit hit on 2 profile(s)" "$WORK_DIR/exec-all-limited.err" \
+    || fail "exec did not explain that all attempts were usage-limited"
+}
+
 test_import_auth_accepts_same_identity_refresh() {
   reset_home
   local existing="$WORK_DIR/oauth-existing.json"
@@ -600,6 +739,9 @@ test_login_rejects_duplicate_auth_and_preserves_target_auth
 test_keychain_repair_preserves_saved_auth
 test_best_auth_exports_lowest_usage_configured_profile
 test_mark_exhausted_persists_to_cache_and_best_auth_skips_it
+test_exec_rotates_on_usage_limit
+test_exec_does_not_rotate_on_ordinary_failure
+test_exec_gives_up_when_all_profiles_limited
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
 

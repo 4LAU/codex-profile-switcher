@@ -14,6 +14,19 @@ private enum CLIError: LocalizedError {
     }
 }
 
+/// PID of the child process `exec` is currently running, read by the C signal
+/// handler below (which cannot capture context). 0 when no child is active.
+private nonisolated(unsafe) var execChildPID: pid_t = 0
+
+/// Forwards SIGINT/SIGTERM to the active `exec` child so the wrapper survives
+/// long enough to import refreshed auth and remove its temp home.
+private func execForwardSignal(_ signalNumber: Int32) {
+    let pid = execChildPID
+    if pid > 0 {
+        kill(pid, signalNumber)
+    }
+}
+
 /// Stable process exit codes. External tooling depends on these — keep stable.
 private enum ExitCode {
     static let success: Int32 = 0
@@ -56,6 +69,7 @@ enum CodexProfileCLI {
             case "doctor": try self.commandDoctor(args)
             case "keychain-repair": try self.commandKeychainRepair()
             case "best-auth": try self.commandBestAuth(args)
+            case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
             case "import-auth": try self.commandImportAuth(args)
             case "help", "-h", "--help": self.usage()
@@ -85,7 +99,14 @@ enum CodexProfileCLI {
           \(self.program) doctor
           \(self.program) keychain-repair
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
+          \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
           \(self.program) import-auth --dir <path> --profile <id>
+
+        exec runs <command> with CODEX_HOME pointed at the best profile's
+        credentials. If the command fails with a usage-limit error, the profile
+        is marked exhausted and the command is retried on the next best profile
+        (up to --max-attempts, default 3). stdin and stdout pass through
+        untouched; refreshed tokens are written back to the profile afterwards.
 
         best-auth picks the profile with the most remaining quota for scripted
         account rotation. It fetches live usage (falling back to the cached
@@ -406,7 +427,6 @@ enum CodexProfileCLI {
         // selects the fail-closed Keychain vault so reads can never block on a
         // modal consent prompt that has no UI to render.
         let interactive = self.stdinIsTTY && !options.nonInteractive
-        let bestAuthVault = self.makeVault(interactionAllowed: interactive)
 
         // Watchdog guarantees the process dies even if something below blocks,
         // so callers in background shells are never stranded.
@@ -414,11 +434,51 @@ enum CodexProfileCLI {
             seconds: options.timeout,
             diagnostic: "best-auth timed out after \(Int(options.timeout))s; the command was unable to complete")
 
-        // `--exclude ""` and absent `--exclude` both parse to an empty set.
-        let excludeIDs = Set((options.excludeCSV ?? "")
+        let dirURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL
+        let outcome = try self.performBestAuth(
+            dirURL: dirURL,
+            excludeIDs: self.parseExcludeIDs(options.excludeCSV),
+            interactive: interactive)
+
+        if options.json {
+            let report = self.makeBestAuthReport(
+                result: outcome.result,
+                candidates: outcome.candidates,
+                cache: outcome.cache,
+                fetchedAny: outcome.fetchedAny,
+                now: outcome.now)
+            print(try report.jsonString())
+        } else {
+            print(outcome.result.profileID)
+        }
+    }
+
+    /// `--exclude ""` and absent `--exclude` both parse to an empty set.
+    private static func parseExcludeIDs(_ csv: String?) -> Set<String> {
+        Set((csv ?? "")
             .split(separator: ",")
             .map(String.init)
             .filter { !$0.isEmpty })
+    }
+
+    private struct BestAuthOutcome {
+        let result: ProfileSelector.Result
+        let candidates: [ProfileCandidate]
+        let cache: UsageCache
+        let fetchedAny: Bool
+        let now: Date
+    }
+
+    /// Shared selection core for `best-auth` and `exec`: picks the profile with
+    /// the most remaining quota and writes its auth.json (0600) plus a copy of
+    /// the live config.toml into `dirURL`. Failures throw the documented stable
+    /// exit codes (2/3/4/6).
+    private static func performBestAuth(
+        dirURL: URL,
+        excludeIDs: Set<String>,
+        interactive: Bool
+    ) throws -> BestAuthOutcome {
+        let bestAuthVault = self.makeVault(interactionAllowed: interactive)
 
         let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
 
@@ -505,7 +565,6 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(1)
         }
 
-        let dirURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL
         try self.ensurePrivateDir(dirURL)
         try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
 
@@ -516,17 +575,12 @@ enum CodexProfileCLI {
             try self.fileManager.copyItem(at: liveConfig, to: destination)
         }
 
-        if options.json {
-            let report = self.makeBestAuthReport(
-                result: result,
-                candidates: candidates,
-                cache: cache,
-                fetchedAny: fetchResult.fetchedAny,
-                now: now)
-            print(try report.jsonString())
-        } else {
-            print(result.profileID)
-        }
+        return BestAuthOutcome(
+            result: result,
+            candidates: candidates,
+            cache: cache,
+            fetchedAny: fetchResult.fetchedAny,
+            now: now)
     }
 
     private struct SelfFetchResult {
@@ -738,14 +792,17 @@ enum CodexProfileCLI {
             blockedUntil = Date().addingTimeInterval(3600)
         }
 
+        try self.markProfileExhausted(profile, until: blockedUntil, source: "codex_exec")
+        self.note("Marked '\(profile)' exhausted until \(ISO8601DateFormatter().string(from: blockedUntil))")
+    }
+
+    private static func markProfileExhausted(_ profile: String, until blockedUntil: Date, source: String) throws {
         var cache = self.loadCache()
         cache.exhaustionOverrides[profile] = ExhaustionOverride(
             blockedUntil: blockedUntil,
             reason: "rate_limit",
-            source: "codex_exec")
-
+            source: source)
         try self.saveCache(cache)
-        self.note("Marked '\(profile)' exhausted until \(ISO8601DateFormatter().string(from: blockedUntil))")
     }
 
     private static func commandImportAuth(_ args: [String]) throws {
@@ -777,8 +834,16 @@ enum CodexProfileCLI {
         }
         try self.validateProfile(profile)
         self.repairKeychainAccessIfNeeded()
+        try self.importRefreshedAuth(
+            dirURL: URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL,
+            profile: profile)
+    }
 
-        let authURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("auth.json")
+    /// Write-back core shared by `import-auth` and `exec`: saves `dirURL`'s
+    /// auth.json over the stored credential for `profile`, but only when it
+    /// validates and its identity fingerprint matches the stored one.
+    private static func importRefreshedAuth(dirURL: URL, profile: String) throws {
+        let authURL = dirURL.appendingPathComponent("auth.json")
         guard let updatedData = try? Data(contentsOf: authURL) else {
             fputs("No auth data found at \(authURL.path)\n", stderr)
             throw CLIError.exitStatus(1)
@@ -815,6 +880,231 @@ enum CodexProfileCLI {
         }
 
         try self.vault.saveAuthBlob(updatedData, profileID: profile)
+    }
+
+    private struct ExecOptions {
+        var maxAttempts = 3
+        var excludeCSV: String?
+        var timeout: TimeInterval = 30
+        var command: [String] = []
+    }
+
+    private static var execUsage: String {
+        "Usage: \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]"
+    }
+
+    private static func parseExecOptions(_ args: [String]) throws -> ExecOptions {
+        var options = ExecOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--":
+                options.command = Array(args[(i + 1)...])
+                guard !options.command.isEmpty else {
+                    throw CLIError.message(self.execUsage)
+                }
+                return options
+            case "--max-attempts":
+                guard i + 1 < args.count,
+                      let value = Int(args[i + 1]),
+                      (1 ... 20).contains(value) else {
+                    throw CLIError.message("--max-attempts requires a number between 1 and 20")
+                }
+                i += 1
+                options.maxAttempts = value
+            case "--exclude":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--exclude requires a comma-separated list")
+                }
+                i += 1
+                options.excludeCSV = args[i]
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            default:
+                throw CLIError.message("Unknown argument: \(args[i]). \(self.execUsage)")
+            }
+            i += 1
+        }
+        throw CLIError.message(self.execUsage)
+    }
+
+    /// Runs an arbitrary command with CODEX_HOME pointed at the best profile's
+    /// credentials, rotating to the next best profile when the command fails
+    /// with a usage-limit error. The live ~/.codex is never touched; each
+    /// attempt gets a private temp home that is imported back (token refresh)
+    /// and deleted afterwards.
+    private static func commandExec(_ args: [String]) throws {
+        let options = try self.parseExecOptions(args)
+
+        // stdin is routinely a pipe here (`exec -- codex exec - < prompt`), so
+        // interactivity is judged by stderr: a TTY there means a human is
+        // watching and can answer a Keychain consent prompt.
+        let interactive = isatty(2) != 0
+
+        var excludeIDs = self.parseExcludeIDs(options.excludeCSV)
+        var attempt = 1
+        while true {
+            let tempHome = try self.makeTempHome(profile: "exec")
+            let profile: String
+            do {
+                // The watchdog only covers profile selection; it is disarmed
+                // before the child runs so long-running commands are safe.
+                let disarm = self.armWatchdog(
+                    seconds: options.timeout,
+                    diagnostic: "exec: profile selection timed out after \(Int(options.timeout))s")
+                defer { disarm() }
+                profile = try self.performBestAuth(
+                    dirURL: tempHome,
+                    excludeIDs: excludeIDs,
+                    interactive: interactive).result.profileID
+            } catch {
+                try? self.fileManager.removeItem(at: tempHome)
+                if attempt > 1 {
+                    fputs("[codex-profile] no further profiles available after \(attempt - 1) usage-limited attempt(s)\n", stderr)
+                }
+                throw error
+            }
+
+            fputs("[codex-profile] attempt \(attempt)/\(options.maxAttempts): running with profile '\(profile)'\n", stderr)
+            let child = try self.runChild(command: options.command, codexHome: tempHome)
+            try? self.importRefreshedAuth(dirURL: tempHome, profile: profile)
+            try? self.fileManager.removeItem(at: tempHome)
+
+            if child.status == 0 { return }
+            guard Self.looksRateLimited(child.stderrTail) else {
+                throw CLIError.exitStatus(child.status)
+            }
+
+            try? self.markProfileExhausted(profile, until: Date().addingTimeInterval(3600), source: "exec")
+            excludeIDs.insert(profile)
+            guard attempt < options.maxAttempts else {
+                fputs("[codex-profile] usage limit hit on \(options.maxAttempts) profile(s); giving up. Wait for a limit reset or add another profile.\n", stderr)
+                throw CLIError.exitStatus(child.status)
+            }
+            fputs("[codex-profile] profile '\(profile)' hit a usage limit; marked exhausted, rotating\n", stderr)
+            attempt += 1
+        }
+    }
+
+    private struct ChildResult {
+        let status: Int32
+        let stderrTail: String
+    }
+
+    /// Runs the wrapped command with CODEX_HOME set to `codexHome`. stdin and
+    /// stdout are inherited untouched so prompts pipe in and output streams
+    /// out; stderr is teed — passed through live AND captured (bounded) for
+    /// usage-limit detection. SIGINT/SIGTERM are forwarded to the child so the
+    /// wrapper can still clean up its temp home.
+    private static func runChild(command: [String], codexHome: URL) throws -> ChildResult {
+        let name = command[0]
+        let resolved: String
+        if name.contains("/") {
+            resolved = name
+        } else if let found = self.which(name) {
+            resolved = found
+        } else {
+            throw CLIError.message("Command not found on PATH: \(name)")
+        }
+        guard self.fileManager.isExecutableFile(atPath: resolved) else {
+            throw CLIError.message("Command not executable: \(resolved)")
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: resolved)
+        process.arguments = Array(command.dropFirst())
+        var env = ProcessInfo.processInfo.environment
+        env["CODEX_HOME"] = codexHome.path
+        env["PATH"] = self.effectivePATH()
+        process.environment = env
+
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+
+        let tail = BoundedBuffer(limit: 256 * 1024)
+        let drained = DispatchSemaphore(value: 0)
+        let reader = Thread {
+            let handle = stderrPipe.fileHandleForReading
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }
+                tail.append(data)
+                try? FileHandle.standardError.write(contentsOf: data)
+            }
+            drained.signal()
+        }
+        reader.stackSize = 512 * 1024
+
+        try process.run()
+        execChildPID = process.processIdentifier
+        signal(SIGINT, execForwardSignal)
+        signal(SIGTERM, execForwardSignal)
+        reader.start()
+        process.waitUntilExit()
+        drained.wait()
+        signal(SIGINT, SIG_DFL)
+        signal(SIGTERM, SIG_DFL)
+        execChildPID = 0
+
+        let status: Int32
+        if process.terminationReason == .uncaughtSignal {
+            status = 128 + process.terminationStatus
+        } else {
+            status = process.terminationStatus
+        }
+        return ChildResult(status: status, stderrTail: tail.string)
+    }
+
+    /// Bounded byte buffer keeping only the most recent `limit` bytes.
+    private final class BoundedBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limit: Int
+        private var data = Data()
+
+        init(limit: Int) {
+            self.limit = limit
+        }
+
+        func append(_ chunk: Data) {
+            self.lock.lock()
+            self.data.append(chunk)
+            if self.data.count > self.limit {
+                self.data.removeFirst(self.data.count - self.limit)
+            }
+            self.lock.unlock()
+        }
+
+        var string: String {
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            return String(decoding: self.data, as: UTF8.self)
+        }
+    }
+
+    /// Heuristic over the child's stderr for retryable usage-limit failures.
+    /// Only consulted after the child exited non-zero, so these phrases in
+    /// successful output can never trigger a rotation.
+    private static func looksRateLimited(_ stderrText: String) -> Bool {
+        let plain = self.strippingANSI(stderrText).lowercased()
+        if plain.contains("rate limit") || plain.contains("rate_limit")
+            || plain.contains("usage limit") || plain.contains("quota exceeded")
+            || plain.contains("too many requests") {
+            return true
+        }
+        return plain.range(of: #"\b429\b"#, options: .regularExpression) != nil
+    }
+
+    private static func strippingANSI(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"\u{1B}\[[0-9;?]*[ -/]*[@-~]"#,
+            with: "",
+            options: .regularExpression)
     }
 
     private static func readAccountID(from data: Data) -> String? {
@@ -1115,19 +1405,41 @@ enum CodexProfileCLI {
         print(text)
     }
 
-    /// Arms a detached watchdog that force-exits the process after `seconds`.
-    /// Runs on its own thread so it fires even if the main path is blocked in a
-    /// syscall, guaranteeing callers in non-interactive shells are never
-    /// stranded. The thread is daemon-like: if the command finishes first the
-    /// process exits normally and the sleeping thread is torn down with it.
-    private static func armWatchdog(seconds: TimeInterval, diagnostic: String) {
+    /// Arms a detached watchdog that force-exits the process after `seconds`
+    /// unless the returned disarm closure was called first. Runs on its own
+    /// thread so it fires even if the main path is blocked in a syscall,
+    /// guaranteeing callers in non-interactive shells are never stranded. The
+    /// thread is daemon-like: if the command finishes first the process exits
+    /// normally and the sleeping thread is torn down with it. `exec` disarms
+    /// after profile selection so the watchdog never kills the wrapped child.
+    @discardableResult
+    private static func armWatchdog(seconds: TimeInterval, diagnostic: String) -> () -> Void {
+        let state = WatchdogState()
         let thread = Thread {
             Thread.sleep(forTimeInterval: seconds)
+            guard !state.disarmed else { return }
             fputs("\(diagnostic)\n", stderr)
             exit(ExitCode.watchdogTimeout)
         }
         thread.stackSize = 512 * 1024
         thread.start()
+        return { state.disarm() }
+    }
+
+    private final class WatchdogState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isDisarmed = false
+        var disarmed: Bool {
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            return self.isDisarmed
+        }
+
+        func disarm() {
+            self.lock.lock()
+            self.isDisarmed = true
+            self.lock.unlock()
+        }
     }
 
     /// Maps a thrown error to the keychain-interaction exit path when the

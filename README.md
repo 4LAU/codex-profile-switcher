@@ -107,6 +107,7 @@ codex-profile path <profile>
 codex-profile doctor
 codex-profile keychain-repair
 codex-profile best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
+codex-profile exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
 codex-profile import-auth --dir <path> --profile <id>
 ```
 
@@ -165,9 +166,26 @@ codex-profile best-auth --dir /tmp/codex-session --exclude work
 | 6 | Keychain interaction required — run `codex-profile best-auth` once from a terminal to grant access |
 | 7 | Watchdog timeout |
 
+### exec
+
+Runs any command with `CODEX_HOME` pointed at the best profile's credentials, with automatic rotation on usage limits. This is the one-line replacement for hand-rolled `best-auth` / `mark-exhausted` / `import-auth` loops:
+
+```bash
+codex-profile exec -- codex exec --ephemeral -C "$(pwd)" - < prompt.md
+```
+
+Per attempt (up to `--max-attempts`, default 3):
+
+1. Selects the profile with the most remaining quota (same logic and exit codes as `best-auth`) into a private temp directory.
+2. Runs the command with `CODEX_HOME` pointing there. stdin and stdout pass through untouched; stderr passes through and is also scanned.
+3. On success, writes refreshed tokens back to the profile (identity-guarded) and exits 0.
+4. If the command failed and its stderr matches a usage-limit error (`rate limit`, `usage limit`, `429`, `quota exceeded`, `too many requests`), the profile is marked exhausted for an hour and the command retries on the next best profile. Any other failure exits immediately with the child's exit code.
+
+The live `~/.codex` is never touched, so a running Codex Desktop/CLI session is unaffected. Selection failures use the `best-auth` exit codes (2/3/4/6); a selection watchdog (`--timeout`, default 30s) covers only the selection phase, never the wrapped command.
+
 ### import-auth
 
-Writes a refreshed `auth.json` from `--dir` back to the stored credential for `--profile`. Intended as the write-back half of a `best-auth` rotation loop.
+Writes a refreshed `auth.json` from `--dir` back to the stored credential for `--profile`. Intended as the write-back half of a `best-auth` rotation loop — or just use `exec`, which does the full loop for you.
 
 **Identity guard.** Before overwriting, `import-auth` compares the identity fingerprint of the existing stored credential against the incoming file. If they belong to different accounts the write is refused and the command exits 5. This prevents a credential for one account from silently overwriting a different account's profile.
 

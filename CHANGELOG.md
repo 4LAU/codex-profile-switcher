@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- New `codex-profile exec -- <command> [args...]` command: runs any command with `CODEX_HOME` pointed at the best profile's credentials and automatically rotates to the next best profile when the command fails with a usage-limit error (`--max-attempts`, default 3). The exhausted profile is marked unavailable for an hour, refreshed tokens are written back to the profile afterwards, and the live `~/.codex` is never touched. stdin/stdout pass through untouched; the child's exit code is passed through on non-retryable failures.
+
 ## 0.3.0 -- 2026-06-10
 
 ### Added
