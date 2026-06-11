@@ -31,7 +31,7 @@ cask "$CASK_TOKEN" do
   version "$VERSION"
   sha256 "$SHA256"
 
-  url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/CodexProfileSwitcher-#{version}.dmg"
+  url "https://github.com/$GITHUB_REPOSITORY/releases/download/v#{version}/CodexProfileSwitcher-#{version}.dmg"
   name "Codex Profile Switcher"
   desc "Switch OpenAI Codex accounts from the macOS menu bar"
   homepage "https://github.com/$GITHUB_REPOSITORY"
