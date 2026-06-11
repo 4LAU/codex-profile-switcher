@@ -885,7 +885,9 @@ enum CodexProfileCLI {
     private struct ExecOptions {
         var maxAttempts = 3
         var excludeCSV: String?
-        var timeout: TimeInterval = 30
+        // Selection fetches live usage for every profile; with many profiles
+        // that routinely takes 15-20s, so exec defaults higher than best-auth.
+        var timeout: TimeInterval = 60
         var command: [String] = []
     }
 
@@ -951,6 +953,10 @@ enum CodexProfileCLI {
         var attempt = 1
         while true {
             let tempHome = try self.makeTempHome(profile: "exec")
+            // Per-iteration defer: the temp home holds a live credential, so it
+            // must be removed on EVERY exit from this iteration — success,
+            // rotation, or any throw (including runChild failures).
+            defer { try? self.fileManager.removeItem(at: tempHome) }
             let profile: String
             do {
                 // The watchdog only covers profile selection; it is disarmed
@@ -964,7 +970,6 @@ enum CodexProfileCLI {
                     excludeIDs: excludeIDs,
                     interactive: interactive).result.profileID
             } catch {
-                try? self.fileManager.removeItem(at: tempHome)
                 if attempt > 1 {
                     fputs("[codex-profile] no further profiles available after \(attempt - 1) usage-limited attempt(s)\n", stderr)
                 }
@@ -974,7 +979,6 @@ enum CodexProfileCLI {
             fputs("[codex-profile] attempt \(attempt)/\(options.maxAttempts): running with profile '\(profile)'\n", stderr)
             let child = try self.runChild(command: options.command, codexHome: tempHome)
             try? self.importRefreshedAuth(dirURL: tempHome, profile: profile)
-            try? self.fileManager.removeItem(at: tempHome)
 
             if child.status == 0 { return }
             guard Self.looksRateLimited(child.stderrTail) else {
@@ -1041,10 +1045,19 @@ enum CodexProfileCLI {
         }
         reader.stackSize = 512 * 1024
 
-        try process.run()
-        execChildPID = process.processIdentifier
+        // Handlers go in before run(): they no-op while execChildPID == 0, so
+        // a signal in the spawn window is absorbed instead of killing the
+        // wrapper before it can clean up.
         signal(SIGINT, execForwardSignal)
         signal(SIGTERM, execForwardSignal)
+        do {
+            try process.run()
+        } catch {
+            signal(SIGINT, SIG_DFL)
+            signal(SIGTERM, SIG_DFL)
+            throw error
+        }
+        execChildPID = process.processIdentifier
         reader.start()
         process.waitUntilExit()
         drained.wait()

@@ -179,9 +179,9 @@ Per attempt (up to `--max-attempts`, default 3):
 1. Selects the profile with the most remaining quota (same logic and exit codes as `best-auth`) into a private temp directory.
 2. Runs the command with `CODEX_HOME` pointing there. stdin and stdout pass through untouched; stderr passes through and is also scanned.
 3. On success, writes refreshed tokens back to the profile (identity-guarded) and exits 0.
-4. If the command failed and its stderr matches a usage-limit error (`rate limit`, `usage limit`, `429`, `quota exceeded`, `too many requests`), the profile is marked exhausted for an hour and the command retries on the next best profile. Any other failure exits immediately with the child's exit code.
+4. If the command failed and its stderr matches a usage-limit error (`rate limit`, `usage limit`, `429`, `quota exceeded`, `too many requests`), the profile is marked exhausted for an hour and the command retries on the next best profile. Any other failure exits immediately with the child's exit code. Detection scans stderr only — a limit message printed exclusively to stdout is not detected, because stdout streams through verbatim.
 
-The live `~/.codex` is never touched, so a running Codex Desktop/CLI session is unaffected. Selection failures use the `best-auth` exit codes (2/3/4/6); a selection watchdog (`--timeout`, default 30s) covers only the selection phase, never the wrapped command.
+The live `~/.codex` is never touched, so a running Codex Desktop/CLI session is unaffected. Selection failures use the `best-auth` exit codes (2/3/4/6); a selection watchdog (`--timeout`, default 60s) covers only the selection phase, never the wrapped command.
 
 ### import-auth
 

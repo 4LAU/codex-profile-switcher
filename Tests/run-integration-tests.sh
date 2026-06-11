@@ -684,6 +684,16 @@ EOF
     || fail "exec did not pass child stderr through"
 }
 
+test_exec_cleans_temp_home_when_command_missing() {
+  write_exec_test_state
+
+  if run_helper exec --timeout 10 -- /nonexistent/exec-target >/dev/null 2>&1; then
+    fail "exec succeeded with a nonexistent command"
+  fi
+  [[ -z "$(ls -A "$TEST_HOME/.codex-switcher/tmp" 2>/dev/null)" ]] \
+    || fail "exec leaked a temp home (with credentials) after a bad-command failure"
+}
+
 test_exec_gives_up_when_all_profiles_limited() {
   write_exec_test_state
   local attempt_log="$WORK_DIR/exec-all-limited.log"
@@ -741,6 +751,7 @@ test_best_auth_exports_lowest_usage_configured_profile
 test_mark_exhausted_persists_to_cache_and_best_auth_skips_it
 test_exec_rotates_on_usage_limit
 test_exec_does_not_rotate_on_ordinary_failure
+test_exec_cleans_temp_home_when_command_missing
 test_exec_gives_up_when_all_profiles_limited
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
