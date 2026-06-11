@@ -36,7 +36,7 @@ cask "$CASK_TOKEN" do
   desc "Switch OpenAI Codex accounts from the macOS menu bar"
   homepage "https://github.com/$GITHUB_REPOSITORY"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "CodexProfileSwitcher.app"
   binary "#{appdir}/CodexProfileSwitcher.app/Contents/Helpers/codex-profile"
