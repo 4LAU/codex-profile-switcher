@@ -582,6 +582,35 @@ test_unsigned_build_uses_dev_vault_not_keychain() {
     || fail "dev vault saved wrong auth content"
 }
 
+test_file_auth_store_dir_override_pins_backend() {
+  # The menu app pins a delegated helper to its OWN auth backend via
+  # CODEX_PROFILE_FILE_AUTH_STORE_DIR so an app/helper signing mismatch can't
+  # split auth across two stores. The override must route auth to that explicit
+  # dir regardless of the helper's own signing identity, overriding the default
+  # dev-auth-store. (Works on signed and unsigned helpers, so no skip.)
+  reset_home
+  local login="$WORK_DIR/file-override-login.json"
+  local override_dir="$WORK_DIR/app-pinned-store"
+  make_api_auth "$login" "sk-test-file-override-1111111111" "file-override"
+
+  CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_FILE_AUTH_STORE_DIR="$override_dir" \
+    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
+    CODEX_BUNDLED_CLI="$FAKE_APP" \
+    CODEX_CLI="$FAKE_CODEX" \
+    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
+    FAKE_CODEX_LOGIN_AUTH="$login" \
+    "$HELPER" login FileOverride >/dev/null 2>"$WORK_DIR/file-override.err" \
+    || fail "login with file-store override failed"
+
+  [[ -f "$override_dir/FileOverride.json" ]] \
+    || fail "auth was not saved to the app-pinned file store"
+  cmp -s "$override_dir/FileOverride.json" "$login" \
+    || fail "app-pinned file store saved wrong auth content"
+  [[ ! -f "$TEST_HOME/.codex-switcher/dev-auth-store/FileOverride.json" ]] \
+    || fail "auth leaked into the default dev-auth-store instead of the pinned dir"
+}
+
 test_import_auth_preserves_on_missing_identity() {
   reset_home
   local existing="$WORK_DIR/token-only-existing.json"
@@ -787,6 +816,7 @@ test_exec_does_not_rotate_on_ordinary_failure
 test_exec_cleans_temp_home_when_command_missing
 test_exec_gives_up_when_all_profiles_limited
 test_unsigned_build_uses_dev_vault_not_keychain
+test_file_auth_store_dir_override_pins_backend
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
 

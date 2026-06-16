@@ -104,7 +104,12 @@ final class ProfileStore {
         }
 
         if isFirstLaunch, self.legacyAuthStoreFiles().isEmpty {
-            self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            // Only the Keychain backend owns the auth-storage version. A file dev
+            // vault must not stamp it into the shared config, or a later signed
+            // build would see it advanced and skip its real Keychain migration.
+            if self.ownsKeychainBookkeeping {
+                self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            }
             self.config.profiles = [ProfileConfig(id: "1", label: "Profile 1")]
             self.statuses["1"] = .notSetUp
             self.saveConfig()
@@ -535,7 +540,19 @@ final class ProfileStore {
             .sorted()
     }
 
+    /// The file dev vault (unsigned builds) must never perform Keychain-specific
+    /// bookkeeping — advancing `authStorageVersion`, migrating legacy auth into
+    /// the active vault, or deleting the legacy store — because that state lives
+    /// in the shared `config.json`. A later signed Keychain build would see the
+    /// advanced version, skip its real migration/repair, and find an empty
+    /// Keychain. Only the Keychain backend (and injected non-file test vaults)
+    /// owns this bookkeeping.
+    private var ownsKeychainBookkeeping: Bool {
+        self.authVault.diagnostics().activeBackend != .file
+    }
+
     private func migrateLegacyProfiles() {
+        guard self.ownsKeychainBookkeeping else { return }
         let currentVersion = self.config.authStorageVersion ?? 0
         guard currentVersion < Self.keychainAuthStorageVersion else {
             self.cleanupLegacyAuthStoreIfMigrated()
@@ -601,6 +618,7 @@ final class ProfileStore {
     }
 
     private func repairKeychainAccessIfNeeded() {
+        guard self.ownsKeychainBookkeeping else { return }
         let currentVersion = self.config.authStorageVersion ?? 0
         guard currentVersion >= Self.keychainAuthStorageVersion,
               currentVersion < Self.keychainAccessRepairVersion else { return }
@@ -659,6 +677,7 @@ final class ProfileStore {
     }
 
     private func cleanupLegacyAuthStoreIfMigrated() {
+        guard self.ownsKeychainBookkeeping else { return }
         guard (self.config.authStorageVersion ?? 0) >= Self.keychainAuthStorageVersion else { return }
         guard self.fileManager.fileExists(atPath: self.authStoreDir.path) else { return }
 

@@ -1373,45 +1373,63 @@ enum CodexProfileCLI {
     /// saved profile. They get a separate file-based dev vault instead (the
     /// CodexBar pattern). Signed builds (`make install-cli`, releases) use the
     /// Keychain and share the real profiles.
-    private static let devVaultActive: Bool = {
-        if let path = ProcessInfo.processInfo.environment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"],
-           !path.isEmpty {
-            return false
+    private enum EffectiveAuthBackend {
+        case file(URL)
+        case keychain
+    }
+
+    /// The auth backend this process uses. Tests pin it with
+    /// `CODEX_PROFILE_TEST_AUTH_STORE_DIR`; the menu app pins it with
+    /// `CODEX_PROFILE_FILE_AUTH_STORE_DIR` / `CODEX_PROFILE_FORCE_KEYCHAIN` so a
+    /// delegated helper lands on the SAME store the app uses even if the app and
+    /// helper binaries have different signing identities. With no override it
+    /// follows this binary's own signing identity (unsigned dev builds get a
+    /// file vault and never touch the real Keychain).
+    private static let effectiveBackend: EffectiveAuthBackend = {
+        let env = ProcessInfo.processInfo.environment
+        if let path = env["CODEX_PROFILE_TEST_AUTH_STORE_DIR"], !path.isEmpty {
+            return .file(URL(fileURLWithPath: path).standardizedFileURL)
         }
-        return !ProcessSigningIdentity.isStable
+        if let path = env["CODEX_PROFILE_FILE_AUTH_STORE_DIR"], !path.isEmpty {
+            return .file(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        if let force = env["CODEX_PROFILE_FORCE_KEYCHAIN"],
+           force == "1" || force.lowercased() == "true" {
+            return .keychain
+        }
+        return ProcessSigningIdentity.isStable
+            ? .keychain
+            : .file(CodexProfileCLI.paths.devAuthStoreURL)
     }()
 
     private static var didNoteDevVault = false
 
     private static func makeVault(interactionAllowed: Bool = true) -> AuthVault {
-        if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
-            return FileAuthVault(root: URL(fileURLWithPath: path).standardizedFileURL)
-        }
-        if self.devVaultActive {
-            if !self.didNoteDevVault {
+        switch self.effectiveBackend {
+        case let .file(root):
+            // Preserve the historical silent behaviour under the test-dir override.
+            if !self.didNoteDevVault,
+               (ProcessInfo.processInfo.environment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"] ?? "").isEmpty {
                 self.didNoteDevVault = true
                 fputs("""
-                notice: unsigned dev build - using file auth vault at \(self.paths.devAuthStoreURL.path) \
+                notice: unsigned dev build - using file auth vault at \(root.path) \
                 (the macOS Keychain is not touched). Build a signed CLI with `make install-cli` \
                 to share the real Keychain profiles.\n
                 """, stderr)
             }
-            return FileAuthVault(root: self.paths.devAuthStoreURL)
+            return FileAuthVault(root: root)
+        case .keychain:
+            return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
         }
-        return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
     }
 
     private static func vaultLocation(profile: String) -> String {
-        if let path = self.environment("CODEX_PROFILE_TEST_AUTH_STORE_DIR"), !path.isEmpty {
-            return URL(fileURLWithPath: path)
-                .appendingPathComponent("\(profile).json")
-                .standardizedFileURL
-                .path
+        switch self.effectiveBackend {
+        case let .file(root):
+            return root.appendingPathComponent("\(profile).json").standardizedFileURL.path
+        case .keychain:
+            return "keychain://\(self.keychainService)/\(profile)"
         }
-        if self.devVaultActive {
-            return self.paths.devAuthStoreURL.appendingPathComponent("\(profile).json").path
-        }
-        return "keychain://\(self.keychainService)/\(profile)"
     }
 
     private static func knownProfileIDs(vault: AuthVault = Self.vault) throws -> [String] {
