@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- Unsigned dev builds no longer advance the shared Keychain auth-storage bookkeeping in `config.json`. Because that file is shared across builds, an unsigned build using the file dev vault could mark the auth-storage version as migrated/repaired -- and even migrate or delete the legacy auth store -- causing a later signed release to skip its real Keychain migration and find no saved auth. Keychain migration, repair, and legacy cleanup now run only when the Keychain backend is active.
+- The menu app now pins the `codex-profile` helper it launches to its own auth backend. Previously the app and the delegated helper each picked Keychain vs. file dev vault from their own signing identity, so an unsigned app delegating to a signed helper (or vice versa) could write a login to one store while the app read the other. The app now passes its backend explicitly (`CODEX_PROFILE_FILE_AUTH_STORE_DIR` / `CODEX_PROFILE_FORCE_KEYCHAIN`) so both always agree.
+
 ## 0.4.1 -- 2026-06-11
 
 ### Changed

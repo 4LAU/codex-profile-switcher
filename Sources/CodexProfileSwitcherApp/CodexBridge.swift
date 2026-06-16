@@ -131,6 +131,18 @@ enum CodexBridge {
         self.codexProfilePath() ?? "<not found>"
     }
 
+    /// Pin the delegated helper to the SAME auth backend the app uses. The app's
+    /// backend follows the same signing-identity rule the helper would apply on
+    /// its own; passing it explicitly removes the dependency on the app bundle
+    /// and the resolved `codex-profile` binary sharing a signing identity, so a
+    /// mismatch can't split auth across the Keychain and the file dev vault.
+    private static func helperAuthEnvironment() -> [String: String] {
+        if ProcessSigningIdentity.isStable {
+            return ["CODEX_PROFILE_FORCE_KEYCHAIN": "1"]
+        }
+        return ["CODEX_PROFILE_FILE_AUTH_STORE_DIR": AppPaths().devAuthStoreURL.path]
+    }
+
     static func isLoginRunning(profileId: String) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
         return Self.activeLogins[profileId] != nil
@@ -413,6 +425,12 @@ enum CodexBridge {
         proc.arguments = arguments
         proc.standardOutput = pipe
         proc.standardError = pipe
+
+        var childEnv = ProcessInfo.processInfo.environment
+        for (key, value) in Self.helperAuthEnvironment() {
+            childEnv[key] = value
+        }
+        proc.environment = childEnv
 
         let active = ActiveLogin(process: proc)
         Self.activeLogins[profileId] = active
