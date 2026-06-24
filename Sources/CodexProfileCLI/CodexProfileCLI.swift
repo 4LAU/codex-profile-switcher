@@ -101,8 +101,10 @@ enum CodexProfileCLI {
           \(self.program) keychain-repair
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
           \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
-          \(self.program) import-auth --dir <path> --profile <id>
+          \(self.program) import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
           \(self.program) lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
+          \(self.program) lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
+          \(self.program) lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]
           \(self.program) lease gc
 
         exec runs <command> with CODEX_HOME pointed at the best profile's
@@ -128,8 +130,13 @@ enum CodexProfileCLI {
         concurrent runs never grab the same account. Prints the home path, or
         a JSON {profile, home, token, expires_at} with --json. Exit codes match
         best-auth (2 no eligible / 3 no profiles / 4 usage unavailable / 6
-        keychain interaction required). lease gc removes expired lease homes
-        and reclaims any home left behind by a crashed process.
+        keychain interaction required). lease swap <token> rotates the leased
+        account to the next-best one in place (refreshed credential written
+        back, old account marked exhausted) without disturbing the session, so
+        a warm 'codex exec resume' stays warm. lease end <token> writes the
+        refreshed credential back and tears the lease down; it is idempotent
+        and trap-safe. lease gc removes expired lease homes and reclaims any
+        home left behind by a crashed process.
         """)
     }
 

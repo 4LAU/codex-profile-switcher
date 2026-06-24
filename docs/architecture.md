@@ -23,11 +23,11 @@ macOS Keychain
 | Target or path | Role |
 |---|---|
 | `CodexProfileSwitcherApp` | SwiftUI menu bar app, usage polling, settings UI |
-| `CodexProfileCLI` | CLI helper for login, app switching, status, diagnostics, and `best-auth`/`import-auth` automation |
+| `CodexProfileCLI` | CLI helper for login, app switching, status, diagnostics, and scripted rotation (`best-auth`, `exec`, `import-auth`, `lease`) |
 | `CodexProfileCore/Auth` | Auth token parsing plus Keychain and file-backed vaults |
 | `CodexProfileCore/Profiles` | Shared config, paths, validation, and profile switch transactions |
 | `CodexProfileCore/Usage` | UI-independent usage fetching via Codex JSON-RPC, profile selection, and best-auth reporting |
-| `CodexProfileCore/Support` | Shared low-level helpers such as atomic file writes, redaction, and core log forwarding |
+| `CodexProfileCore/Support` | Shared low-level helpers such as atomic file writes, the cross-process cache lock, redaction, and core log forwarding |
 | `CodexProfileSwitcherApp/AppDelegate.swift` | Menu bar lifecycle, status item ownership, refresh timers, and action dispatch |
 | `CodexProfileSwitcherApp/AppInfo.swift` | App version and bundle metadata |
 | `CodexProfileSwitcherApp/AppLogging.swift` | App-side log configuration and redaction setup |
@@ -58,6 +58,16 @@ Usage data is fetched via a single path: Codex's own `app-server` JSON-RPC endpo
 The app coordinates refresh state through an app-local `UsageProvider` (`@MainActor`). Profile config is owned by `ProfileStore` (`@MainActor`). UI-independent fetching and profile selection logic live in `CodexProfileCore/Usage`.
 
 The `best-auth` CLI command runs the same fetch path independently (bounded concurrency of 3) so it never relies solely on a stale cache when the menu bar app is not running.
+
+## Scripted Account Rotation
+
+The CLI exposes the same usage-aware selection the app uses, for scripts and agents that drive Codex without the menu bar:
+
+- `best-auth` writes the best profile's credentials into a directory you point `CODEX_HOME` at.
+- `exec` wraps one command and retries it on the next-best profile when it hits a usage limit.
+- `lease` holds an account open for a warm Codex session and rotates the credential underneath it on a limit, so the session is never restarted.
+
+`lease` records each reservation in the shared usage cache (`~/.codex-switcher/usage-cache.json`) as a TTL-bounded entry, and every other selector skips a reserved account, so concurrent agents never collide on one profile. The CLI and the menu bar app both read and write that cache, so each whole-cache update runs inside a cross-process advisory lock: a writer reads, mutates, and atomically replaces the file while holding the lock, and a concurrent writer can never drop a just-committed reservation. Disk is authoritative for the lease map, which stops the long-lived app from resurrecting a reservation that a short-lived CLI run already released.
 
 ## Security
 

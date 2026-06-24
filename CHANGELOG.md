@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Documentation
+
+- README and `docs/architecture.md` now cover the `lease begin|swap|end|gc` command, the `import-auth --non-interactive`/`--timeout` flags, and the cross-process cache lock. The `codex-profile --help` synopsis also gained the previously missing `lease swap` and `lease end` lines.
+
 ## 0.5.0 -- 2026-06-24
 
 ### Added

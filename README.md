@@ -122,7 +122,11 @@ codex-profile doctor
 codex-profile keychain-repair
 codex-profile best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
 codex-profile exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
-codex-profile import-auth --dir <path> --profile <id>
+codex-profile import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
+codex-profile lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
+codex-profile lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
+codex-profile lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]
+codex-profile lease gc
 ```
 
 **Core commands**
@@ -203,11 +207,39 @@ Writes a refreshed `auth.json` from `--dir` back to the stored credential for `-
 
 **Identity guard.** Before overwriting, `import-auth` compares the identity fingerprint of the existing stored credential against the incoming file. If they belong to different accounts the write is refused and the command exits 5. This prevents a credential for one account from silently overwriting a different account's profile.
 
+**Headless mode.** `--non-interactive` skips the interactive Keychain-repair step, which can otherwise stall a headless process on a modal consent prompt, and reads the existing credential through the fail-closed vault. `--timeout <seconds>` arms a watchdog so the call always terminates. This is the write-back path `lease end` uses.
+
 ```bash
 codex-profile import-auth --dir /tmp/codex-session --profile work
 ```
 
 Exit code 5 means the refreshed credential belongs to a different account. All other failures exit 1.
+
+### lease
+
+`exec` wraps a single command. When you need one Codex session to stay open across many turns (an agent loop, a long review), `lease` holds an account open and rotates it underneath the session when a limit hits, so the session never restarts and never re-reads the repo.
+
+```bash
+read -r CHOME TOKEN < <(codex-profile lease begin --json | jq -r '"\(.home) \(.token)"')
+export CODEX_HOME="$CHOME"
+trap 'codex-profile lease end "$TOKEN"' EXIT
+
+cd "$REPO"
+codex exec -C "$REPO" - < prompt.md          # first turn reads the repo
+
+# ...a usage limit hits mid-session...
+codex-profile lease swap "$TOKEN"            # next-best account, same home
+codex exec resume --last - < followup.md     # still warm, no repo re-read
+```
+
+- `begin` — reserves the profile with the most remaining quota (same logic and exit codes as `best-auth`), seeds a private throwaway `CODEX_HOME`, and records the reservation so a second run never grabs the same account. Prints the home path, or `{profile, home, token, expires_at}` with `--json`. The reservation lasts `--ttl` seconds (default 3600), a backstop in case the process dies without releasing it.
+- `swap <token>` — the leased account hit a limit. `swap` writes its refreshed credential back, marks it exhausted for an hour, and drops the next-best account into the same home. The session files under `sessions/` are left alone, so a `codex exec resume` stays warm.
+- `end <token>` — writes the refreshed credential back to its profile and tears the lease down. It is idempotent and trap-safe: wire it to a shell `trap` and a second call, or a call after the work already finished, is a clean no-op. Pass `--profile <id>` to assert the lease still belongs to the account you expect before writing.
+- `gc` — deletes expired lease homes and reclaims any home a crashed run left behind. `begin` calls it opportunistically, so you rarely run it yourself.
+
+Reservations live in the shared usage cache, and any account holding one is skipped by `best-auth`, `exec`, and other `lease begin` calls. Every write to that cache goes through a cross-process lock, so two agents reserving and releasing accounts at the same moment cannot drop each other's reservations or strand a refreshed credential.
+
+`--non-interactive` and `--timeout` behave as they do for `best-auth`: skip Keychain prompts that would block a headless run, and guarantee the call exits. Selection exit codes match `best-auth` (2 no eligible profile, 3 no profiles configured, 4 usage unavailable, 6 keychain interaction required).
 
 ## How It Works
 
