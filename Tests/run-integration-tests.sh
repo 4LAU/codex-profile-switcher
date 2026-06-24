@@ -682,6 +682,19 @@ has_exhaustion_override() {
     -o /dev/null "$TEST_HOME/.codex-switcher/cache.json" >/dev/null 2>&1
 }
 
+# True when cache.json has a lease reservation recorded for <profile>.
+has_lease() {
+  plutil -extract "leases.$1" json \
+    -o /dev/null "$TEST_HOME/.codex-switcher/cache.json" >/dev/null 2>&1
+}
+
+# Prints a reservation field (token, home, expiresAt, createdAt) for <profile>.
+# Only ever used inside [[ ]]; a missing lease/field yields empty + nonzero.
+lease_field() {
+  plutil -extract "leases.$1.$2" raw \
+    -o - "$TEST_HOME/.codex-switcher/cache.json" 2>/dev/null
+}
+
 test_exec_rotates_on_usage_limit() {
   write_exec_test_state
   local attempt_log="$WORK_DIR/exec-attempts.log"
@@ -798,6 +811,313 @@ test_import_auth_accepts_same_identity_refresh() {
   assert_same_file "$exported" "$updated" "import-auth did not save refreshed same-identity auth"
 }
 
+test_lease_begin_reserves_and_seeds() {
+  write_exec_test_state
+  # performBestAuth copies the live ~/.codex/config.toml into the lease home,
+  # so seed one with a marker before begin.
+  printf 'model = "gpt-lease"\n' > "$TEST_HOME/.codex/config.toml"
+
+  local report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$report"
+
+  local profile home token
+  profile="$(plutil -extract profile raw -o - "$report")"
+  home="$(plutil -extract home raw -o - "$report")"
+  token="$(plutil -extract token raw -o - "$report")"
+
+  [[ "$profile" == "RotateA" ]] \
+    || fail "lease begin selected $profile instead of RotateA (best quota)"
+  # The home lives at <switcher-home>/.codex-switcher/leases/<token>. Match the
+  # structural tail rather than the full path: the switcher home is derived from
+  # CODEX_PROFILE_HOME and path-normalized by the binary, so a verbatim
+  # comparison against $TEST_HOME is brittle.
+  case "$home" in
+    */.codex-switcher/leases/"$token") ;;
+    *) fail "lease home ($home) is not <switcher-home>/.codex-switcher/leases/$token" ;;
+  esac
+  [[ -d "$home" ]] || fail "lease home dir was not created"
+  [[ "$(stat -f '%Lp' "$home")" == "700" ]] \
+    || fail "lease home is not private (0700)"
+  [[ -f "$home/auth.json" ]] || fail "lease home is missing auth.json"
+  [[ "$(stat -f '%Lp' "$home/auth.json")" == "600" ]] \
+    || fail "lease home auth.json is not 0600"
+  [[ -f "$home/config.toml" ]] || fail "lease home is missing config.toml"
+  grep -Fq 'model = "gpt-lease"' "$home/config.toml" \
+    || fail "lease home config.toml is not the live config copy"
+  [[ "$(lease_field RotateA token)" == "$token" ]] \
+    || fail "cache.json leases.RotateA.token does not match the printed token"
+  has_lease RotateA || fail "cache.json has no lease reservation for RotateA"
+}
+
+test_lease_begin_excludes_active_lease() {
+  write_exec_test_state
+
+  local first="$WORK_DIR/lease-begin-1.json"
+  run_helper lease begin --json --non-interactive > "$first"
+  local first_profile first_home
+  first_profile="$(plutil -extract profile raw -o - "$first")"
+  first_home="$(plutil -extract home raw -o - "$first")"
+  [[ "$first_profile" == "RotateA" ]] \
+    || fail "first lease begin selected $first_profile instead of RotateA"
+
+  # RotateA is now held by an active lease; the second begin must skip it.
+  local second="$WORK_DIR/lease-begin-2.json"
+  run_helper lease begin --json --non-interactive > "$second"
+  local second_profile second_home
+  second_profile="$(plutil -extract profile raw -o - "$second")"
+  second_home="$(plutil -extract home raw -o - "$second")"
+  [[ "$second_profile" == "RotateB" ]] \
+    || fail "second lease begin selected $second_profile instead of RotateB (RotateA should be held)"
+  [[ "$second_home" != "$first_home" ]] \
+    || fail "second lease begin reused the first lease's home"
+
+  has_lease RotateA || fail "first lease reservation was lost"
+  has_lease RotateB || fail "second lease reservation was not recorded"
+}
+
+test_lease_gc_reclaims_expired() {
+  write_exec_test_state
+  local leases_root="$TEST_HOME/.codex-switcher/leases"
+  local token="gc-expired-token"
+  local home="$leases_root/$token"
+  mkdir -p "$home"
+  printf 'dead\n' > "$home/auth.json"
+
+  # Inject a reservation that has already expired so gc reclaims it. The
+  # expired-reclaim path is keyed on the reservation, not the orphan window.
+  plutil -insert "leases" -json \
+    "{\"GcProfile\":{\"token\":\"$token\",\"home\":\"$home\",\"expiresAt\":\"2000-01-01T00:00:00Z\",\"createdAt\":\"2026-06-24T00:00:00Z\"}}" \
+    "$TEST_HOME/.codex-switcher/cache.json"
+
+  run_helper lease gc >/dev/null
+
+  has_lease GcProfile && fail "lease gc did not drop the expired reservation"
+  [[ ! -d "$home" ]] || fail "lease gc did not remove the expired reservation's home"
+}
+
+test_lease_gc_preserves_active_lease() {
+  write_exec_test_state
+  local report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$report"
+  local home token
+  home="$(plutil -extract home raw -o - "$report")"
+  token="$(plutil -extract token raw -o - "$report")"
+  [[ "$(plutil -extract profile raw -o - "$report")" == "RotateA" ]] \
+    || fail "setup lease begin did not pick RotateA"
+
+  run_helper lease gc >/dev/null
+
+  [[ -d "$home" ]] || fail "lease gc removed an active lease's home"
+  has_lease RotateA || fail "lease gc dropped an active reservation"
+  [[ "$(lease_field RotateA token)" == "$token" ]] \
+    || fail "lease gc altered the active reservation"
+}
+
+test_lease_gc_sweeps_old_orphan_but_keeps_fresh() {
+  write_exec_test_state
+  local leases_root="$TEST_HOME/.codex-switcher/leases"
+  mkdir -p "$leases_root/old-token" "$leases_root/fresh-token"
+  printf 'stale\n' > "$leases_root/old-token/auth.json"
+  printf 'fresh\n' > "$leases_root/fresh-token/auth.json"
+  # Backdate old-token (and its contents) well past the 300s orphan grace
+  # window; leave fresh-token at its current mtime. The dir touch must come
+  # last so the file write above does not bump it back to now.
+  touch -t 200001010000 "$leases_root/old-token/auth.json"
+  touch -t 200001010000 "$leases_root/old-token"
+  touch "$leases_root/fresh-token"
+
+  run_helper lease gc >/dev/null
+
+  [[ ! -d "$leases_root/old-token" ]] \
+    || fail "lease gc did not sweep an old orphan home"
+  [[ -d "$leases_root/fresh-token" ]] \
+    || fail "lease gc swept a fresh orphan home inside the 300s grace window"
+}
+
+test_lease_swap_rotates_credential_in_place() {
+  write_exec_test_state
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local home token
+  home="$(plutil -extract home raw -o - "$begin_report")"
+  token="$(plutil -extract token raw -o - "$begin_report")"
+  [[ "$(plutil -extract profile raw -o - "$begin_report")" == "RotateA" ]] \
+    || fail "setup lease begin did not pick RotateA"
+
+  # A warm codex session keeps state under sessions/; swap must never touch it.
+  mkdir -p "$home/sessions"
+  printf 'keep-me\n' > "$home/sessions/keep.txt"
+
+  local swap_report="$WORK_DIR/lease-swap.json"
+  run_helper lease swap "$token" --json --non-interactive > "$swap_report"
+
+  [[ "$(plutil -extract profile raw -o - "$swap_report")" == "RotateB" ]] \
+    || fail "lease swap did not rotate to RotateB"
+  [[ "$(plutil -extract home raw -o - "$swap_report")" == "$home" ]] \
+    || fail "lease swap moved the home instead of rotating in place"
+  [[ -d "$home" ]] || fail "lease swap removed the warm home"
+  [[ -f "$home/sessions/keep.txt" ]] \
+    || fail "lease swap touched sessions/ during rotation"
+
+  # The credential in the unchanged home now belongs to RotateB.
+  local rotate_b="$WORK_DIR/lease-rotate-b.json"
+  export_auth "RotateB" "$rotate_b"
+  assert_same_file "$home/auth.json" "$rotate_b" \
+    "lease swap did not swap RotateB's credential into the warm home"
+
+  has_exhaustion_override RotateA \
+    || fail "lease swap did not mark the rotated-away profile exhausted"
+  has_lease RotateA && fail "lease swap left the reservation on RotateA"
+  [[ "$(lease_field RotateB token)" == "$token" ]] \
+    || fail "lease swap did not rebind the reservation to RotateB under the same token"
+}
+
+test_lease_end_writes_back_and_releases() {
+  write_exec_test_state
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local home token
+  home="$(plutil -extract home raw -o - "$begin_report")"
+  token="$(plutil -extract token raw -o - "$begin_report")"
+
+  # Simulate codex refreshing the token in place: SAME identity (account id),
+  # fresh access/refresh tokens.
+  local refreshed="$WORK_DIR/lease-refreshed.json"
+  make_oauth_auth "$refreshed" "access-rotate-a-refreshed" "refresh-a-2" "acct-rotate-a"
+  cp "$refreshed" "$home/auth.json"
+
+  run_helper lease end "$token" --non-interactive >/dev/null
+
+  local exported="$WORK_DIR/lease-end-exported.json"
+  export_auth "RotateA" "$exported"
+  assert_same_file "$exported" "$refreshed" \
+    "lease end did not write the refreshed credential back to RotateA's vault"
+
+  has_lease RotateA && fail "lease end did not release the reservation"
+  [[ ! -d "$home" ]] || fail "lease end did not remove the leased home"
+}
+
+test_lease_end_is_idempotent() {
+  write_exec_test_state
+
+  # No active lease: a clean no-op that must succeed (exit 0).
+  run_helper lease end deadbeef-no-such-token --non-interactive >/dev/null
+
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local token
+  token="$(plutil -extract token raw -o - "$begin_report")"
+
+  # First end tears the lease down (succeeds); the second has nothing to do
+  # and must still succeed (idempotent, exit 0).
+  run_helper lease end "$token" --non-interactive >/dev/null
+  run_helper lease end "$token" --non-interactive >/dev/null
+}
+
+test_lease_end_preserves_home_on_writeback_failure() {
+  write_exec_test_state
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local home token
+  home="$(plutil -extract home raw -o - "$begin_report")"
+  token="$(plutil -extract token raw -o - "$begin_report")"
+
+  # Snapshot RotateA's stored credential, then put a DIFFERENT-identity blob in
+  # the home so writeback fails the identity-fingerprint check (exit 5 inside).
+  local before="$WORK_DIR/rotate-a-before.json"
+  export_auth "RotateA" "$before"
+  local wrong="$WORK_DIR/wrong-identity.json"
+  make_oauth_auth "$wrong" "access-x" "refresh-x" "acct-DIFFERENT"
+  cp "$wrong" "$home/auth.json"
+
+  # end must NOT lose the credential: it preserves the home + reservation and
+  # leaves the stored vault auth untouched (it did not write the wrong identity).
+  run_helper lease end "$token" --non-interactive >/dev/null 2>&1 || true
+  [[ -d "$home" ]] || fail "lease end deleted the home after a writeback failure (credential lost)"
+  has_lease RotateA || fail "lease end released the reservation after a writeback failure"
+  local after="$WORK_DIR/rotate-a-after.json"
+  export_auth "RotateA" "$after"
+  assert_same_file "$after" "$before" "lease end wrote a mismatched-identity credential to the vault"
+}
+
+test_lease_gc_preserves_expired_lease_with_recoverable_writeback() {
+  write_exec_test_state
+  local leases_root="$TEST_HOME/.codex-switcher/leases"
+  local token="gc-preserve-token"
+  local home="$leases_root/$token"
+  mkdir -p "$home"
+
+  # The home holds a DIFFERENT-identity credential for RotateA, so write-back
+  # fails the identity check (exit 5 = recoverable: a real credential is at
+  # risk). gc must PRESERVE the home + reservation rather than destroy it, even
+  # though the reservation is expired AND the home is backdated past the 300s
+  # orphan grace window. This is the F1 regression: the orphan sweep must
+  # protect every RECORDED token, not just active ones, so a preserved
+  # failed-writeback home is never swept.
+  make_oauth_auth "$home/auth.json" "access-x" "refresh-x" "acct-DIFFERENT"
+  plutil -insert "leases" -json \
+    "{\"RotateA\":{\"token\":\"$token\",\"home\":\"$home\",\"expiresAt\":\"2000-01-01T00:00:00Z\",\"createdAt\":\"2026-06-24T00:00:00Z\"}}" \
+    "$TEST_HOME/.codex-switcher/cache.json"
+  # Backdate the home past the orphan grace window so only the recorded-token
+  # protection (not the mtime grace) can save it.
+  touch -t 200001010000 "$home/auth.json"
+  touch -t 200001010000 "$home"
+
+  run_helper lease gc >/dev/null 2>&1 || true
+
+  [[ -d "$home" ]] || fail "lease gc swept a preserved expired lease home (credential lost)"
+  has_lease RotateA || fail "lease gc dropped a preserved expired reservation"
+
+  # A second gc must STILL preserve it (the protection is not one-shot).
+  run_helper lease gc >/dev/null 2>&1 || true
+  [[ -d "$home" ]] || fail "a second lease gc swept the preserved expired lease home"
+}
+
+test_lease_end_exits_nonzero_on_recoverable_writeback_failure() {
+  write_exec_test_state
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local home token
+  home="$(plutil -extract home raw -o - "$begin_report")"
+  token="$(plutil -extract token raw -o - "$begin_report")"
+
+  # Different-identity blob in the home => exit 5 inside importRefreshedAuth.
+  # F3 regression: lease end must exit NON-ZERO so automation can detect that a
+  # credential is stranded pending recovery (vs. the clean exit-0 teardown).
+  make_oauth_auth "$home/auth.json" "access-x" "refresh-x" "acct-DIFFERENT"
+
+  if run_helper lease end "$token" --non-interactive >/dev/null 2>&1; then
+    fail "lease end exited 0 despite a recoverable (identity-mismatch) writeback failure"
+  fi
+  [[ -d "$home" ]] || fail "lease end deleted the home after a recoverable writeback failure"
+  has_lease RotateA || fail "lease end released the reservation after a recoverable writeback failure"
+}
+
+test_lease_end_is_idempotent_zero_exit_when_no_lease() {
+  write_exec_test_state
+  # No lease recorded: ending an unknown token is the idempotent no-op and MUST
+  # stay exit 0 so a trap firing it repeatedly never reports failure.
+  run_helper lease end "no-such-token" --non-interactive >/dev/null 2>&1 \
+    || fail "lease end of an unknown token did not exit 0 (idempotent no-op)"
+}
+
+test_lease_end_rejects_mismatched_profile() {
+  write_exec_test_state
+  local begin_report="$WORK_DIR/lease-begin.json"
+  run_helper lease begin --json --non-interactive > "$begin_report"
+  local home token
+  home="$(plutil -extract home raw -o - "$begin_report")"
+  token="$(plutil -extract token raw -o - "$begin_report")"
+
+  # The lease is bound to RotateA; ending it with --profile RotateB must fail
+  # fast (wrong-account writeback footgun) and touch nothing.
+  if run_helper lease end "$token" --profile RotateB --non-interactive >/dev/null 2>&1; then
+    fail "lease end accepted a --profile that does not match the bound profile"
+  fi
+  [[ -d "$home" ]] || fail "lease end removed the home despite the --profile guard rejecting the call"
+  has_lease RotateA || fail "lease end released the reservation despite rejecting the call"
+}
+
 test_switch_preserves_outgoing_auth
 test_switch_rolls_back_after_auth_write_failure
 test_switch_rolls_back_after_config_write_failure
@@ -819,5 +1139,18 @@ test_unsigned_build_uses_dev_vault_not_keychain
 test_file_auth_store_dir_override_pins_backend
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
+test_lease_begin_reserves_and_seeds
+test_lease_begin_excludes_active_lease
+test_lease_gc_reclaims_expired
+test_lease_gc_preserves_active_lease
+test_lease_gc_sweeps_old_orphan_but_keeps_fresh
+test_lease_swap_rotates_credential_in_place
+test_lease_end_writes_back_and_releases
+test_lease_end_is_idempotent
+test_lease_end_preserves_home_on_writeback_failure
+test_lease_gc_preserves_expired_lease_with_recoverable_writeback
+test_lease_end_exits_nonzero_on_recoverable_writeback_failure
+test_lease_end_is_idempotent_zero_exit_when_no_lease
+test_lease_end_rejects_mismatched_profile
 
 printf 'Integration tests: all tests passed\n'

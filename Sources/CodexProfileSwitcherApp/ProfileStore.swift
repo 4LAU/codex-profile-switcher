@@ -501,14 +501,23 @@ final class ProfileStore {
     /// every OTHER profile.
     private func saveCache(excludingOverridesFor excludedID: String?) {
         do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let toWrite = self.cache.mergingDiskOverrides(
-                fromCacheAt: self.cacheURL,
-                excluding: excludedID,
-                decoder: decoder)
-            let data = try Self.cacheEncoder.encode(toWrite)
-            try data.write(to: self.cacheURL, options: .atomic)
+            // Hold the cross-process cache lock across the disk re-read
+            // (mergingDiskOverrides) and the atomic write so this whole-cache
+            // replace cannot drop a lease (or override) a concurrent CLI process
+            // committed between our read and our write. Without the lock, the
+            // disk-verbatim leases merge only protects leases that exist at the
+            // instant of the merge read — a lease landing after that read, but
+            // before this write, would be clobbered.
+            try CacheLock.withLock(at: self.paths.cacheLockURL) {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let toWrite = self.cache.mergingDiskOverrides(
+                    fromCacheAt: self.cacheURL,
+                    excluding: excludedID,
+                    decoder: decoder)
+                let data = try Self.cacheEncoder.encode(toWrite)
+                try data.write(to: self.cacheURL, options: .atomic)
+            }
         } catch {
             AppLogger.error("Failed to save usage cache", metadata: ["error": error.localizedDescription])
         }

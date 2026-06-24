@@ -38,6 +38,13 @@ public struct AppPaths {
         self.switcherHome.appendingPathComponent("cache.json")
     }
 
+    /// Advisory `flock` file guarding every read-modify-write of `cacheURL`.
+    /// A separate lock file (not the cache itself) so the lock survives the
+    /// atomic-rename replacement of the cache and is never itself rewritten.
+    public var cacheLockURL: URL {
+        self.switcherHome.appendingPathComponent("cache.lock")
+    }
+
     public var legacyAuthDirectory: URL {
         self.switcherHome.appendingPathComponent("auth", isDirectory: true)
     }

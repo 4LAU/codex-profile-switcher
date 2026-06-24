@@ -72,6 +72,7 @@ enum CodexProfileCLI {
             case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
             case "import-auth": try self.commandImportAuth(args)
+            case "lease": try self.commandLease(args)
             case "help", "-h", "--help": self.usage()
             default: throw CLIError.message("Unknown command '\(command)'. See \(self.program) help.")
             }
@@ -101,6 +102,8 @@ enum CodexProfileCLI {
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
           \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
           \(self.program) import-auth --dir <path> --profile <id>
+          \(self.program) lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
+          \(self.program) lease gc
 
         exec runs <command> with CODEX_HOME pointed at the best profile's
         credentials. If the command fails with a usage-limit error, the profile
@@ -118,6 +121,15 @@ enum CodexProfileCLI {
 
         import-auth writes back a refreshed auth.json for <id> only when its
         identity matches the stored credential (exit 5 on identity mismatch).
+
+        lease begin reserves the profile with the most remaining quota for
+        --ttl seconds (default 3600) and seeds a private throwaway CODEX_HOME
+        for it. Profiles already holding an active lease are skipped so two
+        concurrent runs never grab the same account. Prints the home path, or
+        a JSON {profile, home, token, expires_at} with --json. Exit codes match
+        best-auth (2 no eligible / 3 no profiles / 4 usage unavailable / 6
+        keychain interaction required). lease gc removes expired lease homes
+        and reclaims any home left behind by a crashed process.
         """)
     }
 
@@ -721,11 +733,17 @@ enum CodexProfileCLI {
     /// semantics the app and `mark-exhausted` use. Best-effort: a write failure
     /// must not fail the command (the selection is still valid).
     private static func persistCacheMerge(_ cache: UsageCache) {
-        // Preserve any overrides already on disk that aren't in our copy.
-        let toWrite = cache.mergingDiskOverrides(
-            fromCacheAt: self.paths.cacheURL,
-            decoder: JSONDecoder.iso8601Decoder())
-        try? self.saveCache(toWrite)
+        // Hold the cache lock across the disk re-read and the write so a lease
+        // (or override) a concurrent process commits in this window is not
+        // dropped by this whole-cache replace. Best-effort: a lock/write failure
+        // must not fail the command (the selection is still valid).
+        try? self.withCacheLock {
+            // Preserve any overrides already on disk that aren't in our copy.
+            let toWrite = cache.mergingDiskOverrides(
+                fromCacheAt: self.paths.cacheURL,
+                decoder: JSONDecoder.iso8601Decoder())
+            try self.saveCache(toWrite)
+        }
     }
 
     private static func makeBestAuthReport(
@@ -797,17 +815,30 @@ enum CodexProfileCLI {
     }
 
     private static func markProfileExhausted(_ profile: String, until blockedUntil: Date, source: String) throws {
-        var cache = self.loadCache()
-        cache.exhaustionOverrides[profile] = ExhaustionOverride(
-            blockedUntil: blockedUntil,
-            reason: "rate_limit",
-            source: source)
-        try self.saveCache(cache)
+        try self.withCacheLock {
+            var cache = self.loadCache()
+            cache.exhaustionOverrides[profile] = ExhaustionOverride(
+                blockedUntil: blockedUntil,
+                reason: "rate_limit",
+                source: source)
+            // Merge-on-write like the lease writers: re-read disk so a concurrent
+            // process's lease reservation (or another profile's override) committed
+            // between our load and save is preserved. `excluding: profile` keeps our
+            // new override authoritative for this profile. The lock makes the
+            // re-read + write one isolated transaction.
+            let toWrite = cache.mergingDiskOverrides(
+                fromCacheAt: self.paths.cacheURL,
+                excluding: profile,
+                decoder: JSONDecoder.iso8601Decoder())
+            try self.saveCache(toWrite)
+        }
     }
 
     private static func commandImportAuth(_ args: [String]) throws {
         var dir: String?
         var profile: String?
+        var nonInteractive = false
+        var timeout: TimeInterval = 30
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -823,6 +854,16 @@ enum CodexProfileCLI {
                 }
                 i += 1
                 profile = args[i]
+            case "--non-interactive":
+                nonInteractive = true
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                timeout = value
             default:
                 throw CLIError.message("Unknown argument: \(args[i])")
             }
@@ -830,25 +871,67 @@ enum CodexProfileCLI {
         }
 
         guard let dir, let profile else {
-            throw CLIError.message("Usage: \(self.program) import-auth --dir <path> --profile <id>")
+            throw CLIError.message("Usage: \(self.program) import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]")
         }
         try self.validateProfile(profile)
-        self.repairKeychainAccessIfNeeded()
+
+        // Non-interactive whenever stdin is not a TTY or the caller asked.
+        // Mirrors best-auth: this keeps the interactive Keychain repair off the
+        // headless path (it can hang on a modal consent prompt with no UI) and
+        // selects a fail-closed vault so the credential read cannot block.
+        let interactive = self.stdinIsTTY && !nonInteractive
+
+        if interactive {
+            self.repairKeychainAccessIfNeeded()
+        } else {
+            self.armWatchdog(
+                seconds: timeout,
+                diagnostic: "import-auth timed out after \(Int(timeout))s")
+        }
+
+        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
         try self.importRefreshedAuth(
             dirURL: URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL,
-            profile: profile)
+            profile: profile,
+            vault: vault)
     }
 
     /// Write-back core shared by `import-auth` and `exec`: saves `dirURL`'s
     /// auth.json over the stored credential for `profile`, but only when it
-    /// validates and its identity fingerprint matches the stored one.
+    /// validates and its identity fingerprint matches the stored one. Callers
+    /// without a vault preference get the default (interaction-allowed) vault;
+    /// `commandImportAuth` passes a fail-closed vault in non-interactive mode.
     private static func importRefreshedAuth(dirURL: URL, profile: String) throws {
+        try self.importRefreshedAuth(dirURL: dirURL, profile: profile, vault: self.vault)
+    }
+
+    /// Classifies a write-back failure for the gc reclaim path: `true` when the
+    /// leased home holds a real credential that would be LOST by deleting it, so
+    /// the home must be preserved for a retry; `false` when there is nothing
+    /// recoverable to lose (so the home can be reclaimed). importRefreshedAuth
+    /// signals "nothing to write back" exclusively with exit 1 (missing home
+    /// auth, no such profile, or an invalid/garbage blob) and the dangerous
+    /// "home holds a valid but different-identity credential" case with exit 5.
+    /// Any non-CLIError (e.g. a vault save failure) is treated as recoverable —
+    /// the credential is intact and the write merely failed to land.
+    private static func isRecoverableWritebackError(_ error: Error) -> Bool {
+        switch error {
+        case CLIError.exitStatus(1):
+            return false
+        case CLIError.exitStatus:
+            return true  // exit 5 identity mismatch: a real credential is at risk
+        default:
+            return true  // vault/save error: credential intact, write didn't land
+        }
+    }
+
+    private static func importRefreshedAuth(dirURL: URL, profile: String, vault: AuthVault) throws {
         let authURL = dirURL.appendingPathComponent("auth.json")
         guard let updatedData = try? Data(contentsOf: authURL) else {
             fputs("No auth data found at \(authURL.path)\n", stderr)
             throw CLIError.exitStatus(1)
         }
-        guard let existingData = try self.vault.loadAuthBlob(profileID: profile) else {
+        guard let existingData = try vault.loadAuthBlob(profileID: profile) else {
             fputs("No existing auth data for profile '\(profile)'\n", stderr)
             throw CLIError.exitStatus(1)
         }
@@ -879,7 +962,7 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(ExitCode.identityMismatch)
         }
 
-        try self.vault.saveAuthBlob(updatedData, profileID: profile)
+        try vault.saveAuthBlob(updatedData, profileID: profile)
     }
 
     private struct ExecOptions {
@@ -1325,6 +1408,678 @@ enum CodexProfileCLI {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(cache)
         try AtomicFileWriter.write(data, to: self.paths.cacheURL)
+    }
+
+    /// Runs `body` while holding the cross-process cache lock, so a read of the
+    /// cache and the matching write form ONE isolated transaction. Every
+    /// whole-cache mutator (lease commands, mark-exhausted, persistCacheMerge)
+    /// must funnel through this — otherwise a concurrent writer can drop the
+    /// delta committed inside `body` (see CacheLock).
+    private static func withCacheLock<T>(_ body: () throws -> T) throws -> T {
+        try CacheLock.withLock(at: self.paths.cacheLockURL, fileManager: self.fileManager, body)
+    }
+
+    // MARK: - Lease reservation
+
+    /// Known root under the switcher home so `lease gc` can find and reclaim an
+    /// orphaned home after a crash (unlike an untracked mktemp directory).
+    private static var leasesRoot: URL {
+        self.paths.switcherHome.appendingPathComponent("leases", isDirectory: true)
+    }
+
+    /// Defense-in-depth before any recursive delete of a cache-recorded home:
+    /// require the path to be an immediate child of `leasesRoot` whose directory
+    /// name is exactly the lease token. A malformed/legacy cache entry pointing
+    /// elsewhere is skipped (and warned) rather than blindly `rm`'d.
+    private static func isLeaseHome(_ path: String, token: String) -> Bool {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let expected = self.leasesRoot.appendingPathComponent(token, isDirectory: true).standardizedFileURL
+        guard url.path == expected.path else {
+            fputs("[lease] refusing to remove unexpected home path '\(path)' (token \(token))\n", stderr)
+            return false
+        }
+        return true
+    }
+
+    /// Reconciles the cache with disk (disk-authoritative leases) and returns a
+    /// copy onto which a lease delta can be applied before saving. Reading disk
+    /// here is what makes the lease helpers' read-modify-write window tiny.
+    private static func reconciledCache() -> UsageCache {
+        self.loadCache().mergingDiskOverrides(
+            fromCacheAt: self.paths.cacheURL,
+            decoder: JSONDecoder.iso8601Decoder())
+    }
+
+    /// Records (or replaces) the reservation for `profileID` on top of the
+    /// disk-authoritative lease map, so no concurrently-written lease is lost.
+    private static func upsertLease(profileID: String, reservation: LeaseReservation) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            cache.leases[profileID] = reservation
+            try self.saveCache(cache)
+        }
+    }
+
+    /// Atomically claims `profileID` for a fresh `begin`. Because `begin` reads
+    /// the active-lease exclusion set BEFORE its multi-second select+seed, two
+    /// concurrent begins can both pick the same best profile and both reach
+    /// `upsertLease`, where the later one would silently overwrite the earlier
+    /// reservation (orphaning the earlier process's live credential). This
+    /// re-checks UNDER the lock: if a DIFFERENT lease still HOLDS the profile,
+    /// the claim loses and throws — the caller deletes its seeded home.
+    ///
+    /// We refuse on ANY recorded different-token lease, not just an *active* one.
+    /// An expired-but-still-recorded lease means `gc` could not clear it — which
+    /// for a lease only happens when its write-back FAILED and `gc`/`end`
+    /// deliberately preserved its home pending credential recovery. Overwriting
+    /// that reservation would orphan the home and lose the preserved credential.
+    /// `begin` runs an opportunistic `gc` first, so a cleanly-removable expired
+    /// lease is already gone by the time we get here; anything left is protected.
+    /// A lease already carrying our own token (a retry) or an absent slot is fine.
+    private static func claimLease(profileID: String, reservation: LeaseReservation) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            if let existing = cache.leases[profileID],
+               existing.token != reservation.token {
+                throw CLIError.message(
+                    "lease begin: profile \(profileID) is reserved by another run (or holds a credential pending recovery); retry")
+            }
+            cache.leases[profileID] = reservation
+            try self.saveCache(cache)
+        }
+    }
+
+    /// Drops the reservation for `profileID` — but only if it still carries
+    /// `expectedToken` (compare-and-delete). This prevents `gc`/`end` from
+    /// deleting a FRESH lease that a concurrent `begin` placed on the same
+    /// profile after the one we meant to remove. `nil` token = unconditional.
+    private static func removeLease(profileID: String, expectedToken: String? = nil) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            if let expectedToken, cache.leases[profileID]?.token != expectedToken {
+                return  // a concurrent writer replaced this lease; leave theirs intact
+            }
+            cache.leases.removeValue(forKey: profileID)
+            try self.saveCache(cache)
+        }
+    }
+
+    /// Atomically moves a reservation from `oldProfileID` to `newProfileID` in a
+    /// single disk-authoritative write, so the lease is never transiently absent.
+    /// The old key is removed only if it still carries our token, and the move
+    /// refuses to clobber a DIFFERENT concurrent lease already on the destination.
+    private static func moveLease(
+        from oldProfileID: String,
+        to newProfileID: String,
+        reservation: LeaseReservation
+    ) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            // The source key must STILL carry our token. If a concurrent `end`
+            // or `gc` removed this lease on disk while swap was selecting, the
+            // lease no longer exists — writing the destination would RESURRECT
+            // an ended lease (invariant: never resurrect). Abort instead.
+            guard cache.leases[oldProfileID]?.token == reservation.token else {
+                throw CLIError.message(
+                    "lease swap: lease \(reservation.token) was ended or reclaimed concurrently; not resurrecting it")
+            }
+            cache.leases.removeValue(forKey: oldProfileID)
+            if let existing = cache.leases[newProfileID], existing.token != reservation.token {
+                throw CLIError.message(
+                    "lease swap: destination profile \(newProfileID) is already leased by another run")
+            }
+            cache.leases[newProfileID] = reservation
+            try self.saveCache(cache)
+        }
+    }
+
+    /// Finds the lease record for a token by scanning the cache. Returns the
+    /// profile ID it is currently bound to and the reservation, or nil if no
+    /// such lease exists (already ended / never created).
+    private static func findLease(token: String) -> (profileID: String, reservation: LeaseReservation)? {
+        for (profileID, reservation) in self.loadCache().leases where reservation.token == token {
+            return (profileID, reservation)
+        }
+        return nil
+    }
+
+    private static func commandLease(_ args: [String]) throws {
+        guard let sub = args.first else {
+            throw CLIError.message("Usage: \(self.program) lease <begin|swap|end|gc> [options]")
+        }
+        let rest = Array(args.dropFirst())
+        switch sub {
+        case "begin": try self.commandLeaseBegin(rest)
+        case "swap":  try self.commandLeaseSwap(rest)
+        case "end":   try self.commandLeaseEnd(rest)
+        case "gc":    try self.commandLeaseGC(rest)
+        default:
+            throw CLIError.message("Unknown lease subcommand: \(sub). Expected begin, swap, end, or gc")
+        }
+    }
+
+    private struct LeaseBeginOptions {
+        var excludeCSV: String?
+        var nonInteractive = false
+        var json = false
+        var timeout: TimeInterval = 60
+        // Default TTL is the crash-recovery horizon, NOT an expected run length:
+        // a lease is normally released by `lease end`, and gc-by-expiry only
+        // reclaims a home whose owner died without cleaning up. 1h comfortably
+        // exceeds the longest realistic single review, so a slow-but-alive run
+        // is never reclaimed out from under itself.
+        var ttl: TimeInterval = 3600
+    }
+
+    private static func parseLeaseBeginOptions(_ args: [String]) throws -> LeaseBeginOptions {
+        var options = LeaseBeginOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--exclude":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--exclude requires a comma-separated list")
+                }
+                i += 1
+                options.excludeCSV = args[i]
+            case "--non-interactive":
+                options.nonInteractive = true
+            case "--json":
+                options.json = true
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            case "--ttl":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 86400 else {
+                    throw CLIError.message("--ttl requires a positive number of seconds (max 86400)")
+                }
+                i += 1
+                options.ttl = value
+            default:
+                throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]")
+            }
+            i += 1
+        }
+        return options
+    }
+
+    /// JSON output shape for `lease begin --json`.
+    private struct LeaseBeginReport: Codable {
+        let profile: String
+        let home: String
+        let token: String
+        let expiresAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case profile, home, token
+            case expiresAt = "expires_at"
+        }
+    }
+
+    private static func commandLeaseBegin(_ args: [String]) throws {
+        let options = try self.parseLeaseBeginOptions(args)
+
+        // Non-interactive whenever stdin is not a TTY or the caller asked, so a
+        // headless run never blocks on a modal Keychain consent prompt.
+        let interactive = self.stdinIsTTY && !options.nonInteractive
+
+        // Opportunistic cleanup of expired homes — best-effort; never fail begin.
+        try? self.commandLeaseGC([])
+
+        // Watchdog guarantees the process dies even if selection blocks; disarm
+        // on the way out so a begin that finishes near the timeout boundary is
+        // never killed after it has already succeeded.
+        let disarmWatchdog = self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "lease begin timed out after \(Int(options.timeout))s")
+        defer { disarmWatchdog() }
+
+        // Exclude any profile holding an active lease so two concurrent runs
+        // never reserve the same account.
+        let now = Date()
+        var exclusion = self.parseExcludeIDs(options.excludeCSV)
+        for (profileID, lease) in self.loadCache().leases where lease.isActive(now: now) {
+            exclusion.insert(profileID)
+        }
+
+        let token = UUID().uuidString
+        let home = self.leasesRoot.appendingPathComponent(token, isDirectory: true)
+        try self.ensurePrivateDir(self.leasesRoot)
+        try self.ensurePrivateDir(home)
+
+        // Everything from here until the reservation is committed seeds a LIVE
+        // credential into `home`. Any failure before/including `upsertLease`
+        // must remove that home so a live credential is never left untracked.
+        let profile: String
+        let reservation: LeaseReservation
+        do {
+            let outcome = try self.performBestAuth(
+                dirURL: home,
+                excludeIDs: exclusion,
+                interactive: interactive)
+            profile = outcome.result.profileID
+            // Start the TTL clock AFTER the (multi-second) selection+seed, not
+            // from `now` above, so a tiny --ttl can't leave the lease born expired.
+            let sealedAt = Date()
+            reservation = LeaseReservation(
+                token: token,
+                home: home.path,
+                expiresAt: sealedAt.addingTimeInterval(options.ttl),
+                createdAt: now)
+            try self.claimLease(profileID: profile, reservation: reservation)
+        } catch {
+            try? self.fileManager.removeItem(at: home)
+            throw error
+        }
+
+        if options.json {
+            let report = LeaseBeginReport(
+                profile: profile,
+                home: home.path,
+                token: token,
+                expiresAt: reservation.expiresAt)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            print(home.path)
+        }
+    }
+
+    /// Best-effort: removes expired lease homes and reclaims any home directory
+    /// under `leasesRoot` whose token is not an active lease (e.g. left by a
+    /// crashed process). Never throws on a single removal failure.
+    private static func commandLeaseGC(_ args: [String]) throws {
+        if let unknown = args.first {
+            throw CLIError.message("Unknown argument: \(unknown). Usage: \(self.program) lease gc")
+        }
+        let now = Date()
+
+        // Reclaim homes whose reservation has expired, then drop the reservation
+        // — but only if the lease still carries that token (compare-and-delete),
+        // so a fresh lease a concurrent `begin` just placed on the same profile
+        // is never dropped. Only remove a home that is actually under leasesRoot.
+        //
+        // Credential-safety: an expired lease's home may still hold the ONLY copy
+        // of a refreshed credential — most importantly one that `lease end`
+        // deliberately PRESERVED after a write-back failure. So attempt write-back
+        // here before deleting, and on failure keep the home + reservation for a
+        // later retry rather than destroying the credential. We always have the
+        // bound profile (the lease's map key), so the write-back target is known.
+        let gcVault = self.makeVault(interactionAllowed: false)
+        for (profileID, lease) in self.loadCache().leases where !lease.isActive(now: now) {
+            var writebackFailed = false
+            if self.isLeaseHome(lease.home, token: lease.token) {
+                do {
+                    try self.importRefreshedAuth(
+                        dirURL: URL(fileURLWithPath: lease.home),
+                        profile: profileID,
+                        vault: gcVault)
+                } catch {
+                    // Preserve ONLY when the failure means a real credential
+                    // would be lost (see isRecoverableWritebackError): an identity
+                    // mismatch (the home holds a valid but different-identity
+                    // credential) or a genuine vault save error. The non-
+                    // recoverable cases — no home auth.json, no such profile in
+                    // the vault, or an invalid blob — have nothing to write back,
+                    // so the home must still be reclaimed or it would leak forever.
+                    if self.isRecoverableWritebackError(error) {
+                        fputs("[lease gc] write-back FAILED for expired lease on '\(profileID)': \(error). "
+                            + "Preserving the home for recovery; will retry on the next gc.\n", stderr)
+                        writebackFailed = true
+                    } else {
+                        fputs("[lease gc] nothing to write back for expired lease on '\(profileID)' (\(error)); reclaiming the home.\n", stderr)
+                    }
+                }
+                if !writebackFailed {
+                    try? self.fileManager.removeItem(atPath: lease.home)
+                }
+            }
+            if !writebackFailed {
+                try? self.removeLease(profileID: profileID, expectedToken: lease.token)
+            }
+        }
+
+        // Orphan sweep: remove any lease home dir whose token is not a RECORDED
+        // lease. Recompute from the freshly-written cache so a reservation
+        // removed above is not treated as still present.
+        //
+        // We protect EVERY recorded token, not just active ones: the expired
+        // loop above deliberately PRESERVES an expired lease (home + reservation)
+        // when its write-back failed, because that home may hold the only copy of
+        // a refreshed credential. If the sweep deleted homes for expired-but-
+        // recorded leases, it would destroy exactly that preserved credential
+        // after the 300s grace window. A truly orphaned home (crashed begin, no
+        // reservation at all) has no recorded token and is still reclaimed here.
+        guard self.fileManager.fileExists(atPath: self.leasesRoot.path),
+              let entries = try? self.fileManager.contentsOfDirectory(
+                  at: self.leasesRoot,
+                  includingPropertiesForKeys: nil) else { return }
+        let recordedTokens = Set(self.loadCache().leases.map { _, lease in lease.token })
+        // Never reclaim a home modified within the grace window: it may belong
+        // to a CONCURRENT `lease begin` that has seeded the home but not yet
+        // recorded its reservation (the select+seed window is ~15-20s). Without
+        // this, one run's opportunistic gc would delete another run's in-flight
+        // live-credential home and break it.
+        let orphanGrace: TimeInterval = 300
+        let cutoff = now.addingTimeInterval(-orphanGrace)
+        for entry in entries {
+            var isDir: ObjCBool = false
+            guard self.fileManager.fileExists(atPath: entry.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            if recordedTokens.contains(entry.lastPathComponent) { continue }
+            if let attrs = try? self.fileManager.attributesOfItem(atPath: entry.path),
+               let mtime = attrs[.modificationDate] as? Date, mtime > cutoff {
+                continue
+            }
+            try? self.fileManager.removeItem(at: entry)
+        }
+    }
+
+    private struct LeaseSwapOptions {
+        var token: String?
+        var excludeCSV: String?
+        var nonInteractive = false
+        var json = false
+        var timeout: TimeInterval = 60
+        // TTL refreshes on swap: the rotation resets the crash-recovery horizon
+        // from the moment the fresh credential is seeded. Matches `begin`'s 1h
+        // default so a swapped run is never reclaimed on a shorter clock.
+        var ttl: TimeInterval = 3600
+    }
+
+    private static func parseLeaseSwapOptions(_ args: [String]) throws -> LeaseSwapOptions {
+        var options = LeaseSwapOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--exclude":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--exclude requires a comma-separated list")
+                }
+                i += 1
+                options.excludeCSV = args[i]
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            case "--ttl":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 86400 else {
+                    throw CLIError.message("--ttl requires a positive number of seconds (max 86400)")
+                }
+                i += 1
+                options.ttl = value
+            case "--non-interactive":
+                options.nonInteractive = true
+            case "--json":
+                options.json = true
+            default:
+                if args[i].hasPrefix("-") {
+                    throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]")
+                }
+                guard options.token == nil else {
+                    throw CLIError.message("Unexpected extra argument: \(args[i])")
+                }
+                options.token = args[i]
+            }
+            i += 1
+        }
+        return options
+    }
+
+    /// JSON output shape for `lease swap --json`.
+    private struct LeaseSwapReport: Codable {
+        let profile: String
+        let home: String
+    }
+
+    /// Rotates the lease's credential to a fresh account inside the SAME warm
+    /// home when the current account hits a usage limit. `performBestAuth`
+    /// overwrites only auth.json + config.toml in place; the warm session's
+    /// `sessions/` is never touched. The reservation moves to the new profile
+    /// under the same token. A failure after the rewrite propagates — the home
+    /// still holds a valid credential, and the caller cleans up via `lease end`.
+    private static func commandLeaseSwap(_ args: [String]) throws {
+        let options = try self.parseLeaseSwapOptions(args)
+        guard let token = options.token else {
+            throw CLIError.message("Usage: \(self.program) lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]")
+        }
+
+        guard let (oldProfile, reservation) = self.findLease(token: token) else {
+            throw CLIError.message("No active lease for token \(token)")
+        }
+
+        let home = URL(fileURLWithPath: reservation.home)
+        let interactive = self.stdinIsTTY && !options.nonInteractive
+
+        // Disarm on the way out so a swap that finishes near the timeout boundary
+        // is never killed after it has already succeeded.
+        let disarmWatchdog = self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "lease swap timed out after \(Int(options.timeout))s")
+        defer { disarmWatchdog() }
+
+        // Credential-safety: the warm session may have REFRESHED the old
+        // account's token in `home`, which is the ONLY copy (the vault still has
+        // the pre-session credential). `performBestAuth` below overwrites
+        // home/auth.json in place, so we must write the old account's refreshed
+        // credential back to its profile FIRST. If write-back fails, abort the
+        // swap and preserve the home — overwriting would silently lose the
+        // refresh. (importRefreshedAuth is a no-op when nothing changed, and
+        // refuses to write a different identity, so this is safe to always run.)
+        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
+        do {
+            try self.importRefreshedAuth(dirURL: home, profile: oldProfile, vault: vault)
+        } catch {
+            fputs("[lease swap] write-back of the current account '\(oldProfile)' FAILED: \(error). "
+                + "Aborting swap and preserving the leased home so the refreshed credential is not lost "
+                + "(retry, or let gc/end reclaim after the TTL).\n", stderr)
+            throw error
+        }
+
+        // Stop re-picking the account we are rotating away from.
+        try? self.markProfileExhausted(oldProfile, until: Date().addingTimeInterval(3600), source: "lease")
+
+        let now = Date()
+        var exclusion = self.parseExcludeIDs(options.excludeCSV)
+        for (profileID, lease) in self.loadCache().leases where lease.isActive(now: now) {
+            exclusion.insert(profileID)
+        }
+        exclusion.insert(oldProfile)
+
+        // In-place hot-swap inside the existing home.
+        let outcome = try self.performBestAuth(
+            dirURL: home,
+            excludeIDs: exclusion,
+            interactive: interactive)
+        let newProfile = outcome.result.profileID
+
+        // Move the reservation to the new profile in ONE cache write (same
+        // token + home, fresh TTL started after the re-seed), so the lease is
+        // never transiently absent.
+        //
+        // Ordering hazard: `performBestAuth` already overwrote the home with
+        // `newProfile`'s credential, but `moveLease` can still legitimately fail
+        // — the source lease was ended/reclaimed concurrently (token no longer
+        // matches), or another run won the destination profile. If we just
+        // propagated that error, the home would hold `newProfile`'s (possibly
+        // freshly refreshed) credential while the cache no longer binds it under
+        // a usable lease, and `lease end` would later see an identity mismatch
+        // (home=newProfile vs. lease=oldProfile) and refuse to write it back —
+        // stranding the new account's credential. So on a moveLease failure we
+        // write `newProfile`'s credential straight back here, release the stale
+        // `oldProfile` reservation, and remove the now-disposable home, then
+        // surface the error. The lease is gone, but no credential is lost
+        // (invariant 1) and no reservation/home is leaked.
+        let sealedAt = Date()
+        do {
+            try self.moveLease(
+                from: oldProfile,
+                to: newProfile,
+                reservation: LeaseReservation(
+                    token: reservation.token,
+                    home: reservation.home,
+                    expiresAt: sealedAt.addingTimeInterval(options.ttl),
+                    createdAt: reservation.createdAt))
+        } catch {
+            fputs("[lease swap] could not rebind the lease to '\(newProfile)': \(error). "
+                + "Writing the new account's credential back directly so it is not stranded in the leased home.\n", stderr)
+            // Write `newProfile`'s credential straight back so it is not stranded
+            // (invariant 1: never lose a refreshed credential).
+            let directWriteback = Result { try self.importRefreshedAuth(dirURL: home, profile: newProfile, vault: vault) }
+            // The cache still binds this token to `oldProfile` while the home now
+            // holds `newProfile`'s credential — an identity mismatch that `lease
+            // end`/`gc` would treat as recoverable and preserve INDEFINITELY,
+            // permanently stranding the `oldProfile` reservation slot and leaking
+            // the home. Once the credential is safely back in `newProfile`'s vault,
+            // the home is disposable: release the stale reservation (compare-and-
+            // delete on our token, so a concurrent writer's lease is untouched) and
+            // remove the home. If the direct writeback itself failed, the home is
+            // the only copy of `newProfile`'s credential — leave everything intact
+            // so a later retry can recover it, exactly like the other writeback-
+            // failure paths.
+            if case .success = directWriteback {
+                try? self.removeLease(profileID: oldProfile, expectedToken: reservation.token)
+                if self.isLeaseHome(reservation.home, token: reservation.token) {
+                    try? self.fileManager.removeItem(at: home)
+                }
+            }
+            throw error
+        }
+
+        if options.json {
+            let report = LeaseSwapReport(profile: newProfile, home: reservation.home)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            print(newProfile)
+        }
+    }
+
+    private struct LeaseEndOptions {
+        var token: String?
+        var profile: String?
+        var nonInteractive = false
+        var timeout: TimeInterval = 30
+    }
+
+    private static func parseLeaseEndOptions(_ args: [String]) throws -> LeaseEndOptions {
+        var options = LeaseEndOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--profile":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--profile requires a profile ID")
+                }
+                i += 1
+                options.profile = args[i]
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            case "--non-interactive":
+                options.nonInteractive = true
+            default:
+                if args[i].hasPrefix("-") {
+                    throw CLIError.message("Unknown argument: \(args[i]). Usage: \(self.program) lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]")
+                }
+                guard options.token == nil else {
+                    throw CLIError.message("Unexpected extra argument: \(args[i])")
+                }
+                options.token = args[i]
+            }
+            i += 1
+        }
+        return options
+    }
+
+    /// Writes the refreshed credential back to its profile and tears the lease
+    /// down. Idempotent and trap-safe: a shell `trap ... EXIT INT TERM` may call
+    /// this more than once; no active lease is a clean no-op.
+    ///
+    /// Credential safety: the home holds the ONLY copy of the refreshed
+    /// credential. If write-back FAILS, we do NOT delete the home or release the
+    /// reservation — that would silently lose the refreshed token. Instead we
+    /// warn and preserve everything for a retry; `gc` reclaims it later once the
+    /// TTL lapses. Only a SUCCESSFUL (or no-op) write-back proceeds to release +
+    /// remove. Release is a compare-and-delete on the token, so a fresh lease a
+    /// concurrent `begin` placed on the same profile is never dropped.
+    private static func commandLeaseEnd(_ args: [String]) throws {
+        let options = try self.parseLeaseEndOptions(args)
+        guard let token = options.token else {
+            throw CLIError.message("Usage: \(self.program) lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]")
+        }
+
+        // No active lease = already ended or never created. Idempotent no-op so
+        // a trap can fire this any number of times without error.
+        guard let (foundProfile, reservation) = self.findLease(token: token) else { return }
+
+        // `--profile` must match the lease's bound profile if given. A mismatch
+        // (e.g. stale value from before a swap rebind) would write the home's
+        // credential back to the WRONG account — fail fast before any writeback.
+        if let override = options.profile, override != foundProfile {
+            throw CLIError.message(
+                "lease end --profile \(override) does not match the lease's bound profile \(foundProfile)")
+        }
+        let profile = foundProfile
+        let home = URL(fileURLWithPath: reservation.home)
+        let interactive = self.stdinIsTTY && !options.nonInteractive
+
+        // Disarm on the way out so an end that finishes near the timeout boundary
+        // is never killed after it has already released the lease.
+        let disarmWatchdog = self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "lease end timed out after \(Int(options.timeout))s")
+        defer { disarmWatchdog() }
+
+        // Headless-safe writeback. On a RECOVERABLE failure (the home holds a
+        // real credential the write could not land — identity mismatch exit 5, or
+        // a vault save error) preserve the home + reservation and exit NON-ZERO so
+        // automation can distinguish "ended and cleaned up" (exit 0) from
+        // "credential recovery still pending"; gc will retry. A NON-recoverable
+        // failure (no home auth, no such profile, invalid blob — exit 1) has
+        // nothing to write back, so fall through to a normal clean release. The
+        // idempotent "no active lease" case above already returns 0; a trap that
+        // wants best-effort teardown can still append `|| true`.
+        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
+        do {
+            try self.importRefreshedAuth(dirURL: home, profile: profile, vault: vault)
+        } catch {
+            if self.isRecoverableWritebackError(error) {
+                fputs("[lease end] write-back FAILED for '\(profile)': \(error). "
+                    + "Preserving the leased home for recovery; not released (gc will reclaim it after the TTL).\n", stderr)
+                throw error
+            }
+            fputs("[lease end] nothing to write back for '\(profile)' (\(error)); releasing the lease.\n", stderr)
+            // fall through to release + remove below
+        }
+
+        // Write-back succeeded (or was a no-op): release + remove. Compare-and-
+        // delete on the token; only remove the home if it is the expected path.
+        try? self.removeLease(profileID: foundProfile, expectedToken: token)
+        if self.isLeaseHome(reservation.home, token: token) {
+            try? self.fileManager.removeItem(at: home)
+        }
     }
 
     private static func validateProfile(_ profile: String) throws {
