@@ -230,7 +230,6 @@ public struct LegacyKeychainAuthVault: AuthVault {
         returningItem: Bool = false
     ) -> [CFString: Any] {
         var query = self.itemQuery(profileID: capture.profileID)
-        query[kSecAttrLabel] = self.label(profileID: capture.profileID)
         query[kSecValuePersistentRef] = capture.persistentReference
         if returningItem {
             query[kSecReturnAttributes] = kCFBooleanTrue
@@ -242,10 +241,8 @@ public struct LegacyKeychainAuthVault: AuthVault {
     }
 
     private func isExpectedMigrationItem(_ item: [String: Any], profileID: String) -> Bool {
-        item[kSecClass as String] as? String == kSecClassGenericPassword as String
-            && item[kSecAttrService as String] as? String == self.service
+        item[kSecAttrService as String] as? String == self.service
             && item[kSecAttrAccount as String] as? String == profileID
-            && item[kSecAttrLabel as String] as? String == self.label(profileID: profileID)
     }
 
     /// Adds the fail-closed authentication-UI flag to read queries when
@@ -270,9 +267,6 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
-    private func label(profileID: String) -> String {
-        "Codex Profile Switcher: \(profileID)"
-    }
 }
 
 public enum KeychainAuthVaultError: LocalizedError {
