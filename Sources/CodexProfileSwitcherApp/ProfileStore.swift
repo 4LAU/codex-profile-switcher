@@ -66,16 +66,20 @@ final class ProfileStore {
         if let authVault {
             self.authVault = authVault
             self.authStorageDescription = "custom auth vault"
-        } else if ProcessSigningIdentity.hasDataProtectionKeychainAccess {
-            self.authVault = DataProtectionKeychainAuthVault()
-            self.authStorageDescription = "data-protection Keychain auth vault"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "dataProtectionKeychain"])
         } else {
-            self.authVault = FileAuthVault(root: paths.devAuthStoreURL)
-            self.authStorageDescription = "file auth vault (no data-protection Keychain entitlement)"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "file", "reason": "missing data-protection Keychain entitlement"])
+            let hasDataProtectionKeychainAccess = ProcessSigningIdentity.hasDataProtectionKeychainAccess
+            self.authVault = PrimaryAuthVaultSelector.makeVault(
+                hasDataProtectionKeychainAccess: hasDataProtectionKeychainAccess,
+                fileVaultRoot: paths.devAuthStoreURL)
+            if hasDataProtectionKeychainAccess {
+                self.authStorageDescription = "data-protection Keychain auth vault"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "dataProtectionKeychain"])
+            } else {
+                self.authStorageDescription = "file auth vault (no data-protection Keychain entitlement)"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "file", "reason": "missing data-protection Keychain entitlement"])
+            }
         }
 
         let cacheDecoder = JSONDecoder()

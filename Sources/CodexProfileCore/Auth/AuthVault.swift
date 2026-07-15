@@ -33,6 +33,17 @@ public struct AuthVaultDiagnostics: Equatable {
     }
 }
 
+public enum PrimaryAuthVaultSelector {
+    public static func makeVault(
+        hasDataProtectionKeychainAccess: Bool,
+        fileVaultRoot: URL
+    ) -> AuthVault {
+        hasDataProtectionKeychainAccess
+            ? DataProtectionKeychainAuthVault()
+            : FileAuthVault(root: fileVaultRoot)
+    }
+}
+
 public struct AuthVaultRepairResult: Equatable {
     public let total: Int
     public let repaired: Int

@@ -2108,9 +2108,13 @@ enum CodexProfileCLI {
                 notice: no data-protection Keychain entitlement - using file auth vault at \(root.path).\n
                 """, stderr)
             }
-            return FileAuthVault(root: root)
+            return PrimaryAuthVaultSelector.makeVault(
+                hasDataProtectionKeychainAccess: false,
+                fileVaultRoot: root)
         case .dataProtectionKeychain:
-            return DataProtectionKeychainAuthVault()
+            return PrimaryAuthVaultSelector.makeVault(
+                hasDataProtectionKeychainAccess: true,
+                fileVaultRoot: Self.paths.devAuthStoreURL)
         }
     }
 

@@ -24,6 +24,21 @@ final class DataProtectionKeychainAuthVaultTests {
     }
 
     @Test
+    func resolverMismatchRoutesPrimaryVaultToFileStorageWithoutSecurityAccess() throws {
+        let mismatchedCapability = KeychainAccessGroupResolver.resolve(
+            accessGroupsEntitlement: ["W3ZHLSH96F.com.4lau.codex-profile-switcher.wrong"])
+        let fileRoot = URL(fileURLWithPath: "/tmp/codex-profile-selector-test")
+        let vault = PrimaryAuthVaultSelector.makeVault(
+            hasDataProtectionKeychainAccess: mismatchedCapability != nil,
+            fileVaultRoot: fileRoot)
+
+        try expectEqual(
+            vault.diagnostics().activeBackend,
+            .file,
+            "A mismatched entitlement must route to the file vault")
+    }
+
+    @Test
     func dataProtectionQueriesUseTheFixedSecurityAttributes() throws {
         let vault = DataProtectionKeychainAuthVault()
         let profileID = "profile-1"

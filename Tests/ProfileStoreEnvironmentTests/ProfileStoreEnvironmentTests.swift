@@ -35,6 +35,36 @@ func envExpect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 
 final class ProfileStoreEnvironmentTests {
     @Test @MainActor
+    func testUnentitledAppRoutesToFileVault() throws {
+        try envExpect(
+            !ProcessSigningIdentity.hasDataProtectionKeychainAccess,
+            "This hermetic test requires an unentitled test process")
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-file-vault-routing-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let expectedAuth = Data(#"{"OPENAI_API_KEY":"sk-test-app-routing-1111111111"}"#.utf8)
+        let fileVaultAuth = home
+            .appendingPathComponent(".codex-switcher/dev-auth-store", isDirectory: true)
+            .appendingPathComponent("1.json")
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let store = ProfileStore(
+            authVault: nil,
+            environment: ["CODEX_PROFILE_HOME": home.path])
+
+        try store.saveAuthDataToVault(expectedAuth, for: "1")
+        let summary = store.debugSummaryLines()
+        let savedAuth = try Data(contentsOf: fileVaultAuth)
+        try envExpect(
+            summary.contains("auth_storage_backend: file"),
+            "An unentitled app did not select the file vault")
+        try envExpect(
+            savedAuth == expectedAuth,
+            "An unentitled app did not save auth to its file vault")
+    }
+
+    @Test @MainActor
     func testDoesNotMarkAccessRepairCompleteAfterFailedLegacyMigration() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-migration-tests-\(UUID().uuidString)", isDirectory: true)
