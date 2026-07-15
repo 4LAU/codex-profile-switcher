@@ -251,6 +251,12 @@ struct ProfileCardView: View {
             Spacer()
 
             HStack(spacing: 5) {
+                if self.isStale {
+                    Text("Cached")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Palette.warning)
+                }
+
                 if let credits = self.credits {
                     Text(credits)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -338,6 +344,11 @@ struct ProfileCardView: View {
     private var credits: String? {
         guard let snap = self.status.snapshot else { return nil }
         return creditsDisplayName(snap.creditsRemaining)
+    }
+
+    private var isStale: Bool {
+        if case .stale = self.status { return true }
+        return false
     }
 
     private var titleColor: Color {
