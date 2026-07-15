@@ -2,7 +2,7 @@ import Combine
 import Foundation
 
 enum RefreshInterval: String, CaseIterable, Identifiable {
-    case manual
+    case manual = "manual"
     case oneMinute = "1-minute"
     case twoMinutes = "2-minutes"
     case fiveMinutes = "5-minutes"
@@ -41,6 +41,7 @@ enum RefreshInterval: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
 final class RefreshPreferences: ObservableObject {
     @Published var interval: RefreshInterval {
         didSet {
