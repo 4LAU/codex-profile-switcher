@@ -256,6 +256,7 @@ public final class KeychainMigrationCoordinator {
             throw KeychainMigrationError.staleOrConsumedPreview
         }
         guard let session = self.consumeSession(matching: preview),
+              session.captures.isEmpty,
               !session.pendingCompletionProfileIDs.isEmpty else {
             throw KeychainMigrationError.staleOrConsumedPreview
         }

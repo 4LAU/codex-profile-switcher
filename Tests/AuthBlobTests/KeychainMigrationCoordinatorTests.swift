@@ -375,7 +375,21 @@ final class KeychainMigrationCoordinatorTests {
         try expectEqual(preview.pendingCompletionCandidates.map(\.action), [.completeVerifiedCopy],
                         "Pending-only row must identify its non-destructive action")
 
-        try coordinator.confirm(preview, approvedCount: preview.candidateCount)
+        try expectMigrationError(.staleOrConsumedPreview) {
+            try coordinator.completePending(preview, approvedCount: preview.pendingCompletionCount)
+        }
+        try expectEqual(source.deletedReferences, [],
+                        "Mixed confirmation must not delete a live legacy capture")
+        try expectEqual(destination.atomicCreateProfileIDs, [],
+                        "Mixed pending completion must not write a destination record")
+        try expectEqual(checkpoints.changes, [],
+                        "Mixed pending completion must not advance either migration checkpoint")
+
+        let freshPreview = try coordinator.review()
+        try expectMigrationError(.staleOrConsumedPreview) {
+            try coordinator.confirm(preview, approvedCount: preview.candidateCount)
+        }
+        try coordinator.confirm(freshPreview, approvedCount: freshPreview.candidateCount)
         try expectEqual(source.deletedReferences, [legacyCapture.persistentReference],
                         "Only the exact live legacy capture may be deleted")
         try expectEqual(
