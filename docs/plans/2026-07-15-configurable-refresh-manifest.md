@@ -165,3 +165,20 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Result:** APPROVED.
 - **Approved by L:** 2026-07-15.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: AMENDMENT REQUEST
+
+- **Change:** Add `Sources/CodexProfileCore/Support/LogRedactor.swift` as one terminal-review remediation file.
+- **Expected count:** 1 source file.
+- **Reason:** The terminal staffcheck reproduced a credential disclosure path: the new bounded Codex stderr diagnostic reaches app logging, while the shared redactor does not recognize legacy camelCase token fields accepted by the auth parser.
+- **Related existing inventory:** `Sources/CodexProfileSwitcherApp/AppDelegate.swift` already belongs to Wave 2 and will receive the coalesced forced-refresh retry fix.
+- **Product scope:** Unchanged. Both fixes make the approved refresh behavior safe and accurate.
+- **Approved by L:** standing approval to use recommended future decisions, 2026-07-15.
+- **Logged by:** orchestrator.
+
+### 2026-07-15: AMENDMENT APPROVAL
+
+- **Approved change:** Add `Sources/CodexProfileCore/Support/LogRedactor.swift` for the terminal-review credential-redaction remediation.
+- **Expected count reconciled:** 1 requested source file, 1 approved source file.
+- **Approved by L:** standing approval to use recommended future decisions, 2026-07-15.
+- **Logged by:** orchestrator.
