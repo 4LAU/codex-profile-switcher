@@ -158,3 +158,10 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Manual limitation:** The noninteractive environment could not visually inspect a live tracked popup or Settings layout; the AppKit action, identity, layout, and accessibility seams were checked directly.
 - **Approved by L:** pending.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: GATE APPROVAL
+
+- **Gate:** Wave 2 to terminal review and Wave 3.
+- **Result:** APPROVED.
+- **Approved by L:** 2026-07-15.
+- **Logged by:** orchestrator.
