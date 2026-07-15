@@ -20,16 +20,20 @@ public struct AppConfig: Codable, Equatable {
     public var activeProfile: String
     public var authStorageVersion: Int?
     public var authMigrationStates: [String: AuthMigrationState]?
+    /// SHA-256 digests of v2 auth blobs recorded before their legacy copies are removed.
+    public var authMigrationPendingFingerprints: [String: String]?
 
     public init(
         profiles: [ProfileConfig],
         activeProfile: String,
         authStorageVersion: Int? = nil,
-        authMigrationStates: [String: AuthMigrationState]? = nil
+        authMigrationStates: [String: AuthMigrationState]? = nil,
+        authMigrationPendingFingerprints: [String: String]? = nil
     ) {
         self.profiles = profiles
         self.activeProfile = activeProfile
         self.authStorageVersion = authStorageVersion
         self.authMigrationStates = authMigrationStates
+        self.authMigrationPendingFingerprints = authMigrationPendingFingerprints
     }
 }

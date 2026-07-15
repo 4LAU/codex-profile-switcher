@@ -12,7 +12,8 @@ final class ProfileStore {
         AuthVault,
         [ProfileConfig],
         [String: AuthMigrationState]?,
-        @escaping (String, AuthMigrationState) throws -> Void
+        [String: String]?,
+        @escaping (String, AuthMigrationState, String?) throws -> Void
     ) throws -> KeychainMigrationCoordinator
 
     private let paths: AppPaths
@@ -417,6 +418,7 @@ final class ProfileStore {
                     self.authVault,
                     self.config.profiles,
                     self.config.authMigrationStates,
+                    self.config.authMigrationPendingFingerprints,
                     checkpoint)
             } else {
                 guard let destination = self.authVault as? DataProtectionKeychainAuthVault else {
@@ -428,6 +430,7 @@ final class ProfileStore {
                     destination: destination,
                     profiles: self.config.profiles,
                     migrationStates: self.config.authMigrationStates,
+                    pendingFingerprints: self.config.authMigrationPendingFingerprints,
                     checkpoint: checkpoint)
             }
             let preview = try coordinator.review()
@@ -564,17 +567,32 @@ final class ProfileStore {
         try data.write(to: self.configURL, options: .atomic)
     }
 
-    private func keychainMigrationCheckpoint() -> (String, AuthMigrationState) throws -> Void {
-        { [weak self] profileID, state in
+    private func keychainMigrationCheckpoint() -> (String, AuthMigrationState, String?) throws -> Void {
+        { [weak self] profileID, state, pendingFingerprint in
             guard let self else { throw KeychainMigrationError.checkpointFailed }
             let previousStates = self.config.authMigrationStates
+            let previousFingerprints = self.config.authMigrationPendingFingerprints
             var updatedStates = previousStates ?? [:]
+            var updatedFingerprints = previousFingerprints ?? [:]
             updatedStates[profileID] = state
+            switch state {
+            case .copiedCleanupPending:
+                guard let pendingFingerprint else {
+                    throw KeychainMigrationError.checkpointFailed
+                }
+                updatedFingerprints[profileID] = pendingFingerprint
+            case .complete:
+                updatedFingerprints.removeValue(forKey: profileID)
+            }
             self.config.authMigrationStates = updatedStates
+            self.config.authMigrationPendingFingerprints = updatedFingerprints.isEmpty
+                ? nil
+                : updatedFingerprints
             do {
                 try self.saveConfigThrowing()
             } catch {
                 self.config.authMigrationStates = previousStates
+                self.config.authMigrationPendingFingerprints = previousFingerprints
                 throw error
             }
         }
@@ -583,17 +601,22 @@ final class ProfileStore {
     /// Persist this before deleting destination auth. A pending cleanup marker
     /// without a destination copy cannot be completed safely.
     private func removeAuthMigrationState(for profileID: String) throws {
-        guard var states = self.config.authMigrationStates,
-              states.removeValue(forKey: profileID) != nil else {
+        var states = self.config.authMigrationStates ?? [:]
+        var fingerprints = self.config.authMigrationPendingFingerprints ?? [:]
+        guard states.removeValue(forKey: profileID) != nil
+                || fingerprints.removeValue(forKey: profileID) != nil else {
             return
         }
 
         let previousStates = self.config.authMigrationStates
+        let previousFingerprints = self.config.authMigrationPendingFingerprints
         self.config.authMigrationStates = states.isEmpty ? nil : states
+        self.config.authMigrationPendingFingerprints = fingerprints.isEmpty ? nil : fingerprints
         do {
             try self.saveConfigThrowing()
         } catch {
             self.config.authMigrationStates = previousStates
+            self.config.authMigrationPendingFingerprints = previousFingerprints
             throw error
         }
     }

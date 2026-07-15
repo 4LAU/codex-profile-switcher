@@ -1,6 +1,7 @@
 @testable import CodexProfileCore
 @testable import CodexProfileSwitcherApp
 import Foundation
+import CryptoKit
 import Testing
 
 enum ProfileStoreEnvironmentTestFailure: Error, CustomStringConvertible {
@@ -106,7 +107,7 @@ private func migrationCoordinatorFactory(
     source: MigrationTestSource,
     counter: MigrationFactoryCounter
 ) -> ProfileStore.KeychainMigrationCoordinatorFactory {
-    { vault, profiles, states, checkpoint in
+    { vault, profiles, states, pendingFingerprints, checkpoint in
         counter.recordInvocation()
         guard let destination = vault as? MigrationTestVault else {
             throw KeychainMigrationError.destinationUnavailable
@@ -117,6 +118,7 @@ private func migrationCoordinatorFactory(
             destination: destination,
             profiles: profiles,
             migrationStates: states,
+            pendingFingerprints: pendingFingerprints,
             checkpoint: checkpoint)
     }
 }
@@ -474,7 +476,7 @@ final class ProfileStoreEnvironmentTests {
     }
 
     @Test @MainActor
-    func testPendingOnlyCompletionDoesNotDeleteAndMarksComplete() throws {
+    func testPendingOnlyCompletionRequiresTheRecordedCopiedCredential() throws {
         let workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-profile-store-migration-pending-tests-\(UUID().uuidString)", isDirectory: true)
         let home = workDir.appendingPathComponent("home", isDirectory: true)
@@ -494,6 +496,43 @@ final class ProfileStoreEnvironmentTests {
 
         let vault = MigrationTestVault(blobs: ["1": auth])
         let source = MigrationTestSource(captures: [])
+        let legacyPendingStore = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
+                source: source,
+                counter: MigrationFactoryCounter()))
+        let legacyPreview = try legacyPendingStore.reviewLegacyKeychainMigration()
+
+        try envExpect(legacyPreview.candidateCount == 0, "Pending-only review exposed a destructive candidate")
+        try envExpect(legacyPreview.pendingCompletionCount == 0,
+                      "Legacy pending state without provenance was accepted")
+        legacyPendingStore.cancelLegacyKeychainMigrationReview(legacyPreview)
+
+        var config = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(contentsOf: switcherHome.appendingPathComponent("config.json")))
+        try envExpect(config.authMigrationStates?["1"] == .copiedCleanupPending,
+                      "Legacy pending state was deleted instead of preserved for re-review")
+
+        config.authMigrationPendingFingerprints = [
+            "1": SHA256.hash(data: auth).map { String(format: "%02x", $0) }.joined(),
+        ]
+        try JSONEncoder().encode(config).write(to: switcherHome.appendingPathComponent("config.json"))
+
+        let replacement = Data(#"{"tokens":{"access_token":"replacement-access","refresh_token":"replacement-refresh"}}"#.utf8)
+        try vault.saveAuthBlob(replacement, profileID: "1")
+        let replacementStore = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
+                source: source,
+                counter: MigrationFactoryCounter()))
+        try expectMigrationError(.destinationReadbackFailed) {
+            _ = try replacementStore.reviewLegacyKeychainMigration()
+        }
+
+        try vault.saveAuthBlob(auth, profileID: "1")
         let store = ProfileStore(
             authVault: vault,
             environment: ["CODEX_PROFILE_HOME": home.path],
@@ -501,18 +540,19 @@ final class ProfileStoreEnvironmentTests {
                 source: source,
                 counter: MigrationFactoryCounter()))
         let preview = try store.reviewLegacyKeychainMigration()
-
-        try envExpect(preview.candidateCount == 0, "Pending-only review exposed a destructive candidate")
-        try envExpect(preview.pendingCompletionCount == 1, "Pending-only review omitted its completion candidate")
+        try envExpect(preview.pendingCompletionCount == 1,
+                      "Recorded pending copy was not available for completion")
         try store.completePendingKeychainMigration(preview, approvedCount: 1)
 
-        let config = try JSONDecoder().decode(
+        config = try JSONDecoder().decode(
             AppConfig.self,
             from: Data(contentsOf: switcherHome.appendingPathComponent("config.json")))
         let destinationData = try vault.loadAuthBlob(profileID: "1")
         try envExpect(source.deleteCount == 0, "Pending-only completion deleted a legacy copy")
         try envExpect(destinationData == auth, "Pending-only completion changed destination auth")
         try envExpect(config.authMigrationStates?["1"] == .complete, "Pending-only completion did not checkpoint complete")
+        try envExpect(config.authMigrationPendingFingerprints == nil,
+                      "Completed migration retained its pending credential fingerprint")
     }
 
 }

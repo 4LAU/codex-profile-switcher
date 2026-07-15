@@ -1,4 +1,5 @@
 @testable import CodexProfileCore
+import CryptoKit
 import Foundation
 import Testing
 
@@ -813,13 +814,22 @@ private func makeCoordinator(
     migrationStates: [String: AuthMigrationState]?,
     checkpoints: MigrationCheckpoints
 ) -> KeychainMigrationCoordinator {
-    KeychainMigrationCoordinator(
+    let pendingFingerprints = (migrationStates ?? [:]).reduce(into: [String: String]()) {
+        fingerprints, entry in
+        guard entry.value == .copiedCleanupPending,
+              let data = try? destination.loadAuthBlob(profileID: entry.key) else {
+            return
+        }
+        fingerprints[entry.key] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    return KeychainMigrationCoordinator(
         captureLegacyRecords: { try source.capture() },
         deleteLegacyRecord: { capture in try source.delete(capture) },
         destination: destination,
         profiles: profiles,
         migrationStates: migrationStates,
-        checkpoint: { profileID, state in
+        pendingFingerprints: pendingFingerprints,
+        checkpoint: { profileID, state, _ in
             try checkpoints.save(profileID: profileID, state: state)
         })
 }

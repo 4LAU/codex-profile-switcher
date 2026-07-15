@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum KeychainMigrationCandidateStatus: Equatable, Sendable {
     case ready
@@ -131,7 +132,8 @@ public final class KeychainMigrationCoordinator {
     private let destination: KeychainMigrationDestination
     private let profiles: [ProfileConfig]
     private let migrationStates: [String: AuthMigrationState]
-    private let checkpoint: (String, AuthMigrationState) throws -> Void
+    private let pendingFingerprints: [String: String]
+    private let checkpoint: (String, AuthMigrationState, String?) throws -> Void
     private var activeSession: Session?
     private var isOperationInProgress = false
 
@@ -140,7 +142,8 @@ public final class KeychainMigrationCoordinator {
         destination: DataProtectionKeychainAuthVault,
         profiles: [ProfileConfig],
         migrationStates: [String: AuthMigrationState]?,
-        checkpoint: @escaping (String, AuthMigrationState) throws -> Void
+        pendingFingerprints: [String: String]?,
+        checkpoint: @escaping (String, AuthMigrationState, String?) throws -> Void
     ) {
         self.init(
             captureLegacyRecords: { try legacyVault.captureLegacyAuthBlobsForMigration() },
@@ -148,6 +151,7 @@ public final class KeychainMigrationCoordinator {
             destination: destination,
             profiles: profiles,
             migrationStates: migrationStates,
+            pendingFingerprints: pendingFingerprints,
             checkpoint: checkpoint)
     }
 
@@ -157,13 +161,15 @@ public final class KeychainMigrationCoordinator {
         destination: KeychainMigrationDestination,
         profiles: [ProfileConfig],
         migrationStates: [String: AuthMigrationState]?,
-        checkpoint: @escaping (String, AuthMigrationState) throws -> Void
+        pendingFingerprints: [String: String]?,
+        checkpoint: @escaping (String, AuthMigrationState, String?) throws -> Void
     ) {
         self.captureLegacyRecords = captureLegacyRecords
         self.deleteLegacyRecord = deleteLegacyRecord
         self.destination = destination
         self.profiles = profiles
         self.migrationStates = migrationStates ?? [:]
+        self.pendingFingerprints = pendingFingerprints ?? [:]
         self.checkpoint = checkpoint
     }
 
@@ -243,7 +249,10 @@ public final class KeychainMigrationCoordinator {
 
         for capture in session.captures.sorted(by: { $0.profileID < $1.profileID }) {
             try self.copyAndVerify(capture)
-            try self.saveCheckpoint(.copiedCleanupPending, for: capture.profileID)
+            try self.saveCheckpoint(
+                .copiedCleanupPending,
+                pendingFingerprint: self.integrityFingerprint(capture.authBlob),
+                for: capture.profileID)
             try self.deleteLegacy(capture)
             try self.verifyDestinationAfterLegacyDeletion(capture)
             try self.saveCheckpoint(.complete, for: capture.profileID)
@@ -266,7 +275,10 @@ public final class KeychainMigrationCoordinator {
             throw KeychainMigrationError.pendingCompletionCountMismatch
         }
         for profileID in session.pendingCompletionProfileIDs {
-            try self.verifyPendingCompletionCopy(profileID: profileID)
+            guard let fingerprint = self.pendingFingerprints[profileID] else {
+                throw KeychainMigrationError.destinationReadbackFailed
+            }
+            try self.verifyPendingCompletionCopy(profileID: profileID, fingerprint: fingerprint)
             try self.saveCheckpoint(.complete, for: profileID)
         }
     }
@@ -381,9 +393,13 @@ public final class KeychainMigrationCoordinator {
         try self.verifyDestinationCopy(for: capture)
     }
 
-    private func saveCheckpoint(_ state: AuthMigrationState, for profileID: String) throws {
+    private func saveCheckpoint(
+        _ state: AuthMigrationState,
+        pendingFingerprint: String? = nil,
+        for profileID: String
+    ) throws {
         do {
-            try self.checkpoint(profileID, state)
+            try self.checkpoint(profileID, state, pendingFingerprint)
         } catch {
             throw KeychainMigrationError.checkpointFailed
         }
@@ -404,15 +420,18 @@ public final class KeychainMigrationCoordinator {
     ) throws -> [String] {
         let sourceProfileIDs = Set(captures.map(\.profileID))
         let profileIDs = self.migrationStates.compactMap { profileID, state in
-            state == .copiedCleanupPending && !sourceProfileIDs.contains(profileID) ? profileID : nil
+            state == .copiedCleanupPending
+                && !sourceProfileIDs.contains(profileID)
+                && self.pendingFingerprints[profileID] != nil ? profileID : nil
         }
         for profileID in profileIDs {
-            try self.verifyPendingCompletionCopy(profileID: profileID)
+            guard let fingerprint = self.pendingFingerprints[profileID] else { continue }
+            try self.verifyPendingCompletionCopy(profileID: profileID, fingerprint: fingerprint)
         }
         return profileIDs.sorted()
     }
 
-    private func verifyPendingCompletionCopy(profileID: String) throws {
+    private func verifyPendingCompletionCopy(profileID: String, fingerprint: String) throws {
         guard ProfileValidator.isValid(profileID) else {
             throw KeychainMigrationError.destinationReadbackFailed
         }
@@ -422,9 +441,15 @@ public final class KeychainMigrationCoordinator {
         } catch {
             throw KeychainMigrationError.destinationReadbackFailed
         }
-        guard let data, AuthBlob.isPlausibleAuthBlob(data) else {
+        guard let data,
+              AuthBlob.isPlausibleAuthBlob(data),
+              self.integrityFingerprint(data) == fingerprint else {
             throw KeychainMigrationError.destinationReadbackFailed
         }
+    }
+
+    private func integrityFingerprint(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func label(for profileID: String) -> String {
