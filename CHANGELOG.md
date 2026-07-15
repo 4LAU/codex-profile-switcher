@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.7 -- 2026-07-15
+
+### Fixed
+
+- Legacy Keychain migration now reads protected records one at a time instead of issuing a single batch request that macOS rejects.
+
 ## 0.5.6 -- 2026-07-15
 
 ### Fixed

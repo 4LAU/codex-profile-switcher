@@ -33,7 +33,18 @@ This key is required for release builds — `package_app.sh` will fail if `SPARK
 
 ## One-Time Notary Credential Setup
 
-Run this once on the release machine:
+Run this once on the release machine. Preferred: an App Store Connect API key
+(`.p8` file, key ID, and issuer ID from
+[App Store Connect → Users and Access → Integrations → App Store Connect API](https://appstoreconnect.apple.com/access/integrations/api)):
+
+```bash
+xcrun notarytool store-credentials notarytool \
+  --key "AuthKey_XXXXXXXXXX.p8" \
+  --key-id "XXXXXXXXXX" \
+  --issuer "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
+
+Fallback (Apple is phasing app-specific passwords out for notarization):
 
 ```bash
 xcrun notarytool store-credentials notarytool \
@@ -42,7 +53,7 @@ xcrun notarytool store-credentials notarytool \
   --password "app-specific-password"
 ```
 
-The release script can then use:
+Either way, the release script then uses:
 
 ```bash
 NOTARY_KEYCHAIN_PROFILE=notarytool

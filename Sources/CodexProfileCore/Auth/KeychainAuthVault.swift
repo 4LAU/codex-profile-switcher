@@ -89,44 +89,36 @@ public struct LegacyKeychainAuthVault: AuthVault {
     }
 
     func captureLegacyAuthBlobsForMigration() throws -> [LegacyKeychainAuthBlobCapture] {
+        try self.listProfileIDs().map { profileID in
+            try self.captureLegacyAuthBlob(profileID: profileID)
+        }
+    }
+
+    private func captureLegacyAuthBlob(profileID: String) throws -> LegacyKeychainAuthBlobCapture {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(
-            self.migrationCaptureQuery() as CFDictionary,
+            self.migrationCaptureQuery(profileID: profileID) as CFDictionary,
             &result)
-
-        if status == errSecItemNotFound {
-            return []
-        }
         guard status == errSecSuccess else {
             throw KeychainAuthVaultError.operationFailed(
-                operation: "capture legacy auth blobs for migration",
-                profileID: nil,
+                operation: "capture legacy auth blob",
+                profileID: profileID,
                 status: status)
         }
-        guard let items = result as? [[String: Any]] else {
+        guard let item = result as? [String: Any],
+              self.isExpectedMigrationItem(item, profileID: profileID),
+              let authBlob = item[kSecValueData as String] as? Data,
+              AuthBlob.isPlausibleAuthBlob(authBlob),
+              let persistentReference = item[kSecValuePersistentRef as String] as? Data,
+              !persistentReference.isEmpty else {
             throw KeychainAuthVaultError.unexpectedResult(
-                operation: "capture legacy auth blobs for migration")
+                operation: "capture legacy auth blob")
         }
-
-        var profileIDs = Set<String>()
-        return try items.map { item in
-            guard let profileID = item[kSecAttrAccount as String] as? String,
-                  ProfileValidator.isValid(profileID),
-                  self.isExpectedMigrationItem(item, profileID: profileID),
-                  let authBlob = item[kSecValueData as String] as? Data,
-                  AuthBlob.isPlausibleAuthBlob(authBlob),
-                  let persistentReference = item[kSecValuePersistentRef as String] as? Data,
-                  !persistentReference.isEmpty,
-                  profileIDs.insert(profileID).inserted else {
-                throw KeychainAuthVaultError.unexpectedResult(
-                    operation: "capture legacy auth blobs for migration")
-            }
-            return LegacyKeychainAuthBlobCapture(
-                profileID: profileID,
-                authBlob: authBlob,
-                persistentReference: persistentReference,
-                service: self.service)
-        }
+        return LegacyKeychainAuthBlobCapture(
+            profileID: profileID,
+            authBlob: authBlob,
+            persistentReference: persistentReference,
+            service: self.service)
     }
 
     func deleteCapturedLegacyAuthBlob(_ capture: LegacyKeychainAuthBlobCapture) throws {
@@ -223,12 +215,12 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
-    private func migrationCaptureQuery() -> [CFString: Any] {
-        var query = self.baseServiceQuery()
+    private func migrationCaptureQuery(profileID: String) -> [CFString: Any] {
+        var query = self.itemQuery(profileID: profileID)
         query[kSecReturnAttributes] = kCFBooleanTrue
         query[kSecReturnData] = kCFBooleanTrue
         query[kSecReturnPersistentRef] = kCFBooleanTrue
-        query[kSecMatchLimit] = kSecMatchLimitAll
+        query[kSecMatchLimit] = kSecMatchLimitOne
         self.applyInteractionPolicy(to: &query)
         return query
     }
