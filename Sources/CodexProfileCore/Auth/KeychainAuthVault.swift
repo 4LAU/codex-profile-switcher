@@ -127,20 +127,9 @@ public struct LegacyKeychainAuthVault: AuthVault {
                 operation: "delete captured legacy auth blob")
         }
 
-        var result: CFTypeRef?
-        let validationStatus = SecItemCopyMatching(
-            self.capturedItemQuery(capture, returningItem: true) as CFDictionary,
-            &result)
-        if validationStatus == errSecItemNotFound {
-            throw KeychainAuthVaultError.staleMigrationSource
-        }
-        guard validationStatus == errSecSuccess else {
-            throw KeychainAuthVaultError.operationFailed(
-                operation: "revalidate legacy auth blob for migration",
-                profileID: nil,
-                status: validationStatus)
-        }
-        guard let authBlob = result as? Data, authBlob == capture.authBlob else {
+        let current = try self.captureLegacyAuthBlobForMigration(profileID: capture.profileID)
+        guard current.authBlob == capture.authBlob,
+              current.persistentReference == capture.persistentReference else {
             throw KeychainAuthVaultError.staleMigrationSource
         }
 
@@ -222,18 +211,11 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
-    private func capturedItemQuery(
-        _ capture: LegacyKeychainAuthBlobCapture,
-        returningItem: Bool = false
-    ) -> [CFString: Any] {
+    private func capturedItemQuery(_ capture: LegacyKeychainAuthBlobCapture) -> [CFString: Any] {
         var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecMatchItemList: [capture.persistentReference],
         ]
-        if returningItem {
-            query[kSecReturnData] = kCFBooleanTrue
-            query[kSecMatchLimit] = kSecMatchLimitOne
-        }
         self.applyInteractionPolicy(to: &query)
         return query
     }
