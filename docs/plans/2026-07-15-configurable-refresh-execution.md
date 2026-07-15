@@ -130,3 +130,23 @@ Tasks 3A and 4 run in one serialized implementation pass and remain separate com
 ## Wave 2 Execution Log
 
 - **PLAN START 2026-07-15:** base `program/configurable-refresh`; base_sha `e47e4d1f2d179672a89b3cf9d37956e52c5aba69`; branch `plan/configurable-refresh-wave-2`; worktree `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`; port none.
+
+## Wave 3: Documentation Closeout
+
+This single serialized task records the shipped behavior and third-party attribution. It does not change app behavior or add tests.
+
+### Task 1: Document configurable refresh and CodexBar attribution
+
+Modify only `README.md`, `THIRD_PARTY_NOTICES.md`, and `docs/plans/2026-07-15-configurable-refresh-design.md`, plus this execution log.
+
+- Document the refresh interval choices, the 5-minute default, Manual mode, and the opt-in menu-open refresh setting.
+- Explain that menu Refresh and Command-R refresh in place while the menu remains open, and that cached readings are marked `Cached`.
+- Add the required MIT notice for CodexBar, using the audited upstream commit `c61e01e774c449b06324a1cc260af7c77cf17d47` and its license text.
+- Update the design record with the final refresh-generation, queued forced-refresh, and token-redaction corrections from terminal review.
+- Keep the prose concise and written for people who use or maintain the app.
+
+Before committing, run `./build.sh`, `make check`, and `git diff --check`. Do not add test files.
+
+## Wave 3 Execution Log
+
+- **PLAN START 2026-07-15:** base `program/configurable-refresh`; base_sha `3b04e82`; branch `plan/configurable-refresh-wave-3`; worktree `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`; port none.

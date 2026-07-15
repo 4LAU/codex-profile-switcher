@@ -176,6 +176,15 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Approved by L:** standing approval to use recommended future decisions, 2026-07-15.
 - **Logged by:** orchestrator.
 
+### 2026-07-15: WAVE START
+
+- **Wave:** 3.
+- **Worktree path:** `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`.
+- **Plan branch:** `plan/configurable-refresh-wave-3`.
+- **Base branch:** `program/configurable-refresh`.
+- **Dev-server port:** none.
+- **Logged by:** orchestrator.
+
 ### 2026-07-15: AMENDMENT APPROVAL
 
 - **Approved change:** Add `Sources/CodexProfileCore/Support/LogRedactor.swift` for the terminal-review credential-redaction remediation.
