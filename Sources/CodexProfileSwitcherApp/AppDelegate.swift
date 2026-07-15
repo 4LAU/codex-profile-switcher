@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastLiveAuthMtime: Date?
     private var isMenuOpen = false
     private var menuRefreshRetryTask: Task<Void, Never>?
+    private var hasPendingForcedRefresh = false
     private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
@@ -118,7 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleRefreshComplete() {
-        self.refreshMenuItem?.setEnabled(true)
+        if self.hasPendingForcedRefresh {
+            self.hasPendingForcedRefresh = false
+            self.requestRefresh(force: true)
+        } else {
+            self.refreshMenuItem?.setEnabled(true)
+        }
         self.updateIcon()
         guard self.isMenuOpen else { return }
         self.rebuildMenu()
@@ -462,6 +468,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func requestRefresh(force: Bool = false) {
         if self.usageProvider.isRefreshing {
+            if force {
+                self.hasPendingForcedRefresh = true
+            }
             self.refreshMenuItem?.setEnabled(false)
             return
         }
@@ -559,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func clearSavedAuth(for profileId: String) -> Result<Void, SettingsActionError> {
         do {
+            self.hasPendingForcedRefresh = false
             self.usageProvider.cancelRefreshes()
             try self.store.clearSavedAuth(for: profileId)
             self.syncActiveProfile(force: true)

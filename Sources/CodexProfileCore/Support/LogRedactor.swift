@@ -9,7 +9,7 @@ public enum LogRedactor {
     private static let bearerRegex = Self.makeRegex(#"(?i)\bbearer\s+[a-z0-9._\-]+=*\b"#)
     private static let openAIKeyRegex = Self.makeRegex(#"(?i)sk-[a-z0-9_\-]{16,}"#)
     private static let tokenFieldRegex = Self.makeRegex(
-        #"(?i)("(?:access|refresh|id)_token"\s*:\s*")[^"]+(")"#)
+        #"(?i)("(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken)"\s*:\s*")[^"]+(")"#)
     private static let sensitiveQueryRegex = Self.makeRegex(
         #"(?i)([?&](?:code|device_code|user_code|access_token|refresh_token|id_token|state)=)[^&\s]+"#)
 
