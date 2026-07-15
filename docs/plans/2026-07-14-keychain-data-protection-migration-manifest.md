@@ -129,3 +129,19 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Proposed amendment:** Move `Sources/CodexProfileCore/Profiles/ProfileTransactionService.swift` from Wave 2 to Wave 1, and add its hermetic regression to the existing Wave 1 test surfaces. `AuthVault.swift` is already in Wave 1 and will also replace its ambiguous custom backend diagnostic with a dedicated Data Protection backend value.
 - **Resolution / approval:** pending L approval.
 - **Logged by:** orchestrator.
+
+### `2026-07-14`: AMENDMENT
+
+- **Change:** Move `Sources/CodexProfileCore/Profiles/ProfileTransactionService.swift` from Wave 2 to Wave 1. Add a hermetic file-vault regression proving that a normal login cannot mark legacy disk credentials migrated or remove their source file. In the existing Wave 1 auth surface, replace the ambiguous `custom` Data Protection Keychain diagnostic with a dedicated backend value.
+- **Reason:** Generic config writes could falsely mark an incomplete disk-auth migration as complete, allowing a later entitled build to delete the remaining source credentials.
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
+
+### `2026-07-14`: WAVE START
+
+- **Wave:** 1 (resumed after approved escalation)
+- **Worktree:** `/Users/aaron/Code/codex-profile-switcher-3001-worktree1`
+- **Plan branch:** `plan/keychain-data-protection-migration-wave-1`
+- **Base branch:** `program/keychain-data-protection-migration`
+- **Port:** none
+- **Logged by:** orchestrator.
