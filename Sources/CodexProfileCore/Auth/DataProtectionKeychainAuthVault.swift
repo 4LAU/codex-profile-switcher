@@ -3,7 +3,8 @@ import Security
 
 public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDestination {
     public static let accessGroup = "W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
-    public static let defaultService = LegacyKeychainAuthVault.defaultService
+    public static let defaultService = "com.4lau.codex-profile-switcher.auth"
+    private static let manualSmokeServicePrefix = "com.4lau.codex-profile-switcher.auth.smoke."
 
     public init() {}
 
@@ -172,11 +173,23 @@ public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDesti
     private func baseServiceQuery() -> [CFString: Any] {
         [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.defaultService,
+            kSecAttrService: self.service,
             kSecAttrAccessGroup: Self.accessGroup,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
             kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
         ]
+    }
+
+    // Signed manual smoke runs use disposable records.
+    private var service: String {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["CODEX_PROFILE_SIGNED_SMOKE"] == "1",
+              let override = environment["CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE"],
+              !override.isEmpty,
+              override.hasPrefix(Self.manualSmokeServicePrefix) else {
+            return Self.defaultService
+        }
+        return override
     }
 
     private func label(profileID: String) -> String {
