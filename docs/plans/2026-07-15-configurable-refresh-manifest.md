@@ -147,3 +147,14 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Execution adjustment:** Finish the race fix and cached-state label in one serialized implementation pass, then use one combined spec review, one combined quality review, and one full verification pass for the remaining Wave 2 diff.
 - **Approved by L:** 2026-07-15.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: GATE RESULT
+
+- **Gate:** Wave 2 to terminal review and Wave 3.
+- **Result:** PASS.
+- **Merged commit:** `de59d7b` on `program/configurable-refresh`.
+- **Evidence:** The merged branch passed `./build.sh`, all 53 Swift tests, integration tests, the production build check, and `git diff --check` against `base_sha`. Direct probes covered all five intervals and persistence, menu-open off/on, exact Command-R and modifier filtering, disabled/highlight/accessibility states, stable menu identity, refresh-generation cancellation and replacement, stale-with/without-snapshot labels, and the stripped-`PATH` Codex launcher. Source checks confirm one direct `UsageProvider.refreshAll` boundary.
+- **Reviews:** One combined spec review and one combined quality review approved Tasks 3, 3A, and 4 through `92992cf` with no open findings. Earlier Task 1 and Task 2 spec and quality reviews also passed.
+- **Manual limitation:** The noninteractive environment could not visually inspect a live tracked popup or Settings layout; the AppKit action, identity, layout, and accessibility seams were checked directly.
+- **Approved by L:** pending.
+- **Logged by:** orchestrator.
