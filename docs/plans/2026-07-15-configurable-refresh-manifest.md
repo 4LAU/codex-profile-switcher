@@ -91,3 +91,13 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Base branch:** `program/configurable-refresh`.
 - **Dev-server port:** none.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: GATE RESULT
+
+- **Gate:** Wave 1 to Wave 2.
+- **Result:** PASS.
+- **Merged commit:** `44d8bde` on `program/configurable-refresh`.
+- **Evidence:** The pre-change stripped-`PATH` probe failed with `codex app-server closed stdout`; the same probe at Wave 1 head succeeded with `primary=17`. Boundary probes for bearer, `sk-`, authorization-header, and JSON-token forms exposed no credential fragments. On the merged program branch, `./build.sh`, all 53 Swift tests, integration tests, the production build check, and `git diff --check` passed.
+- **Reviews:** Spec, quality, and final whole-wave reviews approved commit `a32877d` with no open findings.
+- **Approved by L:** pending.
+- **Logged by:** orchestrator.
