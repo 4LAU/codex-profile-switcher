@@ -49,7 +49,7 @@ enum CodexProfileCLI {
         ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
     private static let keychainAccessRepairVersion = 4
-    private static let version = "0.5.2"
+    private static let version = "0.5.3"
 
     /// True when no controlling terminal is attached to stdin. In this mode the
     /// CLI must never trigger a modal Keychain consent prompt (it would hang
