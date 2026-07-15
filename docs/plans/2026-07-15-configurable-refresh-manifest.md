@@ -108,3 +108,12 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Result:** APPROVED.
 - **Approved by L:** 2026-07-15.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: WAVE START
+
+- **Wave:** 2.
+- **Worktree path:** `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`.
+- **Plan branch:** `plan/configurable-refresh-wave-2`.
+- **Base branch:** `program/configurable-refresh`.
+- **Dev-server port:** none.
+- **Logged by:** orchestrator.
