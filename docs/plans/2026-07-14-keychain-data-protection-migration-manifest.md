@@ -121,6 +121,13 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approved by L:** not required; this stays within existing approved Wave 1 and Wave 2 inventory and does not change wave assignment.
 - **Logged by:** orchestrator.
 
+### `2026-07-14`: AMENDMENT
+
+- **Change:** Clarify the Wave 2 Settings flow: the destructive confirmation lists only live legacy captures, so its displayed candidate, approval, and deletion-target counts remain equal. A `copied_cleanup_pending` record whose source was already deleted after a final-checkpoint failure appears in a later explicit review with a separate non-destructive completion confirmation.
+- **Reason:** The final-checkpoint recovery has no deletion target and cannot share the frozen exact-count destructive confirmation.
+- **Approved by L:** not required; this stays within approved Wave 2 behavior and does not change wave assignment.
+- **Logged by:** orchestrator.
+
 ### `2026-07-14`: AUDIT COMPLETE
 
 - **Scope evidence:** Current production storage is `LegacyKeychainAuthVault`, which creates trusted-application ACLs with `SecTrustedApplicationCreateFromPath`. `ProfileStore` invokes ACL repair at startup. The CLI invokes repair on ordinary interactive paths. Both entitlement files are empty, package output embeds no profile, and the nested helper currently has the same bundle identifier as the app.
