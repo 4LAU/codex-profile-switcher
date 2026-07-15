@@ -117,3 +117,25 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Base branch:** `program/configurable-refresh`.
 - **Dev-server port:** none.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: ESCALATION
+
+- **Wave:** 2, halted before Task 4 dispatch.
+- **Worktree path:** `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`.
+- **Plan branch:** `plan/configurable-refresh-wave-2`.
+- **Last approved task:** Task 2 at `cf19627`.
+- **Unapproved task commits preserved:** Task 3 through `676b382`.
+- **Finding:** `UsageProvider.cancelRefreshes()` lets a cancelled refresh finish after its replacement starts. The cancelled task can clear the replacement's running state and emit completion early, which re-enables the persistent row and permits overlapping work.
+- **Evidence:** Task 3 quality review reproduced the race from the `clearSavedAuth` control flow. `./build.sh`, `make check`, and `git diff --check` still pass because the race is not covered by the existing suites.
+- **Action:** Stop new writes, preserve the worktree, and request a one-file scope amendment.
+- **Logged by:** orchestrator.
+
+### 2026-07-15: AMENDMENT REQUEST
+
+- **Change:** Add `Sources/CodexProfileSwitcherApp/UsageProvider.swift` to Wave 2 as inventory item 11, superseding the frozen out-of-scope statement for this file only.
+- **Expected count:** 1 source file.
+- **Reason:** Add refresh-generation ownership so only the current task may clear `isRefreshing`, release its task reference, flush completion state, or call `onRefreshComplete`. This closes the cancel-and-restart race without changing auth, cache, profile, or fetch behavior.
+- **Plan change after approval:** Insert a serialized Task 3A before the cached-label task, then repeat Task 3 quality review over the combined lifecycle change.
+- **Product scope:** Unchanged. This is required to make the approved no-overlap and disabled-for-the-full-refresh behavior true.
+- **Approved by L:** pending.
+- **Logged by:** orchestrator.
