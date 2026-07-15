@@ -209,3 +209,10 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Reason:** The frozen Wave 3 gate requires a signed app-helper smoke using disposable records only. This source addition is necessary to make that required evidence possible without touching live user credentials.
 - **Approval required:** L approval before the Wave 3 plan can be finalized or any implementation worker is dispatched.
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: AMENDMENT
+
+- **Change:** Add `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift` to Wave 3 solely for an opt-in `CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE` override. It must require a nonempty value, default exactly to the fixed production service, preserve the fixed v2 access group, and be used only by the manual signed smoke flow.
+- **Reason:** This makes the frozen Wave 3 disposable-service smoke gate possible without reading or changing live v2 credentials.
+- **Approved by L:** `2026-07-15`.
+- **Logged by:** orchestrator.
