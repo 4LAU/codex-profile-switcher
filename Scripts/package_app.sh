@@ -10,12 +10,11 @@ BUILD_DIR="${CODEX_PROFILE_PACKAGE_BUILD_DIR:-$ROOT_DIR/.build/package-app}"
 PACKAGE_SCRATCH="$BUILD_DIR/swiftpm"
 BUNDLE_ID="${BUNDLE_ID:-com.4lau.codex-profile-switcher}"
 OFFICIAL_BUNDLE_ID="com.4lau.codex-profile-switcher"
-OFFICIAL_HELPER_BUNDLE_ID="com.4lau.codex-profile-switcher.helper"
-HELPER_BUNDLE_ID="${HELPER_BUNDLE_ID:-$BUNDLE_ID.helper}"
+HELPER_BUNDLE_ID="${HELPER_BUNDLE_ID:-$BUNDLE_ID}"
 TEAM_ID="W3ZHLSH96F"
 AUTH_GROUP="$TEAM_ID.com.4lau.codex-profile-switcher.auth-v2"
 APP_APPLICATION_IDENTIFIER="$TEAM_ID.$OFFICIAL_BUNDLE_ID"
-HELPER_APPLICATION_IDENTIFIER="$TEAM_ID.$OFFICIAL_HELPER_BUNDLE_ID"
+HELPER_APPLICATION_IDENTIFIER="$APP_APPLICATION_IDENTIFIER"
 MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '1')}"
 REQUIRE_SIGNING="${CODEX_PROFILE_REQUIRE_SIGNING:-0}"
@@ -25,6 +24,7 @@ APP_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileSwitcher.signed.entitlements"
 HELPER_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileHelper.signed.entitlements"
 EMPTY_ENTITLEMENTS="$BUILD_DIR/empty.entitlements"
 PROFILE_VALIDATION_DIR=""
+APP_PROVISIONING_PROFILE=""
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app
@@ -88,9 +88,51 @@ validate_entitlements_file() {
 
   [[ -r "$entitlements" ]] || fail "$subject file is not readable: $entitlements"
   plutil -lint "$entitlements" >/dev/null || fail "$subject is not a valid plist."
-  require_plist_scalar "$entitlements" ":application-identifier" "$expected_application_identifier" "$subject"
+  require_plist_scalar "$entitlements" ":com.apple.application-identifier" "$expected_application_identifier" "$subject"
   require_plist_scalar "$entitlements" ":com.apple.developer.team-identifier" "$TEAM_ID" "$subject"
   require_plist_singleton_array "$entitlements" ":keychain-access-groups" "$AUTH_GROUP" "$subject"
+}
+
+profile_allows_access_group() {
+  local plist="$1"
+  local expected="$2"
+  local wildcard="$TEAM_ID.*"
+  local index=0
+  local group
+
+  while group="$(plist_value "$plist" ":Entitlements:keychain-access-groups:$index")"; do
+    [[ "$group" == "$expected" || "$group" == "$wildcard" ]] && return 0
+    index=$((index + 1))
+  done
+  return 1
+}
+
+profile_is_unexpired() {
+  local plist="$1"
+  local expiration
+  local expiration_epoch
+
+  expiration="$(plutil -extract ExpirationDate raw -o - "$plist" 2>/dev/null)" || return 1
+  expiration_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$expiration" '+%s' 2>/dev/null)" || return 1
+  (( expiration_epoch > $(date -u '+%s') ))
+}
+
+profile_has_signing_certificate() {
+  local plist="$1"
+  local identity="$2"
+  local local_fingerprint
+  local profile_fingerprint
+  local encoded_certificate
+  local index=0
+
+  local_fingerprint="$(security find-certificate -c "$identity" -p 2>/dev/null | openssl x509 -outform DER 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+  [[ -n "$local_fingerprint" ]] || return 1
+  while encoded_certificate="$(plutil -extract "DeveloperCertificates.$index" raw -o - "$plist" 2>/dev/null)"; do
+    profile_fingerprint="$(printf '%s' "$encoded_certificate" | base64 -D | shasum -a 256 | awk '{print $1}')" || return 1
+    [[ "$profile_fingerprint" == "$local_fingerprint" ]] && return 0
+    index=$((index + 1))
+  done
+  return 1
 }
 
 cleanup_profile_validation() {
@@ -112,17 +154,67 @@ validate_provisioning_profile() {
   plutil -lint "$decoded_profile" >/dev/null || fail "$role provisioning profile is not a valid plist."
   require_plist_singleton_array "$decoded_profile" ":ApplicationIdentifierPrefix" "$TEAM_ID" "$role provisioning profile"
   require_plist_singleton_array "$decoded_profile" ":TeamIdentifier" "$TEAM_ID" "$role provisioning profile"
-  require_plist_scalar "$decoded_profile" ":Entitlements:application-identifier" "$expected_application_identifier" "$role provisioning profile"
+  require_plist_scalar "$decoded_profile" ":Entitlements:com.apple.application-identifier" "$expected_application_identifier" "$role provisioning profile"
   require_plist_scalar "$decoded_profile" ":Entitlements:com.apple.developer.team-identifier" "$TEAM_ID" "$role provisioning profile"
-  require_plist_singleton_array "$decoded_profile" ":Entitlements:keychain-access-groups" "$AUTH_GROUP" "$role provisioning profile"
+  profile_allows_access_group "$decoded_profile" "$AUTH_GROUP" \
+    || fail "$role provisioning profile does not authorize the required Keychain access group."
+  profile_is_unexpired "$decoded_profile" \
+    || fail "$role provisioning profile is expired or has an invalid expiration date."
+  profile_has_signing_certificate "$decoded_profile" "$APP_IDENTITY" \
+    || fail "$role provisioning profile does not include the selected signing certificate."
+}
+
+discover_provisioning_profile() {
+  local expected_application_identifier="$1"
+  local candidate
+  local decoded_profile
+  local search_dirs=(
+    "$HOME/Developer/AppleProfiles"
+    "$HOME/Library/MobileDevice/Provisioning Profiles"
+  )
+
+  for directory in "${search_dirs[@]}"; do
+    [[ -d "$directory" ]] || continue
+    while IFS= read -r -d '' candidate; do
+      decoded_profile="$PROFILE_VALIDATION_DIR/candidate.plist"
+      security cms -D -i "$candidate" > "$decoded_profile" 2>/dev/null || continue
+      [[ "$(plist_value "$decoded_profile" ':Entitlements:com.apple.application-identifier')" == "$expected_application_identifier" ]] || continue
+      [[ "$(plist_value "$decoded_profile" ':Entitlements:com.apple.developer.team-identifier')" == "$TEAM_ID" ]] || continue
+      profile_allows_access_group "$decoded_profile" "$AUTH_GROUP" || continue
+      profile_is_unexpired "$decoded_profile" || continue
+      profile_has_signing_certificate "$decoded_profile" "$APP_IDENTITY" || continue
+      printf '%s\n' "$candidate"
+      return 0
+    done < <(find "$directory" -maxdepth 1 -type f \( -name '*.provisionprofile' -o -name '*.mobileprovision' \) -print0)
+  done
+  return 1
+}
+
+resolve_provisioning_profile() {
+  local supplied_profile="$1"
+  local expected_application_identifier="$2"
+  local environment_variable="$3"
+  local discovered_profile
+
+  if [[ -n "$supplied_profile" ]]; then
+    printf '%s\n' "$supplied_profile"
+    return
+  fi
+  if discovered_profile="$(discover_provisioning_profile "$expected_application_identifier")"; then
+    log "Discovered $environment_variable at $discovered_profile" >&2
+    printf '%s\n' "$discovered_profile"
+    return
+  fi
+  fail "$environment_variable is required; no matching profile was found locally."
 }
 
 validate_release_profiles() {
   PROFILE_VALIDATION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-release-profiles.XXXXXX")" \
     || fail "could not create a temporary directory for profile validation."
   trap cleanup_profile_validation EXIT
-  validate_provisioning_profile "${CODEX_PROFILE_APP_PROVISIONING_PROFILE:-}" "$APP_APPLICATION_IDENTIFIER" "APP" "CODEX_PROFILE_APP_PROVISIONING_PROFILE"
-  validate_provisioning_profile "${CODEX_PROFILE_HELPER_PROVISIONING_PROFILE:-}" "$HELPER_APPLICATION_IDENTIFIER" "HELPER" "CODEX_PROFILE_HELPER_PROVISIONING_PROFILE"
+  [[ -n "${APP_IDENTITY:-}" ]] || fail "APP_IDENTITY is required for release profile validation."
+  APP_PROVISIONING_PROFILE="$(resolve_provisioning_profile "${CODEX_PROFILE_APP_PROVISIONING_PROFILE:-}" "$APP_APPLICATION_IDENTIFIER" "CODEX_PROFILE_APP_PROVISIONING_PROFILE")"
+  validate_provisioning_profile "$APP_PROVISIONING_PROFILE" "$APP_APPLICATION_IDENTIFIER" "APP" "CODEX_PROFILE_APP_PROVISIONING_PROFILE"
 }
 
 validate_release_profiles_only=0
@@ -147,7 +239,7 @@ fi
 
 if [[ "$REQUIRE_SIGNING" == "1" ]]; then
   [[ "$BUNDLE_ID" == "$OFFICIAL_BUNDLE_ID" ]] || fail "BUNDLE_ID must be $OFFICIAL_BUNDLE_ID for signed release builds."
-  [[ "$HELPER_BUNDLE_ID" == "$OFFICIAL_HELPER_BUNDLE_ID" ]] || fail "HELPER_BUNDLE_ID must be $OFFICIAL_HELPER_BUNDLE_ID for signed release builds."
+  [[ "$HELPER_BUNDLE_ID" == "$OFFICIAL_BUNDLE_ID" ]] || fail "HELPER_BUNDLE_ID must be $OFFICIAL_BUNDLE_ID for signed release builds."
   validate_entitlements_file "$APP_ENTITLEMENTS_BASE" "$APP_APPLICATION_IDENTIFIER" "app entitlements"
   validate_entitlements_file "$HELPER_ENTITLEMENTS_BASE" "$HELPER_APPLICATION_IDENTIFIER" "helper entitlements"
   validate_release_profiles
@@ -266,8 +358,8 @@ ln -s "CodexProfileHelper.app/Contents/MacOS/codex-profile" "$HELPER_COMPAT_LINK
 chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$HELPER_APP_EXECUTABLE"
 
 if [[ "$REQUIRE_SIGNING" == "1" ]]; then
-  cp "$CODEX_PROFILE_APP_PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
-  cp "$CODEX_PROFILE_HELPER_PROVISIONING_PROFILE" "$HELPER_APP_BUNDLE/Contents/embedded.provisionprofile"
+  cp "$APP_PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
+  cp "$APP_PROVISIONING_PROFILE" "$HELPER_APP_BUNDLE/Contents/embedded.provisionprofile"
 fi
 
 log "Embedding Sparkle.framework..."

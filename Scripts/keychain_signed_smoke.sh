@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="${APP_BUNDLE:-$ROOT_DIR/CodexProfileSwitcher.app}"
 REPACKAGED_APP_BUNDLE="${REPACKAGED_APP_BUNDLE:-}"
 APP_BUNDLE_ID="com.4lau.codex-profile-switcher"
-HELPER_BUNDLE_ID="com.4lau.codex-profile-switcher.helper"
+HELPER_BUNDLE_ID="com.4lau.codex-profile-switcher"
 ACCESS_GROUP="W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
 SMOKE_SERVICE_PREFIX="com.4lau.codex-profile-switcher.auth.smoke."
 SERVICE="${CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE:-$SMOKE_SERVICE_PREFIX$(date +%s).$$}"
@@ -47,7 +47,7 @@ verify_entitlements() {
   codesign -d --entitlements :- "$binary" > "$entitlements" 2>/dev/null \
     || fail "could not inspect $name entitlements"
   plutil -lint "$entitlements" >/dev/null || fail "$name entitlements are not a plist"
-  [[ "$(plist_value "$entitlements" ':application-identifier')" == "W3ZHLSH96F.$expected_id" ]] \
+  [[ "$(plist_value "$entitlements" ':com.apple.application-identifier')" == "W3ZHLSH96F.$expected_id" ]] \
     || fail "$name has an unexpected application identifier"
   [[ "$(plist_value "$entitlements" ':keychain-access-groups:0')" == "$ACCESS_GROUP" ]] \
     || fail "$name has an unexpected Keychain group"
@@ -67,9 +67,9 @@ verify_bundle() {
   [[ -x "$app_binary" && -x "$helper" ]] || fail "$name app bundle is missing an executable"
   codesign --verify --deep --strict --verbose=2 "$bundle"
   codesign --verify --strict --verbose=2 "$helper_bundle"
-  codesign -dvv "$app_binary" 2>&1 | grep -Fq 'Authority=Developer ID Application' \
+  codesign -dvv "$app_binary" 2>&1 | grep -F 'Authority=Developer ID Application' >/dev/null \
     || fail "$name app is not Developer ID signed"
-  codesign -dvv "$helper" 2>&1 | grep -Fq 'Authority=Developer ID Application' \
+  codesign -dvv "$helper" 2>&1 | grep -F 'Authority=Developer ID Application' >/dev/null \
     || fail "$name helper is not Developer ID signed"
   [[ "$(plist_value "$bundle/Contents/Info.plist" ':CFBundleIdentifier')" == "$APP_BUNDLE_ID" ]] \
     || fail "$name app has an unexpected bundle identifier"
