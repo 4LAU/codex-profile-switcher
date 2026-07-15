@@ -2,7 +2,7 @@
 
 ## Problem
 
-Usage data should stay current without interrupting menu interaction. Users need control over the background cadence and whether opening the menu fetches fresh data. A manual refresh must update the open menu in place instead of dismissing it.
+Usage data should stay current without interrupting menu interaction. Users need control over the background cadence and whether opening the menu fetches fresh data. A manual refresh must update the open menu in place instead of dismissing it. Failed refreshes must not look current.
 
 ## Goals
 
@@ -11,6 +11,8 @@ Usage data should stay current without interrupting menu interaction. Users need
 - Keep the menu open when Refresh or Command-R starts a fetch.
 - Disable the Refresh row while any usage refresh is running, then enable it when the fetch finishes.
 - Continue using `UsageProvider` to suppress overlapping work and preserve cached data on failure.
+- Make Codex usage fetching work when the packaged app is launched without a Homebrew-aware `PATH`.
+- Mark cached usage as cached when a refresh fails.
 
 ## Non-goals
 
@@ -23,6 +25,16 @@ Usage data should stay current without interrupting menu interaction. Users need
 ## Reference
 
 [CodexBar](https://github.com/steipete/CodexBar) uses an app preference for menu-open refresh and a custom AppKit menu row for actions that must not end menu tracking. It is MIT-licensed, as is this repository. This implementation will adapt that interaction pattern to the existing single-menu architecture without copying CodexBar's provider, viewport, or menu-reconciliation machinery.
+
+The [Codex app-server documentation](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md#7-rate-limits-chatgpt) defines `usedPercent` as usage consumed within the quota window. The app should continue displaying that value as used, not invert it.
+
+## Diagnosed stale usage
+
+The percentages in the reported menu were old cached values. The cache had stopped advancing while the app log recorded `codex app-server closed stdout` for every profile on every timer and manual attempt.
+
+The current Codex app bundle no longer contains the CLI at the path this app checks first, so resolution falls back to Homebrew. The packaged profile switcher was launched without a `PATH` entry for Homebrew. `CodexCLIResolver` constructs a broader path to locate `/opt/homebrew/bin/codex`, but `CodexRPCClient` starts that file with the app's original environment. The installed file is a Node launcher with `#!/usr/bin/env node`. Without `/opt/homebrew/bin` in the child environment, `env` cannot find `node`, so the process exits before the JSON-RPC handshake. Running the same launcher with a system-only path reproduces `env: node: No such file or directory`.
+
+The fetcher also drains and discards the helper's standard error. The user-facing failure becomes the less useful `codex app-server closed stdout`, which hid the missing-Node cause. `UsageProvider` correctly falls back to the cached snapshot, but `ProfileCardView` renders stale and available snapshots the same way. The moving reset countdown made the old values look live.
 
 ## Preferences
 
@@ -75,9 +87,26 @@ A manual click or Command-R calls `requestUsageRefresh(force: true)`. Because th
 
 If the user closes the menu during a fetch, the fetch continues. The status icon still updates on completion, and the next opening builds from the latest stored state.
 
+## Codex helper environment
+
+`CodexCLIResolver` will expose one child-environment builder based on the same effective path it uses for executable discovery. `CLIUsageFetcher.fetch` will use that environment before starting `CodexRPCClient`. This keeps the resolved `codex` launcher and its interpreter on the same path. Existing environment entries come first, followed by the app's known Homebrew and system fallbacks, with duplicates removed.
+
+This applies whether `codex` is a native binary, a script, or an explicit `CODEX_CLI` override. Native binaries are unaffected. Script launchers can find their interpreter and sibling tools.
+
+`CodexRPCClient` will retain only a short bounded tail of standard error. If the child closes stdout before a response, the error will include an excerpt when one exists. The buffer must stay bounded, and the excerpt must pass through `LogRedactor` before it enters an error or log message.
+
+## Cached-state presentation
+
+`ProfileCardView` will distinguish `.stale` from `.available` without adding another row to every profile card. A stale card will show a compact amber `Cached` label in its header while continuing to show the last good bars and reset dates. A successful fetch removes the label. `Re-login needed` keeps its current warning treatment.
+
+The app will not erase cached values on a transient failure. Cached data is still useful for comparison, but the label makes its age and reliability clear. Debug Info continues to carry the detailed last error and cache age.
+
 ## Errors and edge cases
 
 - Fetch failures keep the existing cached or stale profile state. The Refresh row re-enables after the refresh task completes.
+- A stale snapshot shows `Cached`; it cannot be mistaken for a successful live refresh.
+- A script-based Codex launcher receives the same effective path used to discover it.
+- A helper that exits before replying reports a bounded, redacted standard-error excerpt when available.
 - Opening the menu during a timer refresh does not start duplicate work. The open menu still updates when that refresh completes.
 - Clicking a disabled row or pressing Command-R while refreshing does nothing.
 - Selecting Manual while a refresh is running stops future timer ticks but does not cancel the current fetch.
@@ -97,7 +126,10 @@ Rebuild first with `./build.sh`, then run the loose menu bar app.
 6. Click Refresh and press Command-R in separate runs. Confirm the menu stays open, the row disables during the fetch, visible rates update, and the row enables afterward.
 7. Trigger a second manual or menu-open refresh while one is active and confirm only one fetch runs.
 8. Close the menu during a refresh, wait for completion, and confirm the status icon and next menu opening show the result.
-9. Run `make check` and `git diff --check`.
+9. Launch the packaged app from Finder or Login Items with no Homebrew path in its inherited environment. Confirm the Homebrew Codex launcher fetches current rates.
+10. Force the helper to launch with a missing interpreter. Confirm the error names the missing program without exposing credentials, and the menu marks prior values as `Cached`.
+11. Compare one active account against Codex: the menu's used percentage must equal `100 - usage remaining` for the same window and reset date.
+12. Run the focused Codex rate-limit tests, `make check`, and `git diff --check`.
 
 ## Execution Signals
 
@@ -109,6 +141,9 @@ Rebuild first with `./build.sh`, then run the loose menu bar app.
 | Persistent menu action | Create `Sources/CodexProfileSwitcherApp/PersistentRefreshMenuItem.swift` |
 | Refresh lifecycle and menu wiring | Modify `Sources/CodexProfileSwitcherApp/AppDelegate.swift` |
 | General settings UI | Modify `Sources/CodexProfileSwitcherApp/SettingsViews.swift` |
+| Codex launcher environment and exit diagnostics | Modify `Sources/CodexProfileCore/Usage/CodexRPCClient.swift` |
+| Cached-state presentation | Modify `Sources/CodexProfileSwitcherApp/MenuViews.swift` |
+| Fetch environment regression coverage | Modify `Tests/AuthBlobTests/CodexRateLimitsTests.swift` |
 | User documentation | Modify `README.md` |
 
 SwiftPM includes new files by target directory, so `Package.swift` and generated artifacts do not change.
@@ -117,6 +152,8 @@ SwiftPM includes new files by target directory, so `Package.swift` and generated
 
 - General settings and `AppDelegate` depend on the preference model.
 - `AppDelegate` depends on the persistent menu types.
+- Usage refresh depends on the resolver's child environment.
+- Cached-state presentation depends on the existing `.stale` status set by `UsageProvider` after a fetch error.
 - Documentation depends on the final setting names and behavior.
 - The two new files are independent of each other, but their wiring in `AppDelegate` should happen after both exist.
 
@@ -126,14 +163,14 @@ None. The change writes two reversible `UserDefaults` preferences. It does not m
 
 ### External dependencies
 
-None. CodexBar is a source and behavior reference, not a build dependency.
+No new dependency. CodexBar is a source and behavior reference, not a build dependency. Packaged-app verification uses the Codex CLI already installed on the test Mac.
 
 ### Estimated span
 
-Single session. The implementation touches five files and has no migration or rollout dependency.
+Single session. The implementation touches eight files and has no migration or rollout dependency. The preference/menu work and fetch-environment work can be implemented independently before final integration.
 
 ## Post-Implementation
 
-Run `staffcheck` after implementation and fix confirmed findings. This plan is not load-bearing: it is reversible, does not touch auth, migrations, money, or a public contract, affects no more than five implementation files, and uses an established AppKit pattern. A cross-vendor challenge review is not required.
+Run `staffcheck` after implementation and fix confirmed findings. This plan is load-bearing because its file surface is greater than five files. After staffcheck stabilizes the diff, run `codex-challenge` once in implementation review mode against the full branch diff with `REVIEW_ONLY: true`. Apply only accepted findings, reproduce each failure, run affected verification, audit the final delta, and commit fixes that pass.
 
 Do not run `simplify` unless requested. No manual setup, secrets, migrations, or service configuration will be required from the user.
