@@ -66,7 +66,19 @@ Replace obsolete repair assertions with deterministic fake- or file-vault checks
 
 Run the focused tests, then `./build.sh` and `make check`. Do not add a test that accesses macOS Keychain. Report status and changed files without committing.
 
+## Task 3A: Make entitlement rejection routing directly testable
+
+Depends on Task 3. Touch only these files:
+
+- `Sources/CodexProfileCore/Auth/AuthVault.swift`
+- `Sources/CodexProfileSwitcherApp/ProfileStore.swift`
+- `Sources/CodexProfileCLI/CodexProfileCLI.swift`
+- Directly related hermetic tests under `Tests/AuthBlobTests/`
+
+Add the smallest shared selector that turns the already-resolved Data Protection entitlement capability and a file-vault root into the primary vault. Route normal app and CLI construction through it. In a hermetic unit test, pass the failed result of a mismatched access-group resolution into the selector and prove it returns a file-vault diagnostic. Do not use Security item operations or real Keychain data. Preserve existing custom-vault injection and file-root overrides. Finish with focused checks, `./build.sh`, and `make check`; report status and changed files without committing.
+
 ## Execution Log
 
 - PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `879ad77b3461e91bfa62cc3c721f18fdcacbfe33`, branch: `plan/keychain-data-protection-migration-wave-1`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree1`, port: none
 - PLAN AMENDMENT 2026-07-14: after L approved the escalation, Task 2A moved `ProfileTransactionService.swift` and its hermetic file-vault migration regression into Wave 1. Task 2B makes the Data Protection Keychain diagnostic explicit before the Wave 1 contract is tested.
+- PLAN AMENDMENT 2026-07-14: Task 3A adds a direct entitlement-rejection routing proof using only existing Wave 1 files after review found the original tests were merely compositional.
