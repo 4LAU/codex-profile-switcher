@@ -123,10 +123,22 @@ assert_saved_profile() {
     || fail "$profile could not be read by the signed helper"
 }
 
+canonical_bundle_path() {
+  local bundle="$1"
+  [[ -d "$bundle" ]] || return 1
+  (cd "$bundle" && pwd -P)
+}
+
 [[ "$SERVICE" == "$SMOKE_SERVICE_PREFIX"* && ${#SERVICE} -gt ${#SMOKE_SERVICE_PREFIX} ]] \
   || fail "CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE must use the disposable smoke-service prefix"
-[[ -z "$REPACKAGED_APP_BUNDLE" || "$REPACKAGED_APP_BUNDLE" != "$APP_BUNDLE" ]] \
-  || fail "REPACKAGED_APP_BUNDLE must be a separately rebuilt app"
+APP_BUNDLE_CANONICAL="$(canonical_bundle_path "$APP_BUNDLE")" \
+  || fail "primary app bundle does not exist: $APP_BUNDLE"
+if [[ -n "$REPACKAGED_APP_BUNDLE" ]]; then
+  REPACKAGED_APP_BUNDLE_CANONICAL="$(canonical_bundle_path "$REPACKAGED_APP_BUNDLE")" \
+    || fail "repackaged app bundle does not exist: $REPACKAGED_APP_BUNDLE"
+  [[ "$REPACKAGED_APP_BUNDLE_CANONICAL" != "$APP_BUNDLE_CANONICAL" ]] \
+    || fail "REPACKAGED_APP_BUNDLE must be a separately rebuilt app"
+fi
 
 verify_bundle "$APP_BUNDLE" "primary"
 if [[ -n "$REPACKAGED_APP_BUNDLE" ]]; then
