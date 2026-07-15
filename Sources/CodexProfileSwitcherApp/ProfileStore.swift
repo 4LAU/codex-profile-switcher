@@ -38,6 +38,7 @@ final class ProfileStore {
     private(set) var statuses: [String: ProfileStatus] = [:]
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
+    private(set) var shouldShowKeychainMigration = false
 
     init(
         authVault: AuthVault? = nil,
@@ -133,6 +134,7 @@ final class ProfileStore {
             self.refreshStatusesFromStoredAuth()
         }
         self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
+        self.refreshKeychainMigrationVisibility()
     }
 
     static func userHome(environment: [String: String]) -> URL {
@@ -638,6 +640,22 @@ final class ProfileStore {
     private func refreshAfterKeychainMigration() {
         self.discoverProfiles()
         self.refreshStatusesFromStoredAuth()
+        self.refreshKeychainMigrationVisibility()
+    }
+
+    private func refreshKeychainMigrationVisibility() {
+        guard self.authVault.diagnostics().activeBackend == .dataProtectionKeychain else {
+            self.shouldShowKeychainMigration = false
+            return
+        }
+
+        let hasPendingCleanup = self.config.authMigrationStates?.values.contains(.copiedCleanupPending) == true
+        do {
+            let legacyIDs = try LegacyKeychainAuthVault(interactionAllowed: false).listProfileIDs()
+            self.shouldShowKeychainMigration = hasPendingCleanup || !legacyIDs.isEmpty
+        } catch {
+            self.shouldShowKeychainMigration = hasPendingCleanup || self.config.authMigrationStates == nil
+        }
     }
 
     private func saveCache() {

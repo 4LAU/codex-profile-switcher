@@ -581,21 +581,23 @@ struct GeneralTab: View {
                 }
             }
 
-            Divider()
+            if self.store.shouldShowKeychainMigration {
+                Divider()
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("KEYCHAIN MIGRATION")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("KEYCHAIN MIGRATION")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
 
-                Button("Review Legacy Keychain Copies\u{2026}") {
-                    self.reviewLegacyKeychainMigration()
+                    Button("Review Legacy Keychain Copies\u{2026}") {
+                        self.reviewLegacyKeychainMigration()
+                    }
+                    .disabled(self.isReviewingMigration || self.isMigrationActionInFlight)
+
+                    Text("Move saved accounts from an older app version after reviewing each copy.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
                 }
-                .disabled(self.isReviewingMigration || self.isMigrationActionInFlight)
-
-                Text("Move saved accounts from an older app version after reviewing each copy.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
             }
 
             Divider()
