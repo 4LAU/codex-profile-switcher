@@ -60,7 +60,7 @@ Before Wave 3, run one program-wide `staffcheck` and then `codex-challenge` in `
 
 No wave mutates or deletes user data, so no backup or destructive inventory approval is required. All write tasks are serialized and will have no `[parallel-group]` markers.
 
-**Baseline approved by L:** pending
+**Baseline approved by L:** 2026-07-15
 
 <!-- ===================== END FROZEN BASELINE ===================== -->
 
@@ -70,3 +70,9 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 
 > Append dated `AMENDMENT`, `GATE RESULT`, `ESCALATION`, or `WAVE START` entries here. Scope changes and gate clearance require L's approval.
 
+### 2026-07-15: AMENDMENT REQUEST
+
+- **Change:** Add `docs/plans/2026-07-15-configurable-refresh-execution.md` as the durable plan and execution log for Waves 1 through 3.
+- **Reason:** Each code-writing wave must have a committed task plan and execution log. The Phase 0 inventory omitted that required program record.
+- **Product scope:** Unchanged.
+- **Approved by L:** pending.
