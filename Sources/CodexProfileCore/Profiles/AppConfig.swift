@@ -10,18 +10,26 @@ public struct ProfileConfig: Codable, Identifiable, Equatable {
     }
 }
 
+public enum AuthMigrationState: String, Codable, Equatable {
+    case copiedCleanupPending = "copied_cleanup_pending"
+    case complete
+}
+
 public struct AppConfig: Codable, Equatable {
     public var profiles: [ProfileConfig]
     public var activeProfile: String
     public var authStorageVersion: Int?
+    public var authMigrationStates: [String: AuthMigrationState]?
 
     public init(
         profiles: [ProfileConfig],
         activeProfile: String,
-        authStorageVersion: Int? = nil
+        authStorageVersion: Int? = nil,
+        authMigrationStates: [String: AuthMigrationState]? = nil
     ) {
         self.profiles = profiles
         self.activeProfile = activeProfile
         self.authStorageVersion = authStorageVersion
+        self.authMigrationStates = authMigrationStates
     }
 }

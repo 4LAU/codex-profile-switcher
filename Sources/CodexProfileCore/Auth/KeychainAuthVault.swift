@@ -74,94 +74,11 @@ public struct LegacyKeychainAuthVault: AuthVault {
     }
 
     public func saveAuthBlob(_ data: Data, profileID: String) throws {
-        let dataOnly: [CFString: Any] = [
-            kSecValueData: data,
-            kSecAttrLabel: self.label(profileID: profileID),
-        ]
-        let dataOnlyStatus = SecItemUpdate(
-            self.itemQuery(profileID: profileID) as CFDictionary,
-            dataOnly as CFDictionary)
-        if dataOnlyStatus == errSecSuccess {
-            return
-        }
-
-        if dataOnlyStatus == errSecItemNotFound {
-            let addStatus = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
-            if addStatus == errSecSuccess {
-                return
-            }
-            // A concurrent writer may have created the item between our update and
-            // add. The item now exists, so retry the data-only update once.
-            if addStatus == errSecDuplicateItem {
-                let retryStatus = SecItemUpdate(
-                    self.itemQuery(profileID: profileID) as CFDictionary,
-                    dataOnly as CFDictionary)
-                if retryStatus == errSecSuccess {
-                    return
-                }
-                throw KeychainAuthVaultError.operationFailed(
-                    operation: "save auth blob",
-                    profileID: profileID,
-                    status: retryStatus
-                )
-            }
-            throw KeychainAuthVaultError.operationFailed(
-                operation: "save auth blob",
-                profileID: profileID,
-                status: addStatus
-            )
-        }
-
-        let withAccessible: [CFString: Any] = [
-            kSecValueData: data,
-            kSecAttrLabel: self.label(profileID: profileID),
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-        ]
-        let accessibleStatus = SecItemUpdate(
-            self.itemQuery(profileID: profileID) as CFDictionary,
-            withAccessible as CFDictionary)
-        if accessibleStatus == errSecSuccess {
-            return
-        }
-
-        throw KeychainAuthVaultError.operationFailed(
-            operation: "update auth blob",
-            profileID: profileID,
-            status: dataOnlyStatus
-        )
+        throw KeychainAuthVaultError.legacyVaultIsReadOnly
     }
 
     public func repairStoredAuthAccess() throws -> AuthVaultRepairResult {
-        self.restoreRepairRecoveryFiles()
-        let profileIDs = try self.listProfileIDs()
-        var repaired = 0
-        for profileID in profileIDs {
-            let data: Data?
-            do {
-                data = try self.loadAuthBlob(profileID: profileID)
-            } catch {
-                CoreLogger.warning("Skipping repair for profile - load failed",
-                                   metadata: ["profile": profileID, "error": error.localizedDescription])
-                continue
-            }
-            guard let data else { continue }
-            guard self.writeRepairRecoveryFile(data: data, profileID: profileID) else { continue }
-            let status = self.replaceExistingItem(data: data, profileID: profileID, rollbackData: data)
-            if status == errSecSuccess {
-                if self.removeRepairRecoveryFile(profileID: profileID) {
-                    repaired += 1
-                }
-            } else {
-                let stillExists = (try? self.hasAuthBlob(profileID: profileID)) ?? false
-                CoreLogger.error("Repair failed for profile",
-                                 metadata: [
-                                     "profile": profileID,
-                                     "status": "\(status)",
-                                     "data_preserved": "\(stillExists)",
-                                 ])
-            }
-        }
-        return AuthVaultRepairResult(total: profileIDs.count, repaired: repaired)
+        throw KeychainAuthVaultError.legacyVaultIsReadOnly
     }
 
     public func deleteAuthBlob(profileID: String) throws {
@@ -243,222 +160,12 @@ public struct LegacyKeychainAuthVault: AuthVault {
         query[kSecAttrAccount] = profileID
         return query
     }
-
-    private func itemAttributes(data: Data, profileID: String) -> [CFString: Any] {
-        var attributes = self.itemQuery(profileID: profileID)
-        attributes[kSecAttrLabel] = self.label(profileID: profileID)
-        attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        attributes[kSecValueData] = data
-        if let access = self.sharedAccess(profileID: profileID) {
-            attributes[kSecAttrAccess] = access
-        }
-        return attributes
-    }
-
-    private func sharedAccess(profileID: String) -> SecAccess? {
-        var trustedApps: [SecTrustedApplication] = []
-
-        var selfApp: SecTrustedApplication?
-        if SecTrustedApplicationCreateFromPath(nil, &selfApp) == errSecSuccess,
-           let app = selfApp {
-            trustedApps.append(app)
-        }
-
-        let siblingPaths = self.siblingBinaryPaths()
-        for path in siblingPaths {
-            var trusted: SecTrustedApplication?
-            if SecTrustedApplicationCreateFromPath(path, &trusted) == errSecSuccess,
-               let app = trusted {
-                trustedApps.append(app)
-            }
-        }
-
-        guard !trustedApps.isEmpty else { return nil }
-
-        var access: SecAccess?
-        let status = SecAccessCreate(
-            self.label(profileID: profileID) as CFString,
-            trustedApps as CFArray,
-            &access
-        )
-        return status == errSecSuccess ? access : nil
-    }
-
-    private func siblingBinaryPaths() -> [String] {
-        let execURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-        var paths: [String] = []
-
-        if let bundleURL = self.enclosingAppBundle(for: execURL) {
-            let helperPath = bundleURL.appendingPathComponent("Contents/Helpers/codex-profile").path
-            let appPath = bundleURL.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher").path
-            if execURL.path != helperPath { paths.append(helperPath) }
-            if execURL.path != appPath { paths.append(appPath) }
-        } else {
-            let dir = execURL.deletingLastPathComponent()
-            let candidates = ["codex-profile", "codex-profile-switcher"]
-            for name in candidates {
-                let path = dir.appendingPathComponent(name).path
-                if path != execURL.path { paths.append(path) }
-            }
-        }
-
-        return paths
-    }
-
-    private func enclosingAppBundle(for executableURL: URL) -> URL? {
-        if Bundle.main.bundleURL.pathExtension == "app" {
-            return Bundle.main.bundleURL
-        }
-        var url = executableURL.standardizedFileURL
-        while url.path != "/" {
-            if url.pathExtension == "app" {
-                return url
-            }
-            url = url.deletingLastPathComponent()
-        }
-        return nil
-    }
-
-    private func label(profileID: String) -> String {
-        "Codex Profile Switcher: \(profileID)"
-    }
-
-    private func replaceExistingItem(data: Data, profileID: String, rollbackData: Data) -> OSStatus {
-        let deleteStatus = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
-        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
-            return deleteStatus
-        }
-
-        let addStatus = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
-        if addStatus == errSecSuccess {
-            return errSecSuccess
-        }
-
-        if deleteStatus == errSecSuccess {
-            let rollbackStatus = SecItemAdd(
-                self.itemAttributes(data: rollbackData, profileID: profileID) as CFDictionary,
-                nil)
-            if rollbackStatus != errSecSuccess {
-                CoreLogger.error("Rollback failed after unsuccessful replace",
-                                 metadata: [
-                                     "profile": profileID,
-                                     "addStatus": "\(addStatus)",
-                                     "rollbackStatus": "\(rollbackStatus)",
-                                 ])
-            }
-        }
-
-        return addStatus
-    }
-
-    private func writeRepairRecoveryFile(data: Data, profileID: String) -> Bool {
-        do {
-            try self.ensureRepairRecoveryRoot()
-            let url = self.repairRecoveryURL(profileID: profileID)
-            try data.write(to: url, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            return true
-        } catch {
-            CoreLogger.error("Failed to write Keychain repair recovery file",
-                             metadata: ["profile": profileID, "error": error.localizedDescription])
-            return false
-        }
-    }
-
-    private func removeRepairRecoveryFile(profileID: String) -> Bool {
-        let url = self.repairRecoveryURL(profileID: profileID)
-        guard FileManager.default.fileExists(atPath: url.path) else { return true }
-        return self.removeRepairRecoveryFile(at: url, profileID: profileID)
-    }
-
-    private func restoreRepairRecoveryFiles() {
-        let root = self.repairRecoveryServiceRoot()
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else { return }
-
-        for file in files where file.pathExtension == "recovery" {
-            let encodedProfileID = file.deletingPathExtension().lastPathComponent
-            guard let profileID = Self.decodeRecoveryComponent(encodedProfileID),
-                  let data = try? Data(contentsOf: file) else { continue }
-            do {
-                if try self.hasAuthBlob(profileID: profileID) {
-                    self.removeRepairRecoveryFile(at: file, profileID: profileID)
-                    continue
-                }
-            } catch {
-                CoreLogger.warning("Could not check Keychain recovery target",
-                                   metadata: ["profile": profileID, "error": error.localizedDescription])
-                continue
-            }
-
-            let status = SecItemAdd(self.itemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
-            if status == errSecSuccess || status == errSecDuplicateItem {
-                self.removeRepairRecoveryFile(at: file, profileID: profileID)
-            } else {
-                CoreLogger.error("Failed to restore Keychain item from repair recovery file",
-                                 metadata: ["profile": profileID, "status": "\(status)"])
-            }
-        }
-    }
-
-    private func ensureRepairRecoveryRoot() throws {
-        try FileManager.default.createDirectory(
-            at: self.repairRecoveryServiceRoot(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-    }
-
-    private func repairRecoveryURL(profileID: String) -> URL {
-        self.repairRecoveryServiceRoot()
-            .appendingPathComponent(Self.encodeRecoveryComponent(profileID))
-            .appendingPathExtension("recovery")
-    }
-
-    @discardableResult
-    private func removeRepairRecoveryFile(at url: URL, profileID: String) -> Bool {
-        do {
-            try FileManager.default.removeItem(at: url)
-            return true
-        } catch {
-            CoreLogger.error("Failed to remove Keychain repair recovery file",
-                             metadata: ["profile": profileID, "error": error.localizedDescription])
-            return false
-        }
-    }
-
-    private func repairRecoveryServiceRoot() -> URL {
-        AppPaths().tempRoot
-            .appendingPathComponent("keychain-repair-recovery", isDirectory: true)
-            .appendingPathComponent(Self.encodeRecoveryComponent(self.service), isDirectory: true)
-    }
-
-    private static func encodeRecoveryComponent(_ value: String) -> String {
-        Data(value.utf8)
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    private static func decodeRecoveryComponent(_ value: String) -> String? {
-        var base64 = value
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let padding = base64.count % 4
-        if padding > 0 {
-            base64.append(String(repeating: "=", count: 4 - padding))
-        }
-        guard let data = Data(base64Encoded: base64) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
 }
 
 public enum KeychainAuthVaultError: LocalizedError {
     case operationFailed(operation: String, profileID: String?, status: OSStatus)
     case unexpectedResult(operation: String)
+    case legacyVaultIsReadOnly
 
     public var errorDescription: String? {
         switch self {
@@ -467,6 +174,8 @@ public enum KeychainAuthVaultError: LocalizedError {
             return "Could not \(operation)\(profile): \(Self.statusDescription(status))."
         case let .unexpectedResult(operation):
             return "Could not \(operation): Keychain returned an unexpected result."
+        case .legacyVaultIsReadOnly:
+            return "Legacy Keychain items are available only for an explicit migration."
         }
     }
 
@@ -475,6 +184,8 @@ public enum KeychainAuthVaultError: LocalizedError {
         case let .operationFailed(_, _, status):
             return Self.statusName(status)
         case .unexpectedResult:
+            return nil
+        case .legacyVaultIsReadOnly:
             return nil
         }
     }
@@ -503,6 +214,8 @@ public enum KeychainAuthVaultError: LocalizedError {
                 return nil
             }
         case .unexpectedResult:
+            return nil
+        case .legacyVaultIsReadOnly:
             return nil
         }
     }

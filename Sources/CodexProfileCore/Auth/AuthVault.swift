@@ -13,9 +13,11 @@ public enum AuthVaultBackend: String, Equatable {
 
 public struct AuthVaultDiagnostics: Equatable {
     public var activeBackend: AuthVaultBackend
+    public var usesDataProtectionKeychain: Bool
 
-    public init(activeBackend: AuthVaultBackend) {
+    public init(activeBackend: AuthVaultBackend, usesDataProtectionKeychain: Bool = false) {
         self.activeBackend = activeBackend
+        self.usesDataProtectionKeychain = usesDataProtectionKeychain
     }
 }
 
