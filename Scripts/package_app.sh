@@ -177,6 +177,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>https://raw.githubusercontent.com/4LAU/codex-profile-switcher/main/appcast.xml</string>
   <key>SUEnableAutomaticChecks</key>
   <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>3600</integer>
 </dict>
 </plist>
 PLIST

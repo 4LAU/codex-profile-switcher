@@ -7,21 +7,23 @@ import Cocoa
 final class SparkleUpdater: NSObject {
     #if canImport(Sparkle)
         private var updaterController: SPUStandardUpdaterController?
-        private var immediateInstallHandler: (() -> Void)?
-        private(set) var pendingUpdateVersion: String?
+        private static let didResetAutomaticDownloadPreferenceKey = "didResetSparkleAutomaticDownloadPreference"
     #endif
-
-    var onUpdateReady: (() -> Void)?
 
     func startIfBundledApp() {
         #if canImport(Sparkle)
             guard Bundle.main.bundlePath.hasSuffix(".app") else { return }
             let controller = SPUStandardUpdaterController(
                 startingUpdater: true,
-                updaterDelegate: self,
+                updaterDelegate: nil,
                 userDriverDelegate: self)
-            controller.updater.automaticallyChecksForUpdates = true
-            controller.updater.automaticallyDownloadsUpdates = true
+
+            let defaults = UserDefaults.standard
+            if !defaults.bool(forKey: Self.didResetAutomaticDownloadPreferenceKey) {
+                controller.updater.automaticallyDownloadsUpdates = false
+                defaults.set(true, forKey: Self.didResetAutomaticDownloadPreferenceKey)
+            }
+
             self.updaterController = controller
         #endif
     }
@@ -30,25 +32,14 @@ final class SparkleUpdater: NSObject {
         #if canImport(Sparkle)
             guard self.updaterController != nil else { return }
 
-            if let version = self.pendingUpdateVersion {
-                let updateItem = NSMenuItem(
-                    title: "Update to v\(version) — restart now?",
-                    action: #selector(self.installPendingUpdate(_:)),
-                    keyEquivalent: "")
-                updateItem.target = self
-                updateItem.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)
-                updateItem.image?.size = NSSize(width: 13, height: 13)
-                menu.addItem(updateItem)
-            } else {
-                let updateItem = NSMenuItem(
-                    title: "Check for Updates...",
-                    action: #selector(self.checkForUpdates(_:)),
-                    keyEquivalent: "")
-                updateItem.target = self
-                updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
-                updateItem.image?.size = NSSize(width: 13, height: 13)
-                menu.addItem(updateItem)
-            }
+            let updateItem = NSMenuItem(
+                title: "Check for Updates...",
+                action: #selector(self.checkForUpdates(_:)),
+                keyEquivalent: "")
+            updateItem.target = self
+            updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+            updateItem.image?.size = NSSize(width: 13, height: 13)
+            menu.addItem(updateItem)
         #endif
     }
 
@@ -58,31 +49,12 @@ final class SparkleUpdater: NSObject {
             self.updaterController?.checkForUpdates(sender)
         #endif
     }
-
-    @objc private func installPendingUpdate(_ sender: Any?) {
-        #if canImport(Sparkle)
-            self.immediateInstallHandler?()
-        #endif
-    }
 }
 
 #if canImport(Sparkle)
-    extension SparkleUpdater: SPUUpdaterDelegate {
-        func updater(
-            _ updater: SPUUpdater,
-            willInstallUpdateOnQuit item: SUAppcastItem,
-            immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
-        ) -> Bool {
-            self.immediateInstallHandler = immediateInstallHandler
-            self.pendingUpdateVersion = item.displayVersionString
-            self.onUpdateReady?()
-            return true
-        }
-    }
-
     extension SparkleUpdater: SPUStandardUserDriverDelegate {
         func standardUserDriverWillShowModalAlert() {
-            NSApp.activate(ignoringOtherApps: true)
+            self.bringUpdateUIForward()
         }
 
         func standardUserDriverWillHandleShowingUpdate(
@@ -90,7 +62,15 @@ final class SparkleUpdater: NSObject {
             forUpdate update: SUAppcastItem,
             state: SPUUserUpdateState
         ) {
-            guard state.userInitiated else { return }
+            self.bringUpdateUIForward()
+        }
+
+        func standardUserDriverWillFinishUpdateSession() {
+            NSApp.setActivationPolicy(.accessory)
+        }
+
+        private func bringUpdateUIForward() {
+            NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
