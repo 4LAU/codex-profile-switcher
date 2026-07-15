@@ -242,3 +242,11 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Reason:** The frozen Wave 3 smoke gate requires disposable records only. Entitled cleanup is necessary to prove that condition without leaving protected test credentials behind.
 - **Approval required:** L approval before Task 4 is revised or any additional implementation worker is dispatched.
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: AMENDMENT
+
+- **Change:** Add `Sources/CodexProfileCLI/CodexProfileCLI.swift` to Wave 3 (expected count: **1 file**) for a hidden `signed-smoke-cleanup` command that deletes only explicitly named, validated disposable v2 records.
+- **Required guards:** It must refuse unless the Data Protection vault is active, `CODEX_PROFILE_SIGNED_SMOKE=1`, and `CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE` is nonempty and begins `com.4lau.codex-profile-switcher.auth.smoke.`. It must never enumerate profiles, select the production service, fall back to the file vault, or touch a legacy ACL item.
+- **Reason:** An entitled cleanup path is required for the manual signed smoke test to leave no protected disposable records behind.
+- **Approved by L:** `2026-07-15`.
+- **Logged by:** orchestrator.
