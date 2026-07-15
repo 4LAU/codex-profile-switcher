@@ -41,26 +41,37 @@ Update the Makefile guidance so its installed loose Developer ID CLI is explicit
 
 Run `bash -n Scripts/release_app.sh`, `make check`, and `git diff --check`. Do not invoke the release script, package a signed app, change an appcast, or access Keychain. Do not commit.
 
-## Task 4: Replace the Keychain smoke path with a manual disposable-record proof
+## Task 4: Add an entitled, exact-profile disposable cleanup command
 
 Depends on Tasks 1 through 3. Touch only:
 
+- `Sources/CodexProfileCLI/CodexProfileCLI.swift`
+
+Add a hidden `signed-smoke-cleanup` command for the manual signed smoke script. It accepts one or more explicitly supplied profile IDs and validates every ID before any deletion. It must reject duplicates, empty input, an inactive Data Protection vault, a missing `CODEX_PROFILE_SIGNED_SMOKE=1`, a missing smoke-service environment value, or a value not starting exactly `com.4lau.codex-profile-switcher.auth.smoke.`. It must not appear in normal CLI usage, enumerate profiles, select a vault itself, create a legacy vault, or fall back to the file vault. After all validation succeeds, delete only the named IDs through the already selected Data Protection vault; no default production service is eligible because the vault and the command independently require the smoke gate and prefix.
+
+Do not add a generic delete/remove command, an automatic cleanup path, a Keychain test, or a real Keychain operation in automation. Run `./build.sh`, focused CLI help/error-path checks that cannot reach `SecItem`, and `git diff --check`. Do not commit.
+
+## Task 5: Replace the Keychain smoke path with a manual disposable-record proof
+
+Depends on Task 4. Touch only:
+
 - `Scripts/keychain_signed_smoke.sh`
 
-Make this a deliberately manual smoke script. It must require an already built, Developer ID-signed app bundle and never invoke `package_app.sh`; verify the app and nested helper signatures, identifiers, and exact v2 entitlement inventory before it can proceed. Create a unique service beginning with `com.4lau.codex-profile-switcher.auth.smoke.`, set both required smoke environment variables, and fail if a caller supplies a non-disposable service. Exercise only the signed app/helper's v2 data through fake Codex input and a temporary home.
+Make this a deliberately manual smoke script. It must require an already built, Developer ID-signed app bundle and never invoke `package_app.sh`; verify the app and nested helper signatures, identifiers, and exact v2 entitlement inventory before it can proceed. Create a unique service beginning with `com.4lau.codex-profile-switcher.auth.smoke.`, set both required smoke environment variables, and fail if a caller supplies a non-disposable service. Exercise only the signed app/helper's v2 data through fake Codex input and a temporary home. If a separately rebuilt signed bundle is supplied, prove its helper can read the same disposable records before cleanup.
 
-Prove helper writes are readable by the app-side path, app-side writes are readable by the helper, and a subsequent signed repackage can still read the same disposable records. Add explicit cleanup through the entitled helper for every disposable profile and retain the existing `trap` only as a best-effort final cleanup. Do not create, read, mutate, or repair any legacy ACL item; remove the legacy ACL interop path entirely. Do not print credential data, persistent references, or a Keychain item inventory. The script may display its disposable service and an instruction that interactive macOS consent is expected once for the disposable record.
+Prove helper writes are readable by the separately signed helper and that a subsequent separately signed repackage can still read the same disposable records when supplied. Add explicit cleanup through `signed-smoke-cleanup` for every disposable profile and retain the existing `trap` only as a best-effort final cleanup. Do not create, read, mutate, or repair any legacy ACL item; remove the legacy ACL interop path entirely. Do not print credential data, persistent references, or a Keychain item inventory. The script may display its disposable service and an instruction that interactive macOS consent is expected once for the disposable record.
 
 Run `bash -n Scripts/keychain_signed_smoke.sh`, `./build.sh`, and `git diff --check`. Do not execute the smoke script or perform any `SecItem` operation in automation. Do not commit.
 
-## Task 5: Final Wave 3 safety audit
+## Task 6: Final Wave 3 safety audit
 
-Depends on Tasks 1 through 4. Touch no files unless a directly related safety defect is found and then touch only the Task 1–4 allowlist.
+Depends on Tasks 1 through 5. Touch no files unless a directly related safety defect is found and then touch only the Task 1–5 allowlist.
 
-Confirm the changed-file inventory equals the six frozen Wave 3 files plus the one approved added vault file: app entitlement, helper entitlement, package script, release script, smoke script, Makefile, and `DataProtectionKeychainAuthVault.swift`. Confirm no profile/certificate/artifact/appcast or real-Keychain test was added. Check that the override is smoke-gated and prefix-restricted, release validation precedes all release side effects, both final-signature checks demand the exact singleton access group, the helper has its distinct identifier, normal/ad-hoc package entitlements are empty, and the smoke script does not touch legacy services.
+Confirm the changed-file inventory equals the six frozen Wave 3 files plus the two approved added files: app entitlement, helper entitlement, package script, release script, smoke script, Makefile, `DataProtectionKeychainAuthVault.swift`, and `CodexProfileCLI.swift`. Confirm no profile/certificate/artifact/appcast or real-Keychain test was added. Check that both the vault override and cleanup command are smoke-gated and prefix-restricted, release validation precedes all release side effects, both final-signature checks demand the exact singleton access group, the helper has its distinct identifier, normal/ad-hoc package entitlements are empty, and the smoke script does not touch legacy services.
 
 Run `./build.sh`, `make check`, `bash -n Scripts/package_app.sh Scripts/release_app.sh Scripts/keychain_signed_smoke.sh`, `plutil -lint CodexProfileSwitcher.entitlements CodexProfileHelper.entitlements`, `git diff --check`, and a metadata-only validation failure check with missing profiles that proves it creates no bundle or release artifact. Do not run signed packaging, the smoke script, a migration, release publication, or a Keychain operation. Report the evidence and changed-file inventory without committing.
 
 ## Execution Log
 
 - PLAN START 2026-07-15 — base: `program/keychain-data-protection-migration`, base_sha: `83c0910626ba6e0298de18ecbfb9df11b6f5a16a`, branch: `plan/keychain-data-protection-migration-wave-3`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree3`, port: none.
+- PLAN AMENDMENT 2026-07-15 — L approved a hidden, smoke-gated helper cleanup command after the original smoke plan could not reliably delete a protected disposable v2 record. Task 4 now implements the command; the smoke script and final audit move to Tasks 5 and 6.
