@@ -18,7 +18,7 @@ Usage data should stay current without interrupting menu interaction. Users need
 
 - Provider-specific schedules
 - Notifications or refresh cancellation controls
-- Changes to usage fetching, authentication, or cache formats
+- Changes to authentication or cache formats
 - A broader menu rewrite
 - CodexBar's multi-provider menu coordination system
 
