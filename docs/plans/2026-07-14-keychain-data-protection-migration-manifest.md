@@ -161,3 +161,9 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Safety evidence:** The hermetic suite proves a wrong `keychain-access-groups` value routes to the file vault, ordinary unentitled app and CLI paths use the file vault, and `CODEX_PROFILE_FORCE_KEYCHAIN` cannot bypass that route. No automated test invokes a `SecItem` operation. Static inspection found no `LegacyKeychainAuthVault` construction in normal app or CLI sources; the legacy repair method remains only as fail-closed compatibility API.
 - **Approval to begin Wave 2:** pending L approval.
 - **Logged by:** orchestrator.
+
+### `2026-07-14`: GATE APPROVAL
+
+- **Decision:** L approved the Wave 1 gate and authorized Wave 2 planning and execution.
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
