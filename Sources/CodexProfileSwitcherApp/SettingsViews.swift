@@ -6,14 +6,25 @@ struct SettingsActions {
     let reauthenticateProfile: (String, @escaping (Result<Void, SettingsActionError>) -> Void) -> Void
     let cancelLogin: (String) -> Bool
     let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
+    let reviewLegacyKeychainMigration: () -> Result<KeychainMigrationPreview, SettingsActionError>
+    let confirmLegacyKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
+    let completePendingKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
+    let cancelLegacyKeychainMigrationReview: (KeychainMigrationPreview) -> Void
 }
 
 enum SettingsWindow {
     private static var windowController: NSWindowController?
+    private static var windowDelegate: SettingsWindowDelegate?
+    private static var migrationLifecycle: SettingsMigrationLifecycle?
 
     static func show(store: ProfileStore, actions: SettingsActions) {
+        Self.cancelActiveMigrationReview()
+        let lifecycle = SettingsMigrationLifecycle()
+        Self.migrationLifecycle = lifecycle
+
         if let wc = Self.windowController {
-            wc.window?.contentView = NSHostingView(rootView: SettingsView(store: store, actions: actions))
+            wc.window?.contentView = NSHostingView(
+                rootView: SettingsView(store: store, actions: actions, migrationLifecycle: lifecycle))
             wc.showWindow(nil)
             wc.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -28,8 +39,11 @@ enum SettingsWindow {
         window.title = "Settings"
         window.center()
         window.isReleasedWhenClosed = false
+        let windowDelegate = SettingsWindowDelegate { Self.cancelActiveMigrationReview() }
+        window.delegate = windowDelegate
+        Self.windowDelegate = windowDelegate
 
-        let view = SettingsView(store: store, actions: actions)
+        let view = SettingsView(store: store, actions: actions, migrationLifecycle: lifecycle)
         window.contentView = NSHostingView(rootView: view)
 
         let wc = NSWindowController(window: window)
@@ -38,11 +52,59 @@ enum SettingsWindow {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    private static func cancelActiveMigrationReview() {
+        Self.migrationLifecycle?.cancelActiveMigrationReview()
+    }
+}
+
+private final class SettingsWindowDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        self.onClose()
+    }
+}
+
+final class SettingsMigrationLifecycle {
+    private var preview: KeychainMigrationPreview?
+    private var cancel: ((KeychainMigrationPreview) -> Void)?
+
+    func begin(
+        _ preview: KeychainMigrationPreview,
+        cancel: @escaping (KeychainMigrationPreview) -> Void
+    ) {
+        self.preview = preview
+        self.cancel = cancel
+    }
+
+    func finish(_ preview: KeychainMigrationPreview) {
+        guard self.preview == preview else { return }
+        self.preview = nil
+        self.cancel = nil
+    }
+
+    func cancelMigrationReview(_ preview: KeychainMigrationPreview) {
+        guard self.preview == preview, let cancel = self.cancel else { return }
+        self.preview = nil
+        self.cancel = nil
+        cancel(preview)
+    }
+
+    func cancelActiveMigrationReview() {
+        guard let preview = self.preview else { return }
+        self.cancelMigrationReview(preview)
+    }
 }
 
 struct SettingsView: View {
     let store: ProfileStore
     let actions: SettingsActions
+    let migrationLifecycle: SettingsMigrationLifecycle
     @State private var selectedTab = 0
     @StateObject private var toast = ToastState()
 
@@ -63,7 +125,12 @@ struct SettingsView: View {
 
                 switch self.selectedTab {
                 case 0: ProfilesTab(store: self.store, actions: self.actions, toast: self.toast)
-                case 1: GeneralTab(store: self.store, toast: self.toast)
+                case 1:
+                    GeneralTab(
+                        store: self.store,
+                        actions: self.actions,
+                        migrationLifecycle: self.migrationLifecycle,
+                        toast: self.toast)
                 case 2: AboutTab()
                 default: EmptyView()
                 }
@@ -446,8 +513,14 @@ struct ProfilesTab: View {
 
 struct GeneralTab: View {
     let store: ProfileStore
+    let actions: SettingsActions
+    let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var migrationSheet: KeychainMigrationSheet?
+    @State private var migrationError: String?
+    @State private var isReviewingMigration = false
+    @State private var isMigrationActionInFlight = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -460,6 +533,23 @@ struct GeneralTab: View {
                     .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
 
                 Text("Opens automatically when your Mac starts.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("KEYCHAIN MIGRATION")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Button("Review Legacy Keychain Copies\u{2026}") {
+                    self.reviewLegacyKeychainMigration()
+                }
+                .disabled(self.isReviewingMigration || self.isMigrationActionInFlight)
+
+                Text("Move saved accounts from an older app version after reviewing each copy.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -503,6 +593,193 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onDisappear { self.cancelLegacyKeychainMigrationReview() }
+        .sheet(item: self.migrationSheetBinding) { sheet in
+            KeychainMigrationConfirmationSheet(
+                title: sheet.title,
+                candidates: sheet.candidates,
+                isDestructive: sheet.isDestructive,
+                isActionInFlight: self.isMigrationActionInFlight,
+                onCancel: self.cancelLegacyKeychainMigrationReview,
+                onConfirm: { self.confirmLegacyKeychainMigration(sheet) }
+            )
+        }
+        .alert("Keychain Migration", isPresented: Binding(
+            get: { self.migrationError != nil },
+            set: { if !$0 { self.migrationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { self.migrationError = nil }
+        } message: {
+            Text(self.migrationError ?? "")
+        }
+    }
+
+    private var migrationSheetBinding: Binding<KeychainMigrationSheet?> {
+        Binding(
+            get: { self.migrationSheet },
+            set: { sheet in
+                guard sheet == nil else {
+                    self.migrationSheet = sheet
+                    return
+                }
+                self.cancelLegacyKeychainMigrationReview()
+            })
+    }
+
+    private func reviewLegacyKeychainMigration() {
+        self.isReviewingMigration = true
+        defer { self.isReviewingMigration = false }
+
+        switch self.actions.reviewLegacyKeychainMigration() {
+        case let .success(preview):
+            if preview.candidateCount > 0 {
+                self.migrationLifecycle.begin(
+                    preview,
+                    cancel: self.actions.cancelLegacyKeychainMigrationReview)
+                self.migrationSheet = KeychainMigrationSheet(preview: preview, kind: .moveAndRemove)
+            } else if preview.pendingCompletionCount > 0 {
+                self.migrationLifecycle.begin(
+                    preview,
+                    cancel: self.actions.cancelLegacyKeychainMigrationReview)
+                self.migrationSheet = KeychainMigrationSheet(preview: preview, kind: .completePending)
+            } else {
+                self.actions.cancelLegacyKeychainMigrationReview(preview)
+                self.toast.show("No legacy Keychain copies need migration", style: .info)
+            }
+        case .failure:
+            self.clearMigrationUIWithError()
+        }
+    }
+
+    private func confirmLegacyKeychainMigration(_ sheet: KeychainMigrationSheet) {
+        self.isMigrationActionInFlight = true
+        defer { self.isMigrationActionInFlight = false }
+
+        let result: Result<Void, SettingsActionError>
+        switch sheet.kind {
+        case .moveAndRemove:
+            result = self.actions.confirmLegacyKeychainMigration(
+                sheet.preview,
+                sheet.preview.candidateCount)
+        case .completePending:
+            result = self.actions.completePendingKeychainMigration(
+                sheet.preview,
+                sheet.preview.pendingCompletionCount)
+        }
+
+        switch result {
+        case .success:
+            self.migrationLifecycle.finish(sheet.preview)
+            self.migrationSheet = nil
+            self.toast.show(sheet.successMessage, style: .success)
+        case .failure:
+            self.clearMigrationUIWithError()
+        }
+    }
+
+    private func cancelLegacyKeychainMigrationReview() {
+        guard let sheet = self.migrationSheet else { return }
+        self.migrationSheet = nil
+        self.migrationLifecycle.cancelMigrationReview(sheet.preview)
+    }
+
+    private func clearMigrationUIWithError() {
+        if let preview = self.migrationSheet?.preview {
+            self.migrationLifecycle.cancelMigrationReview(preview)
+        }
+        self.migrationSheet = nil
+        self.migrationError = "Keychain migration could not be completed. Review the migration again before trying."
+    }
+}
+
+private struct KeychainMigrationSheet: Identifiable {
+    enum Kind {
+        case moveAndRemove
+        case completePending
+    }
+
+    let id = UUID()
+    let preview: KeychainMigrationPreview
+    let kind: Kind
+
+    var candidates: [KeychainMigrationCandidate] {
+        switch self.kind {
+        case .moveAndRemove:
+            self.preview.candidates
+        case .completePending:
+            self.preview.pendingCompletionCandidates
+        }
+    }
+
+    var title: String {
+        switch self.kind {
+        case .moveAndRemove:
+            "Move and remove \(self.preview.candidateCount) legacy Keychain copies"
+        case .completePending:
+            "Complete \(self.preview.pendingCompletionCount) verified Keychain migrations"
+        }
+    }
+
+    var isDestructive: Bool {
+        self.kind == .moveAndRemove
+    }
+
+    var successMessage: String {
+        switch self.kind {
+        case .moveAndRemove:
+            "Moved \(self.preview.candidateCount) legacy Keychain copies"
+        case .completePending:
+            "Completed \(self.preview.pendingCompletionCount) Keychain migrations"
+        }
+    }
+}
+
+private struct KeychainMigrationConfirmationSheet: View {
+    let title: String
+    let candidates: [KeychainMigrationCandidate]
+    let isDestructive: Bool
+    let isActionInFlight: Bool
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(self.title)
+                .font(.system(size: 17, weight: .semibold))
+
+            Text(self.isDestructive
+                 ? "Each listed copy will be verified in the new Keychain before its older copy is removed."
+                 : "Each listed account already has a verified new Keychain copy. This only records that migration is complete.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            List(self.candidates) { candidate in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(candidate.label)
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Profile ID: \(candidate.id)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(minHeight: 140, maxHeight: 260)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { self.onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(self.isActionInFlight)
+                Button(self.isDestructive ? "Move and Remove" : "Mark Complete",
+                       role: self.isDestructive ? .destructive : nil) {
+                    self.onConfirm()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(self.isActionInFlight)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 }
 

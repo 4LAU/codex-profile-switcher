@@ -432,6 +432,7 @@ test_keychain_repair_reports_no_migration_yet() {
   local saved_a="$WORK_DIR/repair-a.json"
   local saved_b="$WORK_DIR/repair-b.json"
   local original_config="$WORK_DIR/repair-config.json"
+  local original_auth_store="$WORK_DIR/repair-auth-store"
   local exported_a="$WORK_DIR/exported-repair-a.json"
   local exported_b="$WORK_DIR/exported-repair-b.json"
   make_api_auth "$saved_a" "sk-test-repair-a-1111111111" "repair-a"
@@ -442,15 +443,18 @@ test_keychain_repair_reports_no_migration_yet() {
   printf '{\n  "activeProfile" : "RepairA",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "RepairA", "label" : "Repair A"},\n    {"id" : "RepairB", "label" : "Repair B"}\n  ]\n}\n' \
     > "$TEST_HOME/.codex-switcher/config.json"
   cp "$TEST_HOME/.codex-switcher/config.json" "$original_config"
+  cp -R "$AUTH_STORE" "$original_auth_store"
 
   if run_helper keychain-repair >/dev/null 2>"$WORK_DIR/keychain-repair.err"; then
     fail "keychain-repair unexpectedly performed a migration"
   fi
 
-  grep -Fq "Keychain migration is not available yet" "$WORK_DIR/keychain-repair.err" \
-    || fail "keychain-repair did not report the deferred migration"
+  grep -Fq "Open Settings > General and choose" "$WORK_DIR/keychain-repair.err" \
+    || fail "keychain-repair did not direct users to Settings"
   assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" \
     "keychain-repair changed migration bookkeeping"
+  diff -qr "$AUTH_STORE" "$original_auth_store" >/dev/null \
+    || fail "keychain-repair changed file-vault data"
   export_auth "RepairA" "$exported_a"
   export_auth "RepairB" "$exported_b"
   assert_same_file "$exported_a" "$saved_a" "keychain-repair modified RepairA auth"

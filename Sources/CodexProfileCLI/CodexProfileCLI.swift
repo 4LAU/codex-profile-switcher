@@ -341,7 +341,7 @@ enum CodexProfileCLI {
 
     private static func commandKeychainRepair() throws {
         throw CLIError.message(
-            "Keychain migration is not available yet; legacy Keychain credentials were not changed.")
+            "Keychain migration is available only in the app. Open Settings > General and choose “Review Legacy Keychain Copies…”. Legacy Keychain credentials were not changed.")
     }
 
     private struct BestAuthOptions {

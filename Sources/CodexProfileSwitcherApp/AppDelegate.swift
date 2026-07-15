@@ -466,6 +466,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         return .failure(SettingsActionError(message: "Settings window is unavailable."))
                     }
                     return self.clearSavedAuth(for: id)
+                },
+                reviewLegacyKeychainMigration: { [weak self] in
+                    guard let self else {
+                        return .failure(SettingsActionError(message: "Settings window is unavailable."))
+                    }
+                    do {
+                        return .success(try self.store.reviewLegacyKeychainMigration())
+                    } catch {
+                        return .failure(SettingsActionError(message: error.localizedDescription))
+                    }
+                },
+                confirmLegacyKeychainMigration: { [weak self] preview, approvedCount in
+                    guard let self else {
+                        return .failure(SettingsActionError(message: "Settings window is unavailable."))
+                    }
+                    do {
+                        try self.store.confirmLegacyKeychainMigration(preview, approvedCount: approvedCount)
+                        return .success(())
+                    } catch {
+                        return .failure(SettingsActionError(message: error.localizedDescription))
+                    }
+                },
+                completePendingKeychainMigration: { [weak self] preview, approvedCount in
+                    guard let self else {
+                        return .failure(SettingsActionError(message: "Settings window is unavailable."))
+                    }
+                    do {
+                        try self.store.completePendingKeychainMigration(preview, approvedCount: approvedCount)
+                        return .success(())
+                    } catch {
+                        return .failure(SettingsActionError(message: error.localizedDescription))
+                    }
+                },
+                cancelLegacyKeychainMigrationReview: { [weak self] preview in
+                    self?.store.cancelLegacyKeychainMigrationReview(preview)
                 }))
     }
 

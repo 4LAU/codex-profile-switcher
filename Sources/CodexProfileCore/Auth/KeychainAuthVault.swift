@@ -4,12 +4,14 @@ import Security
 public typealias KeychainAuthVault = LegacyKeychainAuthVault
 
 struct LegacyKeychainAuthBlobCapture: Sendable {
+    let profileID: String
     let authBlob: Data
 
-    fileprivate let persistentReference: Data
-    fileprivate let service: String
+    let persistentReference: Data
+    let service: String
 
-    fileprivate init(authBlob: Data, persistentReference: Data, service: String) {
+    init(profileID: String, authBlob: Data, persistentReference: Data, service: String) {
+        self.profileID = profileID
         self.authBlob = authBlob
         self.persistentReference = persistentReference
         self.service = service
@@ -86,33 +88,44 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return data
     }
 
-    func captureLegacyAuthBlobForMigration(
-        profileID: String
-    ) throws -> LegacyKeychainAuthBlobCapture? {
+    func captureLegacyAuthBlobsForMigration() throws -> [LegacyKeychainAuthBlobCapture] {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(
-            self.migrationCaptureQuery(profileID: profileID) as CFDictionary,
+            self.migrationCaptureQuery() as CFDictionary,
             &result)
 
         if status == errSecItemNotFound {
-            return nil
+            return []
         }
         guard status == errSecSuccess else {
             throw KeychainAuthVaultError.operationFailed(
-                operation: "capture legacy auth blob for migration",
-                profileID: profileID,
+                operation: "capture legacy auth blobs for migration",
+                profileID: nil,
                 status: status)
         }
-        guard let item = result as? [String: Any],
-              let authBlob = item[kSecValueData as String] as? Data,
-              let persistentReference = item[kSecValuePersistentRef as String] as? Data else {
+        guard let items = result as? [[String: Any]] else {
             throw KeychainAuthVaultError.unexpectedResult(
-                operation: "capture legacy auth blob for migration")
+                operation: "capture legacy auth blobs for migration")
         }
-        return LegacyKeychainAuthBlobCapture(
-            authBlob: authBlob,
-            persistentReference: persistentReference,
-            service: self.service)
+
+        var profileIDs = Set<String>()
+        return try items.map { item in
+            guard let profileID = item[kSecAttrAccount as String] as? String,
+                  ProfileValidator.isValid(profileID),
+                  let authBlob = item[kSecValueData as String] as? Data,
+                  AuthBlob.isPlausibleAuthBlob(authBlob),
+                  let persistentReference = item[kSecValuePersistentRef as String] as? Data,
+                  !persistentReference.isEmpty,
+                  profileIDs.insert(profileID).inserted else {
+                throw KeychainAuthVaultError.unexpectedResult(
+                    operation: "capture legacy auth blobs for migration")
+            }
+            return LegacyKeychainAuthBlobCapture(
+                profileID: profileID,
+                authBlob: authBlob,
+                persistentReference: persistentReference,
+                service: self.service)
+        }
     }
 
     func deleteCapturedLegacyAuthBlob(_ capture: LegacyKeychainAuthBlobCapture) throws {
@@ -120,14 +133,37 @@ public struct LegacyKeychainAuthVault: AuthVault {
             throw KeychainAuthVaultError.unexpectedResult(
                 operation: "delete captured legacy auth blob")
         }
-        let status = SecItemDelete([
+
+        var result: CFTypeRef?
+        let validationStatus = SecItemCopyMatching([
+            kSecValuePersistentRef: capture.persistentReference,
+            kSecReturnData: kCFBooleanTrue as Any,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ] as CFDictionary, &result)
+        if validationStatus == errSecItemNotFound {
+            throw KeychainAuthVaultError.staleMigrationSource
+        }
+        guard validationStatus == errSecSuccess else {
+            throw KeychainAuthVaultError.operationFailed(
+                operation: "revalidate legacy auth blob for migration",
+                profileID: nil,
+                status: validationStatus)
+        }
+        guard let authBlob = result as? Data, authBlob == capture.authBlob else {
+            throw KeychainAuthVaultError.staleMigrationSource
+        }
+
+        let deleteStatus = SecItemDelete([
             kSecValuePersistentRef: capture.persistentReference,
         ] as CFDictionary)
-        guard status == errSecSuccess else {
+        if deleteStatus == errSecItemNotFound {
+            throw KeychainAuthVaultError.staleMigrationSource
+        }
+        guard deleteStatus == errSecSuccess else {
             throw KeychainAuthVaultError.operationFailed(
                 operation: "delete captured legacy auth blob",
                 profileID: nil,
-                status: status)
+                status: deleteStatus)
         }
     }
 
@@ -187,11 +223,12 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
-    private func migrationCaptureQuery(profileID: String) -> [CFString: Any] {
-        var query = self.itemQuery(profileID: profileID)
+    private func migrationCaptureQuery() -> [CFString: Any] {
+        var query = self.baseServiceQuery()
+        query[kSecReturnAttributes] = kCFBooleanTrue
         query[kSecReturnData] = kCFBooleanTrue
         query[kSecReturnPersistentRef] = kCFBooleanTrue
-        query[kSecMatchLimit] = kSecMatchLimitOne
+        query[kSecMatchLimit] = kSecMatchLimitAll
         self.applyInteractionPolicy(to: &query)
         return query
     }
@@ -223,6 +260,7 @@ public enum KeychainAuthVaultError: LocalizedError {
     case operationFailed(operation: String, profileID: String?, status: OSStatus)
     case unexpectedResult(operation: String)
     case legacyVaultIsReadOnly
+    case staleMigrationSource
 
     public var errorDescription: String? {
         switch self {
@@ -233,6 +271,8 @@ public enum KeychainAuthVaultError: LocalizedError {
             return "Could not \(operation): Keychain returned an unexpected result."
         case .legacyVaultIsReadOnly:
             return "Legacy Keychain items are available only for an explicit migration."
+        case .staleMigrationSource:
+            return "The legacy Keychain copy changed before it could be removed."
         }
     }
 
@@ -243,6 +283,8 @@ public enum KeychainAuthVaultError: LocalizedError {
         case .unexpectedResult:
             return nil
         case .legacyVaultIsReadOnly:
+            return nil
+        case .staleMigrationSource:
             return nil
         }
     }
@@ -274,6 +316,8 @@ public enum KeychainAuthVaultError: LocalizedError {
             return nil
         case .legacyVaultIsReadOnly:
             return nil
+        case .staleMigrationSource:
+            return "Review the legacy Keychain copies again before retrying the migration."
         }
     }
 
