@@ -217,6 +217,15 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approved by L:** `2026-07-15`.
 - **Logged by:** orchestrator.
 
+### `2026-07-15`: GATE RESULT
+
+- **Wave:** 3.
+- **Result:** implementation validation passed; the release gate remains open pending the two external provisioning profiles and a manual signed disposable-record smoke run.
+- **Checks:** merged program branch passed `./build.sh`, `make check`, `bash -n` for all three scripts, `plutil -lint` for both entitlement files, and `git diff --check`. The metadata-only package preflight exited 1 with `CODEX_PROFILE_APP_PROVISIONING_PROFILE is required` and created no bundle or build artifact.
+- **Safety evidence:** no signed package, provisioning profile, real Keychain operation, migration, release artifact, appcast update, or publication was run. The security review approved the smoke cleanup guards and the canonical bundle-path fix.
+- **Approval to close Wave 3 and begin Wave 4:** pending external profile inputs and the manual smoke evidence.
+- **Logged by:** orchestrator.
+
 ### `2026-07-15`: AMENDMENT CLARIFICATION
 
 - **Change:** The approved added Wave 3 source surface has an expected count of **1 file**: `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift`.
