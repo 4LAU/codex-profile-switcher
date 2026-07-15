@@ -362,6 +362,48 @@ final class KeychainMigrationCoordinatorTests {
                         "Cleanup retry must not rewrite an existing destination copy")
     }
 
+    /// Without this test, a bad historical checkpoint could strand a verified copy of the same account.
+    @Test
+    func pendingCleanupAcceptsSameAccountWithRotatedTokens() throws {
+        let profileID = "pending-rotated"
+        let token = try idToken(subject: profileID)
+        let legacyAuth = try oauthAuthData(
+            accessToken: "legacy-access",
+            refreshToken: "legacy-refresh",
+            idToken: token)
+        let refreshedAuth = try oauthAuthData(
+            accessToken: "refreshed-access",
+            refreshToken: "refreshed-refresh",
+            idToken: token)
+        let capture = LegacyKeychainAuthBlobCapture(
+            profileID: profileID,
+            authBlob: legacyAuth,
+            persistentReference: Data("ref-pending-rotated".utf8),
+            service: LegacyKeychainAuthVault.defaultService)
+        let source = MigrationSource(captures: [capture])
+        let destination = MigrationDestination(authBlobs: [profileID: refreshedAuth])
+        let checkpoints = MigrationCheckpoints()
+        let historicalFingerprint = SHA256.hash(data: refreshedAuth)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let coordinator = KeychainMigrationCoordinator(
+            captureLegacyRecords: { try source.capture() },
+            deleteLegacyRecord: { try source.delete($0) },
+            destination: destination,
+            profiles: [],
+            migrationStates: [profileID: .copiedCleanupPending],
+            pendingFingerprints: [profileID: historicalFingerprint],
+            checkpoint: { id, state, _ in try checkpoints.save(profileID: id, state: state) })
+
+        let preview = try coordinator.review()
+        try coordinator.confirm(preview, approvedCount: 1)
+
+        try expectEqual(try destination.loadAuthBlob(profileID: profileID), refreshedAuth,
+                        "Cleanup replaced the refreshed same-account credential")
+        try expectEqual(source.deletedReferences, [capture.persistentReference],
+                        "Cleanup did not remove the stale same-account legacy copy")
+    }
+
     @Test
     func finalCheckpointFailureCanBeCompletedLaterWithoutALegacyRecord() throws {
         let capture = try migrationCapture(profileID: "checkpoint-recovery", reference: "ref-recovery")

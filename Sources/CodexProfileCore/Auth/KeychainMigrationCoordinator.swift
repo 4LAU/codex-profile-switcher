@@ -472,8 +472,19 @@ public final class KeychainMigrationCoordinator {
 
     private func validatePendingLegacySource(_ capture: LegacyKeychainAuthBlobCapture) throws {
         guard self.migrationStates[capture.profileID] == .copiedCleanupPending else { return }
-        guard let fingerprint = self.pendingFingerprints[capture.profileID],
-              self.integrityFingerprint(capture.authBlob) == fingerprint else {
+        guard let fingerprint = self.pendingFingerprints[capture.profileID] else {
+            throw KeychainMigrationError.staleLegacySource
+        }
+        guard self.integrityFingerprint(capture.authBlob) != fingerprint else { return }
+        let destinationData: Data?
+        do {
+            destinationData = try self.destination.loadAuthBlob(profileID: capture.profileID)
+        } catch {
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+        guard let destinationData,
+              let legacyIdentity = AuthBlob.identityFingerprint(from: capture.authBlob),
+              legacyIdentity == AuthBlob.identityFingerprint(from: destinationData) else {
             throw KeychainMigrationError.staleLegacySource
         }
     }

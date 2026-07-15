@@ -127,13 +127,34 @@ public struct LegacyKeychainAuthVault: AuthVault {
                 operation: "delete captured legacy auth blob")
         }
 
-        let current = try self.captureLegacyAuthBlobForMigration(profileID: capture.profileID)
-        guard current.authBlob == capture.authBlob,
-              current.persistentReference == capture.persistentReference else {
+        var passwordLength: UInt32 = 0
+        var passwordData: UnsafeMutableRawPointer?
+        var item: SecKeychainItem?
+        let findStatus = self.service.withCString { servicePointer in
+            capture.profileID.withCString { accountPointer in
+                SecKeychainFindGenericPassword(
+                    nil,
+                    UInt32(self.service.utf8.count),
+                    servicePointer,
+                    UInt32(capture.profileID.utf8.count),
+                    accountPointer,
+                    &passwordLength,
+                    &passwordData,
+                    &item)
+            }
+        }
+        guard findStatus == errSecSuccess, let passwordData, let item else {
+            throw KeychainAuthVaultError.operationFailed(
+                operation: "find captured legacy auth blob",
+                profileID: nil,
+                status: findStatus)
+        }
+        defer { SecKeychainItemFreeContent(nil, passwordData) }
+        guard Data(bytes: passwordData, count: Int(passwordLength)) == capture.authBlob else {
             throw KeychainAuthVaultError.staleMigrationSource
         }
 
-        let deleteStatus = SecItemDelete(self.capturedItemQuery(capture) as CFDictionary)
+        let deleteStatus = SecKeychainItemDelete(item)
         if deleteStatus == errSecItemNotFound {
             throw KeychainAuthVaultError.staleMigrationSource
         }
@@ -211,15 +232,6 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
-    private func capturedItemQuery(_ capture: LegacyKeychainAuthBlobCapture) -> [CFString: Any] {
-        var query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecMatchItemList: [capture.persistentReference],
-        ]
-        self.applyInteractionPolicy(to: &query)
-        return query
-    }
-
     private func isExpectedMigrationItem(_ item: [String: Any], profileID: String) -> Bool {
         item[kSecAttrService as String] as? String == self.service
             && item[kSecAttrAccount as String] as? String == profileID
@@ -238,6 +250,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: self.service,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
+            kSecUseDataProtectionKeychain: kCFBooleanFalse as Any,
         ]
     }
 
