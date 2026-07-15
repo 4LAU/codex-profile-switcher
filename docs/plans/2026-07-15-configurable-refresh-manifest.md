@@ -82,3 +82,12 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Approved change:** Add `docs/plans/2026-07-15-configurable-refresh-execution.md` as the durable plan and execution log for Waves 1 through 3.
 - **Approved by L:** 2026-07-15.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: WAVE START
+
+- **Wave:** 1.
+- **Worktree path:** `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`.
+- **Plan branch:** `plan/configurable-refresh-wave-1`.
+- **Base branch:** `program/configurable-refresh`.
+- **Dev-server port:** none.
+- **Logged by:** orchestrator.
