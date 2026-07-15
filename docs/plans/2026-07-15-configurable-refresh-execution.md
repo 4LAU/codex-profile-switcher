@@ -150,3 +150,4 @@ Before committing, run `./build.sh`, `make check`, and `git diff --check`. Do no
 ## Wave 3 Execution Log
 
 - **PLAN START 2026-07-15:** base `program/configurable-refresh`; base_sha `3b04e82`; branch `plan/configurable-refresh-wave-3`; worktree `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`; port none.
+- **WAVE 3 COMPLETE 2026-07-15:** Updated `README.md`, `THIRD_PARTY_NOTICES.md`, and the configurable-refresh design record. Corrected the design record's usage-fetching non-goal after quality review. `./build.sh`, `make check`, and `git diff --check` passed. Live tracked-menu interaction and final Settings layout were not visually automated.
