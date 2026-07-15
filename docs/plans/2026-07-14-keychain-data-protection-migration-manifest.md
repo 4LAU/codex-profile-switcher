@@ -226,6 +226,13 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approval to close Wave 3 and begin Wave 4:** pending external profile inputs and the manual smoke evidence.
 - **Logged by:** orchestrator.
 
+### `2026-07-15`: ESCALATION
+
+- **Trigger:** The one-shot closeout check found neither provisioning-profile environment variable set and no `.provisionprofile` or `.mobileprovision` file under the approved local profile locations or repository tree.
+- **Action:** No profile was fabricated or imported. No signed package, smoke run, Keychain operation, release artifact, appcast update, or publication was attempted.
+- **Resolution needed:** Supply the two external Developer ID provisioning profiles for the app and helper, then rerun the metadata preflight and manual disposable-record smoke. Wave 4 documentation closeout remains gated until that evidence exists.
+- **Logged by:** orchestrator.
+
 ### `2026-07-15`: AMENDMENT CLARIFICATION
 
 - **Change:** The approved added Wave 3 source surface has an expected count of **1 file**: `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift`.
