@@ -152,3 +152,12 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Reason:** The Wave 1 gate requires a direct hermetic proof of entitlement rejection routing. Existing independently passing resolver and unsigned-process tests did not connect those two facts.
 - **Approved by L:** not required; this stays within the approved Wave 1 inventory and does not change wave assignment.
 - **Logged by:** orchestrator.
+
+### `2026-07-14`: GATE RESULT
+
+- **Wave:** 1
+- **Result:** checks passed; authorization for Wave 2 is pending L approval.
+- **Checks:** final whole-wave specification and code-quality reviews approved; `./build.sh` and `make check` passed on merged program branch; `git diff --check` passed.
+- **Safety evidence:** The hermetic suite proves a wrong `keychain-access-groups` value routes to the file vault, ordinary unentitled app and CLI paths use the file vault, and `CODEX_PROFILE_FORCE_KEYCHAIN` cannot bypass that route. No automated test invokes a `SecItem` operation. Static inspection found no `LegacyKeychainAuthVault` construction in normal app or CLI sources; the legacy repair method remains only as fail-closed compatibility API.
+- **Approval to begin Wave 2:** pending L approval.
+- **Logged by:** orchestrator.
