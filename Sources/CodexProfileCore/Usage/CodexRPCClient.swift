@@ -171,9 +171,14 @@ private final class CodexRPCStderrTail: @unchecked Sendable {
         self.lock.lock()
         defer { self.lock.unlock() }
 
-        if newData.count >= Self.maxBytes {
+        if newData.count > Self.maxBytes {
             self.data = Data(newData.suffix(Self.maxBytes))
             self.wasTruncated = true
+            return
+        }
+        if newData.count == Self.maxBytes {
+            self.wasTruncated = self.wasTruncated || !self.data.isEmpty
+            self.data = newData
             return
         }
 
@@ -228,7 +233,15 @@ private final class CodexRPCStderrTail: @unchecked Sendable {
         let wasTruncated = self.wasTruncated
         self.lock.unlock()
 
-        let redacted = LogRedactor.redact(String(decoding: snapshot, as: UTF8.self))
+        var safeSnapshot = snapshot
+        if wasTruncated {
+            guard let newline = safeSnapshot.firstIndex(of: 0x0A) else {
+                return "...<stderr tail>"
+            }
+            safeSnapshot.removeSubrange(...newline)
+        }
+
+        let redacted = LogRedactor.redact(String(decoding: safeSnapshot, as: UTF8.self))
             .replacingOccurrences(of: "\n", with: "\\n")
         let maxLength = 2_000
         let isExcerpted = redacted.count > maxLength
