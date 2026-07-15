@@ -80,4 +80,30 @@ final class DataProtectionKeychainAuthVaultTests {
             .complete,
             "Per-profile complete state did not survive encoding")
     }
+
+    @Test
+    func genericLegacyMutationsFailClosedWithoutKeychainAccess() throws {
+        let legacyVault = LegacyKeychainAuthVault()
+
+        try expectLegacyVaultIsReadOnly {
+            try legacyVault.saveAuthBlob(Data("test".utf8), profileID: "profile-1")
+        }
+        try expectLegacyVaultIsReadOnly {
+            _ = try legacyVault.repairStoredAuthAccess()
+        }
+        try expectLegacyVaultIsReadOnly {
+            try legacyVault.deleteAuthBlob(profileID: "profile-1")
+        }
+    }
+}
+
+private func expectLegacyVaultIsReadOnly(_ body: () throws -> Void) throws {
+    do {
+        try body()
+    } catch KeychainAuthVaultError.legacyVaultIsReadOnly {
+        return
+    } catch {
+        try fail("Expected legacyVaultIsReadOnly, got \(error)")
+    }
+    try fail("Expected legacyVaultIsReadOnly, but no error was thrown")
 }
