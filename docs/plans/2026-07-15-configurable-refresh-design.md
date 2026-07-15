@@ -24,7 +24,7 @@ Usage data should stay current without interrupting menu interaction. Users need
 
 ## Reference
 
-[CodexBar](https://github.com/steipete/CodexBar) uses an app preference for menu-open refresh and a custom AppKit menu row for actions that must not end menu tracking. It is MIT-licensed, as is this repository. This implementation will adapt that interaction pattern to the existing single-menu architecture without copying CodexBar's provider, viewport, or menu-reconciliation machinery.
+[CodexBar](https://github.com/steipete/CodexBar) uses an app preference for menu-open refresh and a custom AppKit menu row for actions that must not end menu tracking. It is MIT-licensed, as is this repository. This implementation adapts that interaction pattern to the existing single-menu architecture without copying CodexBar's provider, viewport, or menu-reconciliation machinery.
 
 The [Codex app-server documentation](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md#7-rate-limits-chatgpt) defines `usedPercent` as usage consumed within the quota window. The app should continue displaying that value as used, not invert it.
 
@@ -38,9 +38,9 @@ The fetcher also drains and discards the helper's standard error. The user-facin
 
 ## Preferences
 
-Add `RefreshPreferences.swift` in the app target. It will define a `RefreshInterval` enum and a small `RefreshPreferences` value type backed by `UserDefaults`.
+`RefreshPreferences.swift` defines a `RefreshInterval` enum and a small `RefreshPreferences` object backed by `UserDefaults`.
 
-`RefreshInterval` will expose the five supported choices and an optional timer duration:
+`RefreshInterval` exposes the five supported choices and an optional timer duration:
 
 | Choice | Timer duration |
 | --- | ---: |
@@ -52,54 +52,56 @@ Add `RefreshPreferences.swift` in the app target. It will define a `RefreshInter
 
 The stored interval defaults to 5 minutes. An unknown raw value also falls back to 5 minutes. `refreshWhenMenuOpens` defaults to `false`. These settings belong in `UserDefaults` because they control this app instance rather than profile identity or portable auth configuration.
 
-The General tab will gain a `REFRESHING` section between Startup and Support. It will contain an interval picker and the menu-open toggle. Choosing an interval will call a settings action supplied by `AppDelegate`, which invalidates the old timer and applies the new cadence immediately. The toggle needs no callback because `menuWillOpen` reads the stored value each time.
+The General tab has a `REFRESHING` section between Startup and Support. It contains an interval picker and the menu-open toggle. Changing the interval calls an `AppDelegate` settings action, which invalidates the old timer and applies the new cadence immediately. `menuWillOpen` reads the toggle each time.
 
 Manual mode disables only the repeating timer. Launch, app activation, system wake, profile switching, explicit Refresh, and an enabled menu-open refresh continue to use their existing paths.
 
 ## Persistent refresh action
 
-Add `PersistentRefreshMenuItem.swift` in the app target. It will contain two focused AppKit types:
+`PersistentRefreshMenuItem.swift` contains two focused AppKit types:
 
 1. `PersistentActionMenu`, an `NSMenu` subclass that intercepts Command-R while tracking and invokes a refresh closure without closing.
 2. `PersistentRefreshMenuView`, an `NSView` used as an `NSMenuItem` custom view.
 
-The refresh view will render the current `arrow.clockwise` symbol and `Refresh` label with native menu spacing and colors. It will accept the first click, provide a button accessibility role and label, and expose `setEnabled(_:)`. Disabled state removes highlighting, dims the icon and label, and ignores mouse and accessibility activation. The implementation will borrow the proven behavior from CodexBar's persistent refresh row, trimmed to this app's needs.
+The refresh view renders the `arrow.clockwise` symbol and `Refresh` label with native menu spacing and colors. It accepts the first click, provides a button accessibility role and label, and exposes `setEnabled(_:)`. Disabled state removes highlighting, dims the icon and label, and ignores mouse and accessibility activation. The implementation borrows the persistent-row behavior from CodexBar, trimmed to this app's needs.
 
-`AppDelegate` will create `PersistentActionMenu` instead of a plain `NSMenu`. The menu and row will share the same refresh closure. The custom `NSMenuItem` keeps its title and tooltip for menu semantics, while its view handles pointer activation. Settings and Quit remain ordinary items and keep their normal closing behavior.
+`AppDelegate` creates `PersistentActionMenu` instead of a plain `NSMenu`. The menu and row share the same refresh closure. The custom `NSMenuItem` keeps its title and tooltip for menu semantics, while its view handles pointer activation. Settings and Quit remain ordinary items and keep their normal closing behavior.
 
-`AppDelegate` will weakly retain the current refresh view. Rebuilding an open menu replaces that reference with the new row. This avoids retaining a removed menu item and keeps disabled state accurate after live data changes.
+`AppDelegate` weakly retains the current refresh row. Rebuilding an open menu replaces that reference with the new row. This avoids retaining a removed menu item and keeps disabled state accurate after live data changes.
 
 ## Refresh flow
 
-All calls from `AppDelegate` will go through a small `requestUsageRefresh(force:)` helper:
+All calls from `AppDelegate` go through a small `requestRefresh(force:)` helper:
 
 1. Call the existing `UsageProvider.refreshAll(force:)` method.
 2. Read `usageProvider.isRefreshing` after the call.
 3. Enable or disable the current refresh row to match that state.
 
-No changes are needed in `UsageProvider`. Its existing `isRefreshing` guard coalesces manual, timer, lifecycle, and menu-open requests.
+`UsageProvider` owns each active batch with a UUID refresh generation. A cancelled or superseded batch cannot update status, clear the newer task, or call the newer completion handler. Its `isRefreshing` guard coalesces manual, timer, lifecycle, and menu-open requests.
 
-`menuWillOpen` will sync the active profile and build the menu before starting network work. If `refreshWhenMenuOpens` is enabled, it will request a forced refresh and schedule the existing short retry. If the setting is off, it will do neither. The forced request gives the setting its literal meaning: each menu opening asks for current usage unless another refresh is already running.
+`menuWillOpen` syncs the active profile and builds the menu before starting network work. If `refreshWhenMenuOpens` is enabled, it requests a forced refresh and schedules a short retry. If the setting is off, it does neither. The forced request gives the setting its literal meaning: each menu opening asks for current usage unless another refresh is already running.
 
-The repeating timer will use the selected duration. Changing the picker calls `startPeriodicRefreshTimer()` immediately. That method always invalidates the previous timer first. Manual mode then returns without creating another timer.
+The repeating timer uses the selected duration. Changing the picker calls `startPeriodicRefreshTimer()` immediately. That method always invalidates the previous timer first. Manual mode returns without creating another timer.
 
-A manual click or Command-R calls `requestUsageRefresh(force: true)`. Because the callback runs inside the custom view or menu override, AppKit keeps tracking the menu. The row disables synchronously. When `onRefreshComplete` fires, `AppDelegate` updates the status icon and rebuilds the open menu with current snapshots. The newly created Refresh row is enabled because `isRefreshing` is false.
+A manual click or Command-R calls `requestRefresh(force: true)`. Because the callback runs inside the custom view or menu override, AppKit keeps tracking the menu. The row disables synchronously. When `onRefreshComplete` fires, `AppDelegate` updates the status icon and rebuilds the open menu with current snapshots. The newly created Refresh row is enabled because `isRefreshing` is false.
+
+If a forced request arrives while a refresh is running, `AppDelegate` records one pending follow-up. Once the current batch completes, it starts one forced refresh. This covers profile and authentication transitions without allowing a burst of duplicate transition refreshes.
 
 If the user closes the menu during a fetch, the fetch continues. The status icon still updates on completion, and the next opening builds from the latest stored state.
 
 ## Codex helper environment
 
-`CodexCLIResolver` will expose one child-environment builder based on the same effective path it uses for executable discovery. `CLIUsageFetcher.fetch` will use that environment before starting `CodexRPCClient`. This keeps the resolved `codex` launcher and its interpreter on the same path. Existing environment entries come first, followed by the app's known Homebrew and system fallbacks, with duplicates removed.
+`CodexCLIResolver` and `CodexRPCClient` use one effective child `PATH` for executable discovery and process launch. This keeps the resolved `codex` launcher and its interpreter on the same path. Existing environment entries come first, followed by the app's known Homebrew and system fallbacks, with duplicates removed.
 
 This applies whether `codex` is a native binary, a script, or an explicit `CODEX_CLI` override. Native binaries are unaffected. Script launchers can find their interpreter and sibling tools.
 
-`CodexRPCClient` will retain only a short bounded tail of standard error. If the child closes stdout before a response, the error will include an excerpt when one exists. The buffer must stay bounded, and the excerpt must pass through `LogRedactor` before it enters an error or log message.
+`CodexRPCClient` retains only a short bounded tail of standard error. If the child closes stdout before a response, the error includes an excerpt when one exists. The buffer remains bounded, and the excerpt passes through `LogRedactor` before it enters an error or log message. `LogRedactor` also covers camelCase OAuth token fields such as `accessToken`, `refreshToken`, and `idToken`.
 
 ## Cached-state presentation
 
-`ProfileCardView` will distinguish `.stale` from `.available` without adding another row to every profile card. A stale card will show a compact amber `Cached` label in its header while continuing to show the last good bars and reset dates. A successful fetch removes the label. `Re-login needed` keeps its current warning treatment.
+`ProfileCardView` distinguishes `.stale` from `.available` without adding another row to every profile card. A stale card shows a compact amber `Cached` label in its header while continuing to show the last good bars and reset dates. A successful fetch removes the label. `Re-login needed` keeps its current warning treatment.
 
-The app will not erase cached values on a transient failure. Cached data is still useful for comparison, but the label makes its age and reliability clear. Debug Info continues to carry the detailed last error and cache age.
+The app does not erase cached values on a transient failure. Cached data remains useful for comparison, but the label makes its age and reliability clear. Debug Info carries the detailed last error and cache age.
 
 ## Errors and edge cases
 
@@ -137,14 +139,14 @@ Rebuild first with `./build.sh`, then run the loose menu bar app.
 
 | Component | File surface |
 | --- | --- |
-| Refresh preference model | Create `Sources/CodexProfileSwitcherApp/RefreshPreferences.swift` |
-| Persistent menu action | Create `Sources/CodexProfileSwitcherApp/PersistentRefreshMenuItem.swift` |
-| Refresh lifecycle and menu wiring | Modify `Sources/CodexProfileSwitcherApp/AppDelegate.swift` |
-| General settings UI | Modify `Sources/CodexProfileSwitcherApp/SettingsViews.swift` |
-| Codex launcher environment and exit diagnostics | Modify `Sources/CodexProfileCore/Usage/CodexRPCClient.swift` |
-| Cached-state presentation | Modify `Sources/CodexProfileSwitcherApp/MenuViews.swift` |
-| Fetch environment regression coverage | Modify `Tests/AuthBlobTests/CodexRateLimitsTests.swift` |
-| User documentation | Modify `README.md` |
+| Refresh preference model | `Sources/CodexProfileSwitcherApp/RefreshPreferences.swift` |
+| Persistent menu action | `Sources/CodexProfileSwitcherApp/PersistentRefreshMenuItem.swift` |
+| Refresh lifecycle and menu wiring | `Sources/CodexProfileSwitcherApp/AppDelegate.swift` |
+| Refresh generation ownership | `Sources/CodexProfileSwitcherApp/UsageProvider.swift` |
+| General settings UI | `Sources/CodexProfileSwitcherApp/SettingsViews.swift` |
+| Codex launcher environment and exit diagnostics | `Sources/CodexProfileCore/Usage/CodexRPCClient.swift` |
+| Cached-state presentation | `Sources/CodexProfileSwitcherApp/MenuViews.swift` |
+| User documentation and license notice | `README.md`, `THIRD_PARTY_NOTICES.md` |
 
 SwiftPM includes new files by target directory, so `Package.swift` and generated artifacts do not change.
 
@@ -167,10 +169,18 @@ No new dependency. CodexBar is a source and behavior reference, not a build depe
 
 ### Estimated span
 
-Single session. The implementation touches eight files and has no migration or rollout dependency. The preference/menu work and fetch-environment work can be implemented independently before final integration.
+Completed in the implementation waves. The work has no migration or rollout dependency.
 
 ## Post-Implementation
 
-Run `staffcheck` after implementation and fix confirmed findings. This plan is load-bearing because its file surface is greater than five files. After staffcheck stabilizes the diff, run `codex-challenge` once in implementation review mode against the full branch diff with `REVIEW_ONLY: true`. Apply only accepted findings, reproduce each failure, run affected verification, audit the final delta, and commit fixes that pass.
+The final review queue consists of `staffcheck`, an implementation-mode `codex-challenge` against the full branch diff with `REVIEW_ONLY: true`, and the normal build and test checks. Accepted findings are reproduced before they are fixed.
 
-Do not run `simplify` unless requested. No manual setup, secrets, migrations, or service configuration will be required from the user.
+## Final implementation note
+
+The original stale readings came from a mismatch between executable discovery and the child process environment. The app now gives `codex` discovery and launch the same effective `PATH`, so a Homebrew launcher can find Node when the app starts from Finder or Login Items. Early helper failures include a bounded, redacted standard-error excerpt. Token redaction covers both snake_case and camelCase OAuth fields.
+
+Refresh preferences persist the five supported intervals and the opt-in menu-open setting, with 5 minutes and off as their defaults. The AppKit refresh row and exact Command-R handling keep the menu open while the row is disabled. A stale profile displays an amber `Cached` marker rather than presenting old numbers as fresh.
+
+`UsageProvider` assigns each batch a UUID refresh generation. Results from a cancelled or older batch are ignored, including after an authentication availability check suspends. During an authentication or profile transition, `AppDelegate` coalesces forced requests into one follow-up refresh after the current batch completes.
+
+Automated checks covered the refresh preferences, persistent action behavior, stale marker, and refresh-generation races. A live tracked-menu interaction and the final Settings layout were not visually automated.
