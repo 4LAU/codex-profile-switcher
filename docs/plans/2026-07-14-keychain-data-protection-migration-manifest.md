@@ -104,6 +104,16 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approved by L:** `2026-07-14`
 - **Logged by:** orchestrator.
 
+### `2026-07-14`: WAVE START
+
+- **Wave:** 1.
+- **Worktree path:** `/Users/aaron/Code/codex-profile-switcher-3001-worktree1`
+- **Plan branch:** `plan/keychain-data-protection-migration-wave-1`
+- **Base branch:** `program/keychain-data-protection-migration`
+- **Dev-server port:** none.
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
+
 ### `2026-07-14`: AUDIT COMPLETE
 
 - **Scope evidence:** Current production storage is `LegacyKeychainAuthVault`, which creates trusted-application ACLs with `SecTrustedApplicationCreateFromPath`. `ProfileStore` invokes ACL repair at startup. The CLI invokes repair on ordinary interactive paths. Both entitlement files are empty, package output embeds no profile, and the nested helper currently has the same bundle identifier as the app.

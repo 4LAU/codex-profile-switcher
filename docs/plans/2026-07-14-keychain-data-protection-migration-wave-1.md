@@ -45,3 +45,7 @@ Depends on Task 2. Touch only these files:
 Replace obsolete repair assertions with deterministic fake- or file-vault checks. Prove that resolver mismatch routes to the file vault, that Data Protection query construction carries the fixed security fields, that migration state survives config encode and decode, and that ordinary paths do not access a supplied legacy-vault fake. Preserve any existing test that still guards a silent account or auth corruption failure.
 
 Run the focused tests, then `./build.sh` and `make check`. Do not add a test that accesses macOS Keychain. Report status and changed files without committing.
+
+## Execution Log
+
+- PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `879ad77b3461e91bfa62cc3c721f18fdcacbfe33`, branch: `plan/keychain-data-protection-migration-wave-1`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree1`, port: none
