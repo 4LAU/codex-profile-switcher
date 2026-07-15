@@ -114,6 +114,13 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approved by L:** `2026-07-14`
 - **Logged by:** orchestrator.
 
+### `2026-07-14`: AMENDMENT
+
+- **Change:** Add `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift` to Wave 2 Task 1 for a migration-only atomic create-if-absent operation. Require legacy capture byte revalidation immediately before exact-reference deletion. Add explicit recovery for a durable pending checkpoint whose source was already deleted but whose final `complete` checkpoint failed.
+- **Reason:** The initial coordinator review found a concurrent v2 write could be overwritten, a changed legacy record could be deleted through its stable persistent reference, and a final checkpoint failure could leave a recoverable pending state with no review path.
+- **Approved by L:** not required; this stays within existing approved Wave 1 and Wave 2 inventory and does not change wave assignment.
+- **Logged by:** orchestrator.
+
 ### `2026-07-14`: AUDIT COMPLETE
 
 - **Scope evidence:** Current production storage is `LegacyKeychainAuthVault`, which creates trusted-application ACLs with `SecTrustedApplicationCreateFromPath`. `ProfileStore` invokes ACL repair at startup. The CLI invokes repair on ordinary interactive paths. Both entitlement files are empty, package output embeds no profile, and the nested helper currently has the same bundle identifier as the app.

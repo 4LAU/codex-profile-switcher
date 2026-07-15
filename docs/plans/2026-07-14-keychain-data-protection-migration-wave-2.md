@@ -7,15 +7,16 @@ This serialized Wave 2 plan builds an explicit, app-only legacy Keychain migrati
 Touch only these files:
 
 - `Sources/CodexProfileCore/Auth/KeychainAuthVault.swift`
+- `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift`
 - `Sources/CodexProfileCore/Auth/KeychainMigrationCoordinator.swift` (new)
 - `Tests/AuthBlobTests/KeychainMigrationCoordinatorTests.swift` (new)
 - Directly related additions under `Tests/AuthBlobTests/`
 
 Add an internal migration-only legacy source that captures all matching legacy-service records in one interactive query. Each capture contains a profile ID, auth bytes, and opaque persistent reference, but neither bytes nor references may be exposed to UI, logs, diagnostics, or public preview values. Reject duplicate IDs, invalid IDs, invalid auth blobs, missing fields, a source that contradicts a `complete` checkpoint, and a different existing v2 value before any write or deletion.
 
-The coordinator returns a one-use, secret-free preview ordered by profile ID. Each candidate has its ID, configured label or `Unconfigured saved account`, and migration status. It accepts only the preview's exact candidate count as approval. For every candidate: use an identical existing v2 copy or save then require byte-equal readback; persist `copied_cleanup_pending`; delete only the captured persistent reference; require another byte-equal v2 readback; then persist `complete`. A failed delete or final readback stays `copied_cleanup_pending`; save, readback, or checkpoint failures prevent deletion. Never roll back a verified v2 copy. A retry requires a fresh explicit preflight.
+The coordinator returns a one-use, secret-free preview ordered by profile ID. Each candidate has its ID, configured label or `Unconfigured saved account`, and migration status. It accepts only the preview's exact candidate count as approval. For every legacy candidate: use an identical existing v2 copy or an atomic create-if-absent operation, then require byte-equal readback; persist `copied_cleanup_pending`; revalidate the captured legacy bytes and delete only its captured persistent reference; require another byte-equal v2 readback; then persist `complete`. A failed delete or final readback stays `copied_cleanup_pending`; save, readback, or checkpoint failures prevent deletion. Never roll back a verified v2 copy. A retry requires a fresh explicit preflight. A pending record whose legacy source was already deleted after a final-checkpoint failure is shown only in a later explicit review, re-verifies v2 data, and may then checkpoint `complete` without a deletion target.
 
-Use fake source, destination, and checkpoint closures in hermetic tests. Cover ordering, labels, duplicate/invalid/stale preflight failure, count mismatch, save/readback failure, checkpoint failure, delete failure, final readback failure, conflicting existing v2 bytes, one-use sessions, and exact-reference deletion. Do not construct `LegacyKeychainAuthVault` in a test or perform `SecItem` operations. Finish with focused tests, `./build.sh`, and `git diff --check`. Do not commit.
+Use fake source, destination, and checkpoint closures in hermetic tests. Cover ordering, labels, duplicate/invalid/stale preflight failure, count mismatch, atomic-create collision, save/readback failure, checkpoint failure, changed-source rejection before deletion, delete failure, final readback failure, final-checkpoint recovery, conflicting existing v2 bytes, one-use and reentrant sessions, and exact-reference deletion. Do not construct `LegacyKeychainAuthVault` in a test or perform `SecItem` operations. Finish with focused tests, `./build.sh`, and `git diff --check`. Do not commit.
 
 ## Task 2: Add an explicit ProfileStore migration boundary
 
@@ -50,3 +51,4 @@ Run the complete coordinator failure matrix and the app/CLI negative-path checks
 ## Execution Log
 
 - PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `c8b494434c24aa6b139d23d593f9779a5b15c433`, branch: `plan/keychain-data-protection-migration-wave-2`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree2`, port: none
+- PLAN AMENDMENT 2026-07-14: Task 1 adds atomic v2 creation, legacy source revalidation, reentrant-session consumption, and explicit final-checkpoint recovery after code-quality review identified concurrency and recovery gaps.
