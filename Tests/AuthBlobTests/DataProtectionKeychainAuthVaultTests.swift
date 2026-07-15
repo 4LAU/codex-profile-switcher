@@ -30,9 +30,6 @@ final class DataProtectionKeychainAuthVaultTests {
         let query = vault.itemQuery(profileID: profileID)
         let attributes = vault.newItemAttributes(data: Data("test".utf8), profileID: profileID)
 
-        try expect(
-            vault.diagnostics().usesDataProtectionKeychain,
-            "Diagnostics must identify the Data Protection backend")
         try expectEqual(
             query[kSecClass] as? String,
             kSecClassGenericPassword as String,
@@ -55,6 +52,20 @@ final class DataProtectionKeychainAuthVaultTests {
             attributes[kSecAttrAccessible] as? String,
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
             "New v2 items must remain device-only after first unlock")
+    }
+
+    @Test
+    func dataProtectionDiagnosticIdentifiesTheVaultWithoutSecurityAccess() throws {
+        let diagnostics = DataProtectionKeychainAuthVault().diagnostics()
+
+        try expectEqual(
+            diagnostics.activeBackend,
+            .dataProtectionKeychain,
+            "Diagnostics must identify the Data Protection backend")
+        try expectEqual(
+            diagnostics.activeBackend.displayName,
+            "Data Protection Keychain",
+            "The Data Protection backend must use a clear diagnostic label")
     }
 
     @Test

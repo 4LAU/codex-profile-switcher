@@ -319,7 +319,7 @@ enum CodexProfileCLI {
         let diagnostics = self.vault.diagnostics()
         self.note("")
         self.note("Auth storage:")
-        self.note("  backend: \(diagnostics.activeBackend.rawValue)")
+        self.note("  backend: \(diagnostics.activeBackend.displayName)")
 
         let configProfiles = self.configStore.loadConfig()?.profiles ?? []
         let savedIDs = Set(try self.vault.listProfileIDs().filter(ProfileValidator.isValid))
@@ -2142,14 +2142,7 @@ enum CodexProfileCLI {
     }
 
     private static func authStorageLabel() -> String {
-        switch self.vault.diagnostics().activeBackend {
-        case .legacyACL:
-            return "macOS Keychain"
-        case .file:
-            return "file auth vault"
-        case .custom:
-            return "custom auth vault"
-        }
+        self.vault.diagnostics().activeBackend.displayName
     }
 
     private static func note(_ text: String) {

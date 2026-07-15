@@ -121,7 +121,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault {
     }
 
     public func diagnostics() -> AuthVaultDiagnostics {
-        AuthVaultDiagnostics(activeBackend: .custom, usesDataProtectionKeychain: true)
+        AuthVaultDiagnostics(activeBackend: .dataProtectionKeychain)
     }
 
     func itemQuery(profileID: String) -> [CFString: Any] {
