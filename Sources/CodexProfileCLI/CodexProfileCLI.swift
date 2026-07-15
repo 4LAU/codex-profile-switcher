@@ -45,10 +45,7 @@ enum CodexProfileCLI {
     private static let fileManager = FileManager.default
     private static let paths = AppPaths()
     private static let configStore = ProfileConfigStore(paths: Self.paths)
-    private static let keychainService = Self.environment("CODEX_PROFILE_KEYCHAIN_SERVICE")
-        ?? KeychainAuthVault.defaultService
     private static let vault = Self.makeVault()
-    private static let keychainAccessRepairVersion = 4
     private static let version = "0.5.3"
 
     /// True when no controlling terminal is attached to stdin. In this mode the
@@ -145,7 +142,6 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) login <profile> [codex-login-args...]")
         }
         try self.validateProfile(profile)
-        self.repairKeychainAccessIfNeeded()
 
         let tempHome = try self.makeTempHome(profile: profile)
         defer { try? self.fileManager.removeItem(at: tempHome) }
@@ -180,7 +176,6 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) app <profile> [workspace]")
         }
         try self.validateProfile(profile)
-        let repairComplete = self.repairKeychainAccessIfNeeded(markComplete: false)
 
         let requestedWorkspace = args.dropFirst().first
         let workspace = try self.resolveWorkspace(requestedWorkspace)
@@ -194,18 +189,12 @@ enum CodexProfileCLI {
             isCodexDesktopRunning: self.codexDesktopRunning
         ).prepareSwitch(to: profile)
         if transaction.alreadyActive {
-            if repairComplete {
-                self.markKeychainAccessRepairComplete()
-            }
             self.note("Profile '\(profile)' is already active.")
             return
         }
 
         try self.quitCodexApp()
         _ = try transaction.commit()
-        if repairComplete {
-            self.markKeychainAccessRepairComplete()
-        }
         do {
             try self.launchCodexApp(workspace: workspace)
         } catch {
@@ -227,7 +216,6 @@ enum CodexProfileCLI {
     private static func commandStatus(_ args: [String]) throws {
         let json = args.contains("--json")
         let positional = args.filter { $0 != "--json" }
-        self.repairKeychainAccessIfNeeded()
 
         let profiles: [String]
         if let profile = positional.first {
@@ -332,7 +320,6 @@ enum CodexProfileCLI {
         self.note("")
         self.note("Auth storage:")
         self.note("  backend: \(diagnostics.activeBackend.rawValue)")
-        self.note("  keychain service: \(self.keychainService)")
 
         let configProfiles = self.configStore.loadConfig()?.profiles ?? []
         let savedIDs = Set(try self.vault.listProfileIDs().filter(ProfileValidator.isValid))
@@ -353,38 +340,8 @@ enum CodexProfileCLI {
     }
 
     private static func commandKeychainRepair() throws {
-        let result = try self.vault.repairStoredAuthAccess()
-        if result.isComplete {
-            try self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
-        }
-        self.note("Rewrote \(result.repaired)/\(result.total) saved auth item(s) with current Keychain access settings.")
-        if !result.isComplete {
-            self.note("Some items could not be repaired. Run again to retry.")
-        }
-    }
-
-    /// Repairs Keychain ACLs for stored auth items when the stored version is
-    /// out of date. MUST only be called on interactive paths (i.e. inside an
-    /// `if interactive` guard or from a command that always runs with a TTY).
-    /// The load-bearing `if interactive` guard in `commandBestAuth` is what
-    /// keeps this from being called in non-interactive mode — removing that
-    /// guard would cause a modal Keychain consent prompt to hang the process
-    /// with no UI to render it.
-    @discardableResult
-    private static func repairKeychainAccessIfNeeded(markComplete: Bool = true) -> Bool {
-        let currentVersion = self.configStore.loadConfig()?.authStorageVersion ?? 0
-        guard currentVersion >= 2,
-              currentVersion < Self.keychainAccessRepairVersion else { return false }
-
-        guard let result = try? self.vault.repairStoredAuthAccess() else { return false }
-        if result.isComplete, markComplete {
-            self.markKeychainAccessRepairComplete()
-        }
-        return result.isComplete
-    }
-
-    private static func markKeychainAccessRepairComplete() {
-        try? self.configStore.markAuthStorageVersion(Self.keychainAccessRepairVersion)
+        throw CLIError.message(
+            "Keychain migration is not available yet; legacy Keychain credentials were not changed.")
     }
 
     private struct BestAuthOptions {
@@ -442,9 +399,7 @@ enum CodexProfileCLI {
             throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]")
         }
 
-        // Non-interactive whenever stdin is not a TTY or the caller asked. This
-        // selects the fail-closed Keychain vault so reads can never block on a
-        // modal consent prompt that has no UI to render.
+        // Non-interactive whenever stdin is not a TTY or the caller asked.
         let interactive = self.stdinIsTTY && !options.nonInteractive
 
         // Watchdog guarantees the process dies even if something below blocks,
@@ -497,19 +452,14 @@ enum CodexProfileCLI {
         excludeIDs: Set<String>,
         interactive: Bool
     ) throws -> BestAuthOutcome {
-        let bestAuthVault = self.makeVault(interactionAllowed: interactive)
+        let bestAuthVault = self.vault
 
         let config = self.configStore.loadConfig() ?? AppConfig(profiles: [], activeProfile: "")
 
-        // Profiles-configured check is purely file-based and runs before any
-        // Keychain read, so exit 3 stays fast and prompt-free.
+        // Profiles-configured check is purely file-based, so exit 3 stays fast.
         if config.profiles.isEmpty {
             fputs("No profiles configured\n", stderr)
             throw CLIError.exitStatus(ExitCode.noProfilesConfigured)
-        }
-
-        if interactive {
-            self.repairKeychainAccessIfNeeded()
         }
 
         var cache = self.loadCache()
@@ -525,8 +475,8 @@ enum CodexProfileCLI {
             throw error
         }
 
-        // Data reads can trigger a non-suppressible ACL prompt for legacy
-        // trusted-app Keychain items, so bound them in non-interactive mode.
+        // Bound reads in non-interactive mode so a blocked storage operation
+        // cannot hold an automation indefinitely.
         let readBound: TimeInterval? = interactive ? nil : 5
 
         // Self-fetch live usage before ranking so we never silently rank against
@@ -883,31 +833,24 @@ enum CodexProfileCLI {
         try self.validateProfile(profile)
 
         // Non-interactive whenever stdin is not a TTY or the caller asked.
-        // Mirrors best-auth: this keeps the interactive Keychain repair off the
-        // headless path (it can hang on a modal consent prompt with no UI) and
-        // selects a fail-closed vault so the credential read cannot block.
         let interactive = self.stdinIsTTY && !nonInteractive
 
-        if interactive {
-            self.repairKeychainAccessIfNeeded()
-        } else {
+        if !interactive {
             self.armWatchdog(
                 seconds: timeout,
                 diagnostic: "import-auth timed out after \(Int(timeout))s")
         }
 
-        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
         try self.importRefreshedAuth(
             dirURL: URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL,
             profile: profile,
-            vault: vault)
+            vault: self.vault)
     }
 
     /// Write-back core shared by `import-auth` and `exec`: saves `dirURL`'s
     /// auth.json over the stored credential for `profile`, but only when it
     /// validates and its identity fingerprint matches the stored one. Callers
-    /// without a vault preference get the default (interaction-allowed) vault;
-    /// `commandImportAuth` passes a fail-closed vault in non-interactive mode.
+    /// without a vault preference get the selected primary vault.
     private static func importRefreshedAuth(dirURL: URL, profile: String) throws {
         try self.importRefreshedAuth(dirURL: dirURL, profile: profile, vault: self.vault)
     }
@@ -1633,8 +1576,7 @@ enum CodexProfileCLI {
     private static func commandLeaseBegin(_ args: [String]) throws {
         let options = try self.parseLeaseBeginOptions(args)
 
-        // Non-interactive whenever stdin is not a TTY or the caller asked, so a
-        // headless run never blocks on a modal Keychain consent prompt.
+        // Non-interactive whenever stdin is not a TTY or the caller asked.
         let interactive = self.stdinIsTTY && !options.nonInteractive
 
         // Opportunistic cleanup of expired homes — best-effort; never fail begin.
@@ -1721,7 +1663,7 @@ enum CodexProfileCLI {
         // here before deleting, and on failure keep the home + reservation for a
         // later retry rather than destroying the credential. We always have the
         // bound profile (the lease's map key), so the write-back target is known.
-        let gcVault = self.makeVault(interactionAllowed: false)
+        let gcVault = self.vault
         for (profileID, lease) in self.loadCache().leases where !lease.isActive(now: now) {
             var writebackFailed = false
             if self.isLeaseHome(lease.home, token: lease.token) {
@@ -1888,9 +1830,8 @@ enum CodexProfileCLI {
         // swap and preserve the home — overwriting would silently lose the
         // refresh. (importRefreshedAuth is a no-op when nothing changed, and
         // refuses to write a different identity, so this is safe to always run.)
-        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
         do {
-            try self.importRefreshedAuth(dirURL: home, profile: oldProfile, vault: vault)
+            try self.importRefreshedAuth(dirURL: home, profile: oldProfile, vault: self.vault)
         } catch {
             fputs("[lease swap] write-back of the current account '\(oldProfile)' FAILED: \(error). "
                 + "Aborting swap and preserving the leased home so the refreshed credential is not lost "
@@ -1947,7 +1888,9 @@ enum CodexProfileCLI {
                 + "Writing the new account's credential back directly so it is not stranded in the leased home.\n", stderr)
             // Write `newProfile`'s credential straight back so it is not stranded
             // (invariant 1: never lose a refreshed credential).
-            let directWriteback = Result { try self.importRefreshedAuth(dirURL: home, profile: newProfile, vault: vault) }
+            let directWriteback = Result {
+                try self.importRefreshedAuth(dirURL: home, profile: newProfile, vault: self.vault)
+            }
             // The cache still binds this token to `oldProfile` while the home now
             // holds `newProfile`'s credential — an identity mismatch that `lease
             // end`/`gc` would treat as recoverable and preserve INDEFINITELY,
@@ -2050,7 +1993,6 @@ enum CodexProfileCLI {
         }
         let profile = foundProfile
         let home = URL(fileURLWithPath: reservation.home)
-        let interactive = self.stdinIsTTY && !options.nonInteractive
 
         // Disarm on the way out so an end that finishes near the timeout boundary
         // is never killed after it has already released the lease.
@@ -2068,9 +2010,8 @@ enum CodexProfileCLI {
         // nothing to write back, so fall through to a normal clean release. The
         // idempotent "no active lease" case above already returns 0; a trap that
         // wants best-effort teardown can still append `|| true`.
-        let vault = interactive ? self.vault : self.makeVault(interactionAllowed: false)
         do {
-            try self.importRefreshedAuth(dirURL: home, profile: profile, vault: vault)
+            try self.importRefreshedAuth(dirURL: home, profile: profile, vault: self.vault)
         } catch {
             if self.isRecoverableWritebackError(error) {
                 fputs("[lease end] write-back FAILED for '\(profile)': \(error). "
@@ -2130,23 +2071,18 @@ enum CodexProfileCLI {
         ProcessInfo.processInfo.environment[key]
     }
 
-    /// Unsigned (ad-hoc) builds never touch the real Keychain: every rebuild
-    /// has a new code identity, which would trigger a macOS consent prompt per
-    /// saved profile. They get a separate file-based dev vault instead (the
-    /// CodexBar pattern). Signed builds (`make install-cli`, releases) use the
-    /// Keychain and share the real profiles.
+    /// Only binaries with the data-protection Keychain entitlement may use the
+    /// data-protection Keychain vault. Every other binary uses the dev file vault.
     private enum EffectiveAuthBackend {
         case file(URL)
-        case keychain
+        case dataProtectionKeychain
     }
 
     /// The auth backend this process uses. Tests pin it with
     /// `CODEX_PROFILE_TEST_AUTH_STORE_DIR`; the menu app pins it with
-    /// `CODEX_PROFILE_FILE_AUTH_STORE_DIR` / `CODEX_PROFILE_FORCE_KEYCHAIN` so a
-    /// delegated helper lands on the SAME store the app uses even if the app and
-    /// helper binaries have different signing identities. With no override it
-    /// follows this binary's own signing identity (unsigned dev builds get a
-    /// file vault and never touch the real Keychain).
+    /// `CODEX_PROFILE_FILE_AUTH_STORE_DIR` so a delegated helper can use the
+    /// same file vault as its caller. No environment variable can bypass the
+    /// entitlement check for data-protection Keychain storage.
     private static let effectiveBackend: EffectiveAuthBackend = {
         let env = ProcessInfo.processInfo.environment
         if let path = env["CODEX_PROFILE_TEST_AUTH_STORE_DIR"], !path.isEmpty {
@@ -2155,33 +2091,26 @@ enum CodexProfileCLI {
         if let path = env["CODEX_PROFILE_FILE_AUTH_STORE_DIR"], !path.isEmpty {
             return .file(URL(fileURLWithPath: path).standardizedFileURL)
         }
-        if let force = env["CODEX_PROFILE_FORCE_KEYCHAIN"],
-           force == "1" || force.lowercased() == "true" {
-            return .keychain
-        }
-        return ProcessSigningIdentity.isStable
-            ? .keychain
+        return ProcessSigningIdentity.hasDataProtectionKeychainAccess
+            ? .dataProtectionKeychain
             : .file(CodexProfileCLI.paths.devAuthStoreURL)
     }()
 
-    private static var didNoteDevVault = false
+    private static var didNoteFileVault = false
 
-    private static func makeVault(interactionAllowed: Bool = true) -> AuthVault {
+    private static func makeVault() -> AuthVault {
         switch self.effectiveBackend {
         case let .file(root):
-            // Preserve the historical silent behaviour under the test-dir override.
-            if !self.didNoteDevVault,
+            if !self.didNoteFileVault,
                (ProcessInfo.processInfo.environment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"] ?? "").isEmpty {
-                self.didNoteDevVault = true
+                self.didNoteFileVault = true
                 fputs("""
-                notice: unsigned dev build - using file auth vault at \(root.path) \
-                (the macOS Keychain is not touched). Build a signed CLI with `make install-cli` \
-                to share the real Keychain profiles.\n
+                notice: no data-protection Keychain entitlement - using file auth vault at \(root.path).\n
                 """, stderr)
             }
             return FileAuthVault(root: root)
-        case .keychain:
-            return LegacyKeychainAuthVault(service: self.keychainService, interactionAllowed: interactionAllowed)
+        case .dataProtectionKeychain:
+            return DataProtectionKeychainAuthVault()
         }
     }
 
@@ -2189,8 +2118,8 @@ enum CodexProfileCLI {
         switch self.effectiveBackend {
         case let .file(root):
             return root.appendingPathComponent("\(profile).json").standardizedFileURL.path
-        case .keychain:
-            return "keychain://\(self.keychainService)/\(profile)"
+        case .dataProtectionKeychain:
+            return "data-protection-keychain://v2/\(profile)"
         }
     }
 
@@ -2276,14 +2205,9 @@ enum CodexProfileCLI {
         case interactionRequired
     }
 
-    /// Reads a profile's auth blob with a hard upper bound. The Keychain data
-    /// read for legacy trusted-application ACL items shows a modal consent
-    /// prompt that `kSecUseAuthenticationUIFail` does NOT suppress, so in
-    /// non-interactive mode we race the (synchronous, uncancellable) read on a
-    /// background thread against `bound`. If the bound wins, a prompt is up with
-    /// no UI to answer it: we report `.interactionRequired` and the caller maps
-    /// that to a clean exit instead of hanging. In interactive mode `bound` is
-    /// nil and the read proceeds normally so the user can answer the prompt.
+    /// Reads a profile's auth blob with an optional hard upper bound. In
+    /// non-interactive mode the synchronous read runs on a background thread so
+    /// a blocked storage operation cannot hold automation indefinitely.
     private static func loadAuthBlobBounded(
         _ vault: AuthVault,
         profileID: String,
