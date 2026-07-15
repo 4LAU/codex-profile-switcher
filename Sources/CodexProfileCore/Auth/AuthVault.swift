@@ -9,6 +9,20 @@ public enum AuthVaultBackend: String, Equatable {
     case legacyACL
     case file
     case custom
+    case dataProtectionKeychain
+
+    public var displayName: String {
+        switch self {
+        case .legacyACL:
+            return "macOS Keychain"
+        case .file:
+            return "file auth vault"
+        case .custom:
+            return "custom auth vault"
+        case .dataProtectionKeychain:
+            return "Data Protection Keychain"
+        }
+    }
 }
 
 public struct AuthVaultDiagnostics: Equatable {
@@ -16,6 +30,17 @@ public struct AuthVaultDiagnostics: Equatable {
 
     public init(activeBackend: AuthVaultBackend) {
         self.activeBackend = activeBackend
+    }
+}
+
+public enum PrimaryAuthVaultSelector {
+    public static func makeVault(
+        hasDataProtectionKeychainAccess: Bool,
+        fileVaultRoot: URL
+    ) -> AuthVault {
+        hasDataProtectionKeychainAccess
+            ? DataProtectionKeychainAuthVault()
+            : FileAuthVault(root: fileVaultRoot)
     }
 }
 

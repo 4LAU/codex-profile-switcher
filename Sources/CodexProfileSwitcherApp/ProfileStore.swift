@@ -7,7 +7,6 @@ import CryptoKit
 @MainActor
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
-    private static let keychainAccessRepairVersion = 4
 
     private let paths: AppPaths
     private let configDir: URL
@@ -64,24 +63,23 @@ final class ProfileStore {
             isFirstLaunch = true
         }
 
-        let keychainService = Self.keychainService(environment: environment)
         if let authVault {
             self.authVault = authVault
             self.authStorageDescription = "custom auth vault"
-        } else if !ProcessSigningIdentity.isStable {
-            // Unsigned dev builds never touch the real Keychain: every rebuild
-            // has a new code identity, which would trigger a consent prompt
-            // per saved profile. They get a separate file-based dev vault.
-            self.authVault = FileAuthVault(root: paths.devAuthStoreURL)
-            self.authStorageDescription = "file auth vault (unsigned dev build)"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "file", "reason": "unsigned dev build"])
         } else {
-            let vault = LegacyKeychainAuthVault(service: keychainService)
-            self.authVault = vault
-            self.authStorageDescription = "macOS Keychain (\(keychainService))"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "legacyACL"])
+            let hasDataProtectionKeychainAccess = ProcessSigningIdentity.hasDataProtectionKeychainAccess
+            self.authVault = PrimaryAuthVaultSelector.makeVault(
+                hasDataProtectionKeychainAccess: hasDataProtectionKeychainAccess,
+                fileVaultRoot: paths.devAuthStoreURL)
+            if hasDataProtectionKeychainAccess {
+                self.authStorageDescription = "data-protection Keychain auth vault"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "dataProtectionKeychain"])
+            } else {
+                self.authStorageDescription = "file auth vault (no data-protection Keychain entitlement)"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "file", "reason": "missing data-protection Keychain entitlement"])
+            }
         }
 
         let cacheDecoder = JSONDecoder()
@@ -104,29 +102,21 @@ final class ProfileStore {
         }
 
         if isFirstLaunch, self.legacyAuthStoreFiles().isEmpty {
-            // Only the Keychain backend owns the auth-storage version. A file dev
-            // vault must not stamp it into the shared config, or a later signed
-            // build would see it advanced and skip its real Keychain migration.
-            if self.ownsKeychainBookkeeping {
-                self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            // Only the data-protection Keychain backend owns the disk-auth
+            // migration version. A file vault must leave it untouched so a later
+            // entitlement-bearing build can migrate the old disk store.
+            if self.ownsLegacyDiskMigrationBookkeeping {
+                self.config.authStorageVersion = Self.keychainAuthStorageVersion
             }
             self.config.profiles = [ProfileConfig(id: "1", label: "Profile 1")]
             self.statuses["1"] = .notSetUp
             self.saveConfig()
         } else {
             self.migrateLegacyProfiles()
-            self.repairKeychainAccessIfNeeded()
             self.discoverProfiles()
             self.refreshStatusesFromStoredAuth()
         }
         self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
-    }
-
-    static func keychainService(environment: [String: String]) -> String {
-        if let service = environment["CODEX_PROFILE_KEYCHAIN_SERVICE"], !service.isEmpty {
-            return service
-        }
-        return LegacyKeychainAuthVault.defaultService
     }
 
     static func userHome(environment: [String: String]) -> URL {
@@ -549,19 +539,14 @@ final class ProfileStore {
             .sorted()
     }
 
-    /// The file dev vault (unsigned builds) must never perform Keychain-specific
-    /// bookkeeping — advancing `authStorageVersion`, migrating legacy auth into
-    /// the active vault, or deleting the legacy store — because that state lives
-    /// in the shared `config.json`. A later signed Keychain build would see the
-    /// advanced version, skip its real migration/repair, and find an empty
-    /// Keychain. Only the Keychain backend (and injected non-file test vaults)
-    /// owns this bookkeeping.
-    private var ownsKeychainBookkeeping: Bool {
+    /// File vaults must leave the disk-auth migration incomplete so a later
+    /// entitlement-bearing build can move those credentials.
+    private var ownsLegacyDiskMigrationBookkeeping: Bool {
         self.authVault.diagnostics().activeBackend != .file
     }
 
     private func migrateLegacyProfiles() {
-        guard self.ownsKeychainBookkeeping else { return }
+        guard self.ownsLegacyDiskMigrationBookkeeping else { return }
         let currentVersion = self.config.authStorageVersion ?? 0
         guard currentVersion < Self.keychainAuthStorageVersion else {
             self.cleanupLegacyAuthStoreIfMigrated()
@@ -617,37 +602,11 @@ final class ProfileStore {
             self.config.authStorageVersion = Self.keychainAuthStorageVersion
             try self.saveConfigThrowing()
             self.cleanupLegacyAuthStoreIfMigrated()
-            AppLogger.info("Migrated legacy disk auth store to Keychain",
+            AppLogger.info("Migrated legacy disk auth store to primary auth vault",
                            metadata: ["profile_count": "\(validatedFiles.count)"])
         } catch {
-            self.rollbackKeychainMigration(touchedProfileIDs: touchedProfileIDs, priorBlobs: priorBlobs)
-            AppLogger.error("Failed to migrate legacy disk auth store to Keychain",
-                            metadata: ["error": error.localizedDescription])
-        }
-    }
-
-    private func repairKeychainAccessIfNeeded() {
-        guard self.ownsKeychainBookkeeping else { return }
-        let currentVersion = self.config.authStorageVersion ?? 0
-        guard currentVersion >= Self.keychainAuthStorageVersion,
-              currentVersion < Self.keychainAccessRepairVersion else { return }
-
-        do {
-            let result = try self.authVault.repairStoredAuthAccess()
-            if result.isComplete {
-                self.config.authStorageVersion = Self.keychainAccessRepairVersion
-                try self.saveConfigThrowing()
-            }
-            if result.repaired > 0 {
-                AppLogger.info("Repaired saved auth Keychain access",
-                               metadata: [
-                                   "complete": "\(result.isComplete)",
-                                   "repaired": "\(result.repaired)",
-                                   "total": "\(result.total)",
-                               ])
-            }
-        } catch {
-            AppLogger.error("Failed to repair saved auth Keychain access",
+            self.rollbackLegacyDiskAuthMigration(touchedProfileIDs: touchedProfileIDs, priorBlobs: priorBlobs)
+            AppLogger.error("Failed to migrate legacy disk auth store to primary auth vault",
                             metadata: ["error": error.localizedDescription])
         }
     }
@@ -670,7 +629,7 @@ final class ProfileStore {
         .sorted { $0.0 < $1.0 }
     }
 
-    private func rollbackKeychainMigration(touchedProfileIDs: [String], priorBlobs: [String: Data?]) {
+    private func rollbackLegacyDiskAuthMigration(touchedProfileIDs: [String], priorBlobs: [String: Data?]) {
         for id in Set(touchedProfileIDs) {
             do {
                 if let prior = priorBlobs[id] ?? nil {
@@ -679,14 +638,14 @@ final class ProfileStore {
                     try self.authVault.deleteAuthBlob(profileID: id)
                 }
             } catch {
-                AppLogger.error("Failed to roll back migrated Keychain auth",
+                AppLogger.error("Failed to roll back migrated auth vault data",
                                 metadata: ["profile": id, "error": error.localizedDescription])
             }
         }
     }
 
     private func cleanupLegacyAuthStoreIfMigrated() {
-        guard self.ownsKeychainBookkeeping else { return }
+        guard self.ownsLegacyDiskMigrationBookkeeping else { return }
         guard (self.config.authStorageVersion ?? 0) >= Self.keychainAuthStorageVersion else { return }
         guard self.fileManager.fileExists(atPath: self.authStoreDir.path) else { return }
 

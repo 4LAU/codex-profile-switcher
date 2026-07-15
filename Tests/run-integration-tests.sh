@@ -353,8 +353,8 @@ test_switch_uses_active_profile_to_disambiguate_live_auth() {
   run_helper app PreferredB "$WORK_DIR" >/dev/null
 
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected profile auth was not restored after disambiguated switch"
-  grep -Fq '"authStorageVersion" : 4' "$TEST_HOME/.codex-switcher/config.json" \
-    || fail "profile switch did not preserve repaired authStorageVersion"
+  grep -Fq '"authStorageVersion" : 3' "$TEST_HOME/.codex-switcher/config.json" \
+    || fail "profile switch unexpectedly changed authStorageVersion"
   export_auth "PreferredA" "$exported_a"
   export_auth "PreferredClone" "$exported_clone"
   assert_same_file "$exported_a" "$duplicate_a" "non-active duplicate was overwritten during disambiguated switch"
@@ -405,10 +405,33 @@ test_login_rejects_duplicate_auth_and_preserves_target_auth() {
     "duplicate login overwrote the target profile auth"
 }
 
-test_keychain_repair_preserves_saved_auth() {
+test_file_vault_login_preserves_incomplete_legacy_disk_migration() {
+  reset_home
+  local legacy_auth="$WORK_DIR/legacy-disk-auth.json"
+  local login="$WORK_DIR/file-vault-login.json"
+  local legacy_store="$TEST_HOME/.codex-switcher/auth/Legacy.json"
+  make_api_auth "$legacy_auth" "sk-test-legacy-disk-1111111111" "legacy-disk"
+  make_api_auth "$login" "sk-test-file-vault-login-2222222222" "file-vault-login"
+  mkdir -p "$(dirname "$legacy_store")"
+  cp "$legacy_auth" "$legacy_store"
+
+  FAKE_CODEX_LOGIN_AUTH="$login" run_helper_dev login FileVaultLogin >/dev/null
+
+  [[ -f "$legacy_store" ]] || fail "file-vault login removed the legacy disk auth source"
+  assert_same_file "$legacy_store" "$legacy_auth" \
+    "file-vault login changed the legacy disk auth source"
+  [[ -f "$TEST_HOME/.codex-switcher/config.json" ]] \
+    || fail "file-vault login did not create its profile config"
+  if grep -Fq '"authStorageVersion"' "$TEST_HOME/.codex-switcher/config.json"; then
+    fail "file-vault login incorrectly marked legacy disk auth migration complete"
+  fi
+}
+
+test_keychain_repair_reports_no_migration_yet() {
   reset_home
   local saved_a="$WORK_DIR/repair-a.json"
   local saved_b="$WORK_DIR/repair-b.json"
+  local original_config="$WORK_DIR/repair-config.json"
   local exported_a="$WORK_DIR/exported-repair-a.json"
   local exported_b="$WORK_DIR/exported-repair-b.json"
   make_api_auth "$saved_a" "sk-test-repair-a-1111111111" "repair-a"
@@ -418,11 +441,16 @@ test_keychain_repair_preserves_saved_auth() {
   mkdir -p "$TEST_HOME/.codex-switcher"
   printf '{\n  "activeProfile" : "RepairA",\n  "authStorageVersion" : 2,\n  "profiles" : [\n    {"id" : "RepairA", "label" : "Repair A"},\n    {"id" : "RepairB", "label" : "Repair B"}\n  ]\n}\n' \
     > "$TEST_HOME/.codex-switcher/config.json"
+  cp "$TEST_HOME/.codex-switcher/config.json" "$original_config"
 
-  run_helper keychain-repair >/dev/null
+  if run_helper keychain-repair >/dev/null 2>"$WORK_DIR/keychain-repair.err"; then
+    fail "keychain-repair unexpectedly performed a migration"
+  fi
 
-  grep -Fq '"authStorageVersion" : 4' "$TEST_HOME/.codex-switcher/config.json" \
-    || fail "keychain-repair did not mark authStorageVersion 4"
+  grep -Fq "Keychain migration is not available yet" "$WORK_DIR/keychain-repair.err" \
+    || fail "keychain-repair did not report the deferred migration"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" \
+    "keychain-repair changed migration bookkeeping"
   export_auth "RepairA" "$exported_a"
   export_auth "RepairB" "$exported_b"
   assert_same_file "$exported_a" "$saved_a" "keychain-repair modified RepairA auth"
@@ -560,11 +588,11 @@ JSON
   [[ "$selected" == "ExhaustB" ]] || fail "best-auth did not skip exhausted profile"
 }
 
-test_unsigned_build_uses_dev_vault_not_keychain() {
-  # Only meaningful for an ad-hoc test binary; a signed binary would route to
-  # the real Keychain, which tests must never touch.
-  if ! codesign -dv "$HELPER" 2>&1 | grep -q "TeamIdentifier=not set"; then
-    printf 'skip: helper binary is signed; dev-vault gate not exercised\n'
+test_unentitled_build_uses_file_vault() {
+  # This check is inspection only: never run an entitlement-bearing helper here
+  # because the test must not access the macOS Keychain.
+  if codesign -d --entitlements :- "$HELPER" 2>/dev/null | grep -q "keychain-access-groups"; then
+    printf 'skip: helper has Keychain entitlement; file-vault gate not exercised\n'
     return 0
   fi
   reset_home
@@ -574,12 +602,39 @@ test_unsigned_build_uses_dev_vault_not_keychain() {
   FAKE_CODEX_LOGIN_AUTH="$login" run_helper_dev login DevVault \
     >/dev/null 2>"$WORK_DIR/dev-vault.err" || fail "login via dev vault failed"
 
-  grep -q "unsigned dev build" "$WORK_DIR/dev-vault.err" \
+  grep -q "no data-protection Keychain entitlement" "$WORK_DIR/dev-vault.err" \
     || fail "dev-vault notice was not printed"
   [[ -f "$TEST_HOME/.codex-switcher/dev-auth-store/DevVault.json" ]] \
     || fail "auth was not saved to the file dev vault"
   cmp -s "$TEST_HOME/.codex-switcher/dev-auth-store/DevVault.json" "$login" \
     || fail "dev vault saved wrong auth content"
+}
+
+test_force_keychain_cannot_bypass_entitlement() {
+  # This is inspection only: never run an entitlement-bearing helper here
+  # because the test must not access the macOS Keychain.
+  if codesign -d --entitlements :- "$HELPER" 2>/dev/null | grep -q "keychain-access-groups"; then
+    printf 'skip: helper has Keychain entitlement; force override gate not exercised\n'
+    return 0
+  fi
+  reset_home
+  local login="$WORK_DIR/force-keychain-login.json"
+  make_api_auth "$login" "sk-test-force-keychain-1111111111" "force-keychain"
+
+  CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_FORCE_KEYCHAIN=1 \
+    CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
+    CODEX_BUNDLED_CLI="$FAKE_APP" \
+    CODEX_CLI="$FAKE_CODEX" \
+    FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
+    FAKE_CODEX_LOGIN_AUTH="$login" \
+    "$HELPER" login ForceKeychain >/dev/null 2>"$WORK_DIR/force-keychain.err" \
+    || fail "force-keychain override bypassed the file vault"
+
+  [[ -f "$TEST_HOME/.codex-switcher/dev-auth-store/ForceKeychain.json" ]] \
+    || fail "force-keychain override did not use the file vault"
+  cmp -s "$TEST_HOME/.codex-switcher/dev-auth-store/ForceKeychain.json" "$login" \
+    || fail "force-keychain override saved wrong auth content"
 }
 
 test_file_auth_store_dir_override_pins_backend() {
@@ -1128,14 +1183,16 @@ test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
 test_login_rejects_duplicate_auth_and_preserves_target_auth
-test_keychain_repair_preserves_saved_auth
+test_file_vault_login_preserves_incomplete_legacy_disk_migration
+test_keychain_repair_reports_no_migration_yet
 test_best_auth_exports_lowest_usage_configured_profile
 test_mark_exhausted_persists_to_cache_and_best_auth_skips_it
 test_exec_rotates_on_usage_limit
 test_exec_does_not_rotate_on_ordinary_failure
 test_exec_cleans_temp_home_when_command_missing
 test_exec_gives_up_when_all_profiles_limited
-test_unsigned_build_uses_dev_vault_not_keychain
+test_unentitled_build_uses_file_vault
+test_force_keychain_cannot_bypass_entitlement
 test_file_auth_store_dir_override_pins_backend
 test_import_auth_preserves_on_missing_identity
 test_import_auth_accepts_same_identity_refresh
