@@ -178,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             activeProfileId: self.store.liveProfileId,
             canActivateAuth: { id in self.store.authCanBeActivated(for: id) })
         var addedProfileSection = false
+        var addedRecommendation = false
 
         if let activeHealth = healthRecords.first(where: \.isActive) {
             self.addProfileCard(for: activeHealth)
@@ -188,15 +189,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if addedProfileSection { self.menu.addItem(.separator()) }
             self.addRecommendationItem(for: recommendation)
             addedProfileSection = true
+            addedRecommendation = true
         }
 
         let inactiveProfiles = ProfileHealth.menuOrderedInactive(healthRecords)
         if !inactiveProfiles.isEmpty {
-            if addedProfileSection { self.menu.addItem(.separator()) }
+            if addedProfileSection {
+                if addedRecommendation {
+                    self.menu.addItem(.separator())
+                } else {
+                    self.addProfileDivider()
+                }
+            }
             for (index, health) in inactiveProfiles.enumerated() {
                 self.addProfileCard(for: health)
                 if index != inactiveProfiles.indices.last {
-                    self.menu.addItem(.separator())
+                    self.addProfileDivider()
                 }
             }
             addedProfileSection = true
@@ -253,6 +261,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menu.addItem(menuItem)
     }
 
+    private func addProfileDivider() {
+        let divider = Color(nsColor: .separatorColor)
+            .frame(height: 1)
+            .padding(.horizontal, 14)
+        let hostView = NSHostingView(rootView: divider)
+        hostView.frame = NSRect(x: 0, y: 0, width: 290, height: 5)
+
+        let menuItem = NSMenuItem()
+        menuItem.view = hostView
+        self.menu.addItem(menuItem)
+    }
+
     private func addRecommendationItem(for health: ProfileHealth) {
         let score = health.score ?? 0
         let title = "⚡ Switch to \"\(health.profile.label)\" — \(score)% used"
@@ -267,10 +287,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func cardHeight(for status: ProfileStatus, hasDuplicate: Bool) -> CGFloat {
         var height: CGFloat
         switch status {
-        case .available: height = 58
-        case .stale(let s) where s != nil: height = 68
-        case .reloginNeeded(let s) where s != nil: height = 68
-        default: height = 42
+        case .available:
+            height = 46
+        case .stale(let snap) where snap != nil:
+            height = 46
+        case .reloginNeeded(let snap) where snap != nil:
+            height = 58
+        default:
+            height = 36
         }
 
         if hasDuplicate { height += 14 }

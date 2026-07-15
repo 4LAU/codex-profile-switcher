@@ -216,7 +216,7 @@ struct ProfileCardView: View {
 
     var body: some View {
         Button(action: self.onSwitch) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 self.headerRow
                 if let duplicateLine, !duplicateLine.isEmpty {
                     Label(duplicateLine, systemImage: "square.stack.3d.up.trianglebadge.exclamationmark")
@@ -227,9 +227,9 @@ struct ProfileCardView: View {
                 self.statusContent
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 5)
             .frame(width: 290, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(ProfileCardButtonStyle(
             isActive: self.isActive,
@@ -365,11 +365,11 @@ private struct ProfileCardButtonStyle: ButtonStyle {
 
         return configuration.label
             .background {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(visualState.fillColor)
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(visualState.borderColor, lineWidth: visualState.borderWidth)
             }
     }
