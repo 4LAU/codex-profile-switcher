@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-public struct DataProtectionKeychainAuthVault: AuthVault {
+public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDestination {
     public static let accessGroup = "W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
     public static let defaultService = LegacyKeychainAuthVault.defaultService
 
@@ -122,6 +122,23 @@ public struct DataProtectionKeychainAuthVault: AuthVault {
 
     public func diagnostics() -> AuthVaultDiagnostics {
         AuthVaultDiagnostics(activeBackend: .dataProtectionKeychain)
+    }
+
+    func createAuthBlobIfAbsentForMigration(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult {
+        let status = SecItemAdd(self.newItemAttributes(data: data, profileID: profileID) as CFDictionary, nil)
+        if status == errSecSuccess {
+            return .created
+        }
+        if status == errSecDuplicateItem {
+            return .alreadyExists
+        }
+        throw KeychainAuthVaultError.operationFailed(
+            operation: "create data-protection auth blob for migration",
+            profileID: profileID,
+            status: status)
     }
 
     func itemQuery(profileID: String) -> [CFString: Any] {
