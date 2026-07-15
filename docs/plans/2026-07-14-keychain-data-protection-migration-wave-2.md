@@ -38,7 +38,7 @@ Depends on Task 2. Touch only these files:
 - `Sources/CodexProfileCLI/CodexProfileCLI.swift`
 - `Tests/run-integration-tests.sh`
 
-Add a General-tab Keychain Migration section. Its sole entry point is an explicit `Review Legacy Keychain Copies…` button. After preflight, present a sheet that lists every candidate label and profile ID, says exactly `Move and remove N legacy Keychain copies`, and offers Cancel or the destructive action. A zero-candidate review does not offer deletion. Pending-cleanup rows remain visible on a later explicit review and can be retried only through another confirmation. Do not add a menu item, launch prompt, background action, or automatic cleanup.
+Add a General-tab Keychain Migration section. Its sole entry point is an explicit `Review Legacy Keychain Copies…` button. When live legacy captures exist, present a sheet that lists every destructive candidate label and profile ID, says exactly `Move and remove N legacy Keychain copies`, and offers Cancel or the destructive action. A zero-candidate review does not offer deletion. A pending-only recovery appears only on a later explicit review, lists its checkpoint-only rows separately, and uses a distinct non-destructive completion confirmation. Do not add a menu item, launch prompt, background action, or automatic cleanup.
 
 Keep `keychain-repair` as a backward-compatible CLI command that refuses before any legacy Keychain access and directs people to Settings; no terminal, TTY, or headless CLI migration is part of this wave. Update the hermetic integration check to assert that the command changes neither config nor file-vault data, and that no normal command gained a legacy fallback. Finish with focused checks, `./build.sh`, and `make check`. Do not commit.
 
@@ -52,3 +52,4 @@ Run the complete coordinator failure matrix and the app/CLI negative-path checks
 
 - PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `c8b494434c24aa6b139d23d593f9779a5b15c433`, branch: `plan/keychain-data-protection-migration-wave-2`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree2`, port: none
 - PLAN AMENDMENT 2026-07-14: Task 1 adds atomic v2 creation, legacy source revalidation, reentrant-session consumption, and explicit final-checkpoint recovery after code-quality review identified concurrency and recovery gaps.
+- PLAN AMENDMENT 2026-07-14: Task 3 keeps pending-only checkpoint recovery separate from the exact-count destructive confirmation because it has no legacy deletion target.
