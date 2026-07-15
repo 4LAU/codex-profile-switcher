@@ -97,6 +97,13 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Approved by L:** `2026-07-14`
 - **Logged by:** orchestrator.
 
+### `2026-07-14`: AMENDMENT
+
+- **Change:** Move `Sources/CodexProfileSwitcherApp/ProfileStore.swift`, `Sources/CodexProfileSwitcherApp/UsageProvider.swift`, and `Sources/CodexProfileCLI/CodexProfileCLI.swift` from Wave 2 to Wave 1.
+- **Reason:** The Wave 1 gate requires ordinary app and CLI paths to make zero legacy-vault calls. These three files select or consume the normal credential backend, so leaving them in Wave 2 would make that gate impossible to prove.
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
+
 ### `2026-07-14`: AUDIT COMPLETE
 
 - **Scope evidence:** Current production storage is `LegacyKeychainAuthVault`, which creates trusted-application ACLs with `SecTrustedApplicationCreateFromPath`. `ProfileStore` invokes ACL repair at startup. The CLI invokes repair on ordinary interactive paths. Both entitlement files are empty, package output embeds no profile, and the nested helper currently has the same bundle identifier as the app.
