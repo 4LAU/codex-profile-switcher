@@ -200,3 +200,12 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Safety evidence:** The hermetic coordinator matrix proves no legacy deletion before an atomic, byte-verified v2 copy and durable pending checkpoint; an exact persistent reference is revalidated before deletion; cleanup and final-readback failures remain pending; a mixed live-plus-pending review cannot complete recovery and must be re-reviewed explicitly. Only the Settings > General review action constructs `LegacyKeychainAuthVault`; app launch, refresh, profile switch, usage polling, and normal CLI operations remain legacy-free. The Settings sheet exposes only IDs and labels, and `keychain-repair` refuses without changing config or the file vault. No automated test invokes a `SecItem` operation.
 - **Approval to begin Wave 3:** pending L approval.
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: ESCALATION
+
+- **Trigger:** Wave 3 preflight found that `DataProtectionKeychainAuthVault` always uses the fixed production v2 service. The existing signed smoke script cannot choose a disposable Data Protection Keychain service, so running it would read or overwrite the user's live v2 credentials.
+- **Action:** Wave 3 dispatch has not started. No Keychain operation, packaging operation, or release operation was run.
+- **Proposed amendment:** Add `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift` to Wave 3 for a narrowly scoped, opt-in `CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE` override. It must accept only a nonempty service value, default exactly to the fixed production service, never alter the fixed access group, and be documented in code as manual-smoke-only. The smoke script will generate and pass a unique disposable value; ordinary production paths will not set it.
+- **Reason:** The frozen Wave 3 gate requires a signed app-helper smoke using disposable records only. This source addition is necessary to make that required evidence possible without touching live user credentials.
+- **Approval required:** L approval before the Wave 3 plan can be finalized or any implementation worker is dispatched.
+- **Logged by:** orchestrator.
