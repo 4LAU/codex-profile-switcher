@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.5.10</title>
+            <pubDate>Wed, 15 Jul 2026 15:13:35 -0700</pubDate>
+            <sparkle:version>29</sparkle:version>
+            <sparkle:shortVersionString>0.5.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.10/CodexProfileSwitcher-0.5.10.dmg" length="4254468" type="application/octet-stream" sparkle:edSignature="k6Wzpp+bLJrs9k7t5i5IJFPpjUb3sVOcjwZEMp4X4QBQj8v/cAdKrZmpHZUC3TVUsHA4NPGHz1hEuXyFSXQzAg=="/>
+        </item>
+        <item>
             <title>0.5.9</title>
             <pubDate>Wed, 15 Jul 2026 15:00:33 -0700</pubDate>
             <sparkle:version>28</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.8/CodexProfileSwitcher-0.5.8.dmg" length="4252368" type="application/octet-stream" sparkle:edSignature="t896Je1srbxjc19Di8AgEhy2AwjrqOddpelAAxJhy6EDrUGelmS6pWpEvVcOOMBNnYkcYBt2F/Wp77OBA/mPBA=="/>
-        </item>
-        <item>
-            <title>0.5.7</title>
-            <pubDate>Wed, 15 Jul 2026 14:04:57 -0700</pubDate>
-            <sparkle:version>26</sparkle:version>
-            <sparkle:shortVersionString>0.5.7</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.7/CodexProfileSwitcher-0.5.7.dmg" length="4254844" type="application/octet-stream" sparkle:edSignature="Xl753yLEbzUhe8GoAxBzN1Kbuv4GuFZj9agjIWlEJAwCH6ESw2IU85Ja3DVQMVxEmbme3JopQKMCRlQPbJFcAQ=="/>
         </item>
     </channel>
 </rss>
