@@ -33,9 +33,29 @@ Release-shaped binaries with the exact entitlement use the Data Protection vault
 
 Remove automatic ACL repair calls from every ordinary path. Do not add a migration command or UI in this wave. Keep the existing disk-auth migration separate. Preserve current file-vault integration behavior and credential rollback safety. Add only hermetic coverage for silent failures, and do not reach the real Keychain. Finish with focused checks and `./build.sh`; report status and changed files without committing.
 
-## Task 3: Prove the Wave 1 safety contract in the hermetic suite
+## Task 2A: Keep generic profile writes from completing disk-auth migration
 
 Depends on Task 2. Touch only these files:
+
+- `Sources/CodexProfileCore/Profiles/ProfileTransactionService.swift`
+- `Tests/run-integration-tests.sh`
+
+Remove the generic `authStorageVersion` initialization or advancement from `saveActiveProfile` and `ensureProfiles`. Only a verified, completed disk-auth migration may mark that migration complete. Add a hermetic file-vault CLI regression that seeds a legacy disk credential, performs a normal login, and proves both that the config remains incomplete and the legacy source file remains. Do not access the real Keychain. Finish with the focused integration check and `./build.sh`; report status and changed files without committing.
+
+## Task 2B: Make the primary vault diagnostic unambiguous
+
+Depends on Task 2. Touch only these files:
+
+- `Sources/CodexProfileCore/Auth/AuthVault.swift`
+- `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift`
+- `Sources/CodexProfileCLI/CodexProfileCLI.swift`
+- New or directly related hermetic tests under `Tests/AuthBlobTests/`
+
+Give Data Protection Keychain its own `AuthVaultBackend` value instead of reporting it as `custom`. Keep other custom vault behavior unchanged. Make CLI diagnostics and login output identify this backend as Data Protection Keychain. Add a hermetic check for the vault diagnostic without accessing the real Keychain. Finish with focused checks and `./build.sh`; report status and changed files without committing.
+
+## Task 3: Prove the Wave 1 safety contract in the hermetic suite
+
+Depends on Tasks 2A and 2B. Touch only these files:
 
 - `Tests/AuthBlobTests/KeychainRepairTests.swift` and new directly related test files
 - `Tests/ProfileStoreEnvironmentTests/ProfileStoreEnvironmentTests.swift`
@@ -49,3 +69,4 @@ Run the focused tests, then `./build.sh` and `make check`. Do not add a test tha
 ## Execution Log
 
 - PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `879ad77b3461e91bfa62cc3c721f18fdcacbfe33`, branch: `plan/keychain-data-protection-migration-wave-1`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree1`, port: none
+- PLAN AMENDMENT 2026-07-14: after L approved the escalation, Task 2A moved `ProfileTransactionService.swift` and its hermetic file-vault migration regression into Wave 1. Task 2B makes the Data Protection Keychain diagnostic explicit before the Wave 1 contract is tested.
