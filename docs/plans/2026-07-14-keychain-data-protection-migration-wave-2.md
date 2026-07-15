@@ -49,4 +49,4 @@ Run the complete coordinator failure matrix and the app/CLI negative-path checks
 
 ## Execution Log
 
-- PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `c8b494434c24aa6b139d23d593f9779a5b15c433`, branch: `plan/keychain-data-protection-migration-wave-2`, worktree: pending, port: none
+- PLAN START 2026-07-14: base: `program/keychain-data-protection-migration`, base_sha: `c8b494434c24aa6b139d23d593f9779a5b15c433`, branch: `plan/keychain-data-protection-migration-wave-2`, worktree: `/Users/aaron/Code/codex-profile-switcher-3001-worktree2`, port: none

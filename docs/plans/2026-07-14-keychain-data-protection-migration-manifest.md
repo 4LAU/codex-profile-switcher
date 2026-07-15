@@ -167,3 +167,13 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Decision:** L approved the Wave 1 gate and authorized Wave 2 planning and execution.
 - **Approved by L:** `2026-07-14`
 - **Logged by:** orchestrator.
+
+### `2026-07-14`: WAVE START
+
+- **Wave:** 2
+- **Worktree:** `/Users/aaron/Code/codex-profile-switcher-3001-worktree2`
+- **Plan branch:** `plan/keychain-data-protection-migration-wave-2`
+- **Base branch:** `program/keychain-data-protection-migration`
+- **Port:** none
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
