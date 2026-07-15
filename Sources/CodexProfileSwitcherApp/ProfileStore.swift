@@ -195,6 +195,7 @@ final class ProfileStore {
             throw ProfileMutationError.cannotRemoveActiveProfile
         }
 
+        try self.removeAuthMigrationState(for: id)
         try self.authVault.deleteAuthBlob(profileID: id)
 
         self.config.profiles.removeAll { $0.id == id }
@@ -391,6 +392,7 @@ final class ProfileStore {
             throw ProfileMutationError.cannotClearActiveProfile
         }
 
+        try self.removeAuthMigrationState(for: id)
         try self.authVault.deleteAuthBlob(profileID: id)
         self.cache.snapshots.removeValue(forKey: id)
         self.cache.exhaustionOverrides.removeValue(forKey: id)
@@ -575,6 +577,24 @@ final class ProfileStore {
                 self.config.authMigrationStates = previousStates
                 throw error
             }
+        }
+    }
+
+    /// Persist this before deleting destination auth. A pending cleanup marker
+    /// without a destination copy cannot be completed safely.
+    private func removeAuthMigrationState(for profileID: String) throws {
+        guard var states = self.config.authMigrationStates,
+              states.removeValue(forKey: profileID) != nil else {
+            return
+        }
+
+        let previousStates = self.config.authMigrationStates
+        self.config.authMigrationStates = states.isEmpty ? nil : states
+        do {
+            try self.saveConfigThrowing()
+        } catch {
+            self.config.authMigrationStates = previousStates
+            throw error
         }
     }
 

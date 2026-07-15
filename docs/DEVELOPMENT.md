@@ -16,10 +16,10 @@
 Scripts/package_app.sh
 ```
 
-`build.sh` creates loose development binaries that can read and write saved
-profiles through the standard macOS Keychain. Use `Scripts/package_app.sh` when
-you need a signed `.app` bundle, Sparkle integration, or release-like Gatekeeper
-behavior.
+`build.sh` creates loose development binaries that store saved profiles in
+`~/.codex-switcher/dev-auth-store`; they do not access the macOS Keychain. Use
+`Scripts/package_app.sh` when you need a signed `.app` bundle, Keychain-backed
+profiles, Sparkle integration, or release-like Gatekeeper behavior.
 
 ## Test
 
@@ -60,7 +60,13 @@ The public key must be set as `SPARKLE_ED_PUBLIC_KEY` in your environment for re
 | Variable | Purpose |
 |---|---|
 | `CODEX_PROFILE_HOME` | Config directory (default: `~/.codex-switcher`) |
-| `CODEX_PROFILE_KEYCHAIN_SERVICE` | Keychain service name (default: `com.4lau.codex-profile-switcher.auth`) |
 | `CODEX_APP` | Path to Codex.app (default: `/Applications/Codex.app`) |
 | `CODEX_CLI` | Path to Codex CLI binary |
 | `SPARKLE_ED_PUBLIC_KEY` | EdDSA public key for Sparkle update verification |
+
+`CODEX_PROFILE_KEYCHAIN_SERVICE` is no longer supported. Signed builds use the
+fixed Keychain service `com.4lau.codex-profile-switcher.auth`. The only service
+override is `CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE`, which is reserved
+for the signed manual smoke script. It works only with
+`CODEX_PROFILE_SIGNED_SMOKE=1` and a disposable service beginning
+`com.4lau.codex-profile-switcher.auth.smoke.`.
