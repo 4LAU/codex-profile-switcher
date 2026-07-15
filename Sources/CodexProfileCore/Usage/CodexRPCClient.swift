@@ -52,11 +52,11 @@ public enum CLIUsageError: LocalizedError {
     }
 }
 
-private struct RPCRateLimitsResponse: Decodable {
+struct RPCRateLimitsResponse: Decodable {
     let rateLimits: RPCRateLimitSnapshot
 }
 
-private struct RPCRateLimitSnapshot: Decodable {
+struct RPCRateLimitSnapshot: Decodable {
     let primary: RPCRateLimitWindow?
     let secondary: RPCRateLimitWindow?
     let credits: RPCCreditsSnapshot?
@@ -70,13 +70,13 @@ private struct RPCRateLimitSnapshot: Decodable {
     }
 }
 
-private struct RPCRateLimitWindow: Decodable {
+struct RPCRateLimitWindow: Decodable {
     let usedPercent: Double
     let windowDurationMins: Int?
     let resetsAt: Int?
 }
 
-private struct RPCCreditsSnapshot: Decodable {
+struct RPCCreditsSnapshot: Decodable {
     let hasCredits: Bool
     let unlimited: Bool
     let balance: String?
@@ -445,7 +445,7 @@ public enum CLIUsageFetcher {
         try AtomicFileWriter.write(data, to: destination)
     }
 
-    private static func makeSnapshot(from rateLimits: RPCRateLimitSnapshot) throws -> UsageSnapshot {
+    static func makeSnapshot(from rateLimits: RPCRateLimitSnapshot) throws -> UsageSnapshot {
         let creditsRemaining = rateLimits.credits.flatMap { credits -> Double? in
             guard let balance = credits.balance else { return nil }
             return Double(balance.replacingOccurrences(of: ",", with: ""))
@@ -467,6 +467,8 @@ public enum CLIUsageFetcher {
             primaryResetAt: primaryResetAt,
             secondaryUsedPercent: secondaryUsedPercent,
             secondaryResetAt: secondaryResetAt,
-            fetchedAt: Date())
+            fetchedAt: Date(),
+            primaryWindowDurationMins: rateLimits.primary?.windowDurationMins,
+            secondaryWindowDurationMins: rateLimits.secondary?.windowDurationMins)
     }
 }

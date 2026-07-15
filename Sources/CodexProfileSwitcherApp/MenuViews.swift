@@ -28,6 +28,14 @@ func progressColor(for percent: Int) -> Color {
     return Palette.success
 }
 
+func usageWindowLabel(durationMins: Int?, legacyLabel: String) -> String {
+    guard let durationMins, durationMins > 0 else { return legacyLabel }
+    if durationMins == 7 * 24 * 60 { return "Wk" }
+    if durationMins % (24 * 60) == 0 { return "\(durationMins / (24 * 60))d" }
+    if durationMins % 60 == 0 { return "\(durationMins / 60)h" }
+    return "\(durationMins)m"
+}
+
 func planDisplayName(_ raw: String?) -> String {
     guard let raw, !raw.isEmpty else { return "" }
     switch raw {
@@ -293,17 +301,33 @@ struct ProfileCardView: View {
 
     private func usageBars(_ snap: UsageSnapshot) -> some View {
         VStack(spacing: 2) {
-            UsageRow(
-                label: "5h",
-                percent: snap.primaryUsedPercent,
-                resetAt: snap.primaryResetAt,
-                isHighlighted: self.isActive || self.isHovered)
-            UsageRow(
-                label: "Wk",
-                percent: snap.secondaryUsedPercent,
-                resetAt: snap.secondaryResetAt,
-                isHighlighted: self.isActive || self.isHovered)
+            if self.hasPrimaryWindow(snap) {
+                UsageRow(
+                    label: usageWindowLabel(
+                        durationMins: snap.primaryWindowDurationMins,
+                        legacyLabel: "5h"),
+                    percent: snap.primaryUsedPercent,
+                    resetAt: snap.primaryResetAt,
+                    isHighlighted: self.isActive || self.isHovered)
+            }
+            if self.hasSecondaryWindow(snap) {
+                UsageRow(
+                    label: usageWindowLabel(
+                        durationMins: snap.secondaryWindowDurationMins,
+                        legacyLabel: "Wk"),
+                    percent: snap.secondaryUsedPercent,
+                    resetAt: snap.secondaryResetAt,
+                    isHighlighted: self.isActive || self.isHovered)
+            }
         }
+    }
+
+    private func hasPrimaryWindow(_ snap: UsageSnapshot) -> Bool {
+        snap.primaryWindowDurationMins != nil || snap.primaryResetAt != nil || snap.primaryUsedPercent > 0
+    }
+
+    private func hasSecondaryWindow(_ snap: UsageSnapshot) -> Bool {
+        snap.secondaryWindowDurationMins != nil || snap.secondaryResetAt != nil || snap.secondaryUsedPercent > 0
     }
 
     private var planType: String? {

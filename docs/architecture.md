@@ -53,7 +53,7 @@ macOS Keychain
 
 ## Usage Polling
 
-Usage data is fetched via a single path: Codex's own `app-server` JSON-RPC endpoint. The CLI or app launches `codex app-server` in a temporary profile-scoped environment and reads quota from its JSON-RPC response. There is no direct OpenAI usage API call and no OAuth refresh on poll.
+Usage data is fetched via a single path: Codex's own `app-server` JSON-RPC endpoint. The CLI or app launches `codex app-server` in a temporary profile-scoped environment and reads quota from its JSON-RPC response. There is no direct OpenAI usage API call and no OAuth refresh on poll. Each returned window includes its duration, which the menu uses for its label instead of assuming fixed five-hour and weekly slots. Missing windows are omitted.
 
 The app coordinates refresh state through an app-local `UsageProvider` (`@MainActor`). Profile config is owned by `ProfileStore` (`@MainActor`). UI-independent fetching and profile selection logic live in `CodexProfileCore/Usage`.
 

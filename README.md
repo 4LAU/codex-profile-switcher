@@ -1,6 +1,6 @@
 # codex-profile-switcher
 
-Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and shows per-profile usage. Switch profiles without logging in again, track 5-hour and weekly limits with reset countdowns. Auth stored in macOS Keychain. No Dock icon, no main window, just a menu bar dropdown.
+Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and shows per-profile usage. Switch profiles without logging in again, track the quota windows Codex reports with reset countdowns. Auth stored in macOS Keychain. No Dock icon, no main window, just a menu bar dropdown.
 
 [![Latest release](https://img.shields.io/github/v/release/4LAU/codex-profile-switcher?style=flat-square&color=0a0a0c)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-0a0a0c?style=flat-square)](https://github.com/4LAU/codex-profile-switcher/releases/latest)
@@ -18,7 +18,7 @@ Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and 
 ## Features
 
 - Manage multiple saved Codex profiles with custom labels
-- See 5-hour and weekly usage for each saved profile
+- See each quota window Codex reports for a saved profile, with its actual duration
 - Show credit balance when Codex exposes it
 - Switch accounts without logging in every time
 - Refresh inactive OAuth profiles so usage data stays current

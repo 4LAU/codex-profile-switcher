@@ -7,7 +7,9 @@ APP_BIN="$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 HELPER="$APP_BUNDLE/Contents/Helpers/codex-profile"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-keychain-smoke.XXXXXX")"
 TEST_HOME="$WORK_DIR/home"
-FAKE_APP="$WORK_DIR/fake-codex-app"
+FAKE_APP="$WORK_DIR/Codex.app"
+FAKE_APP_BIN="$FAKE_APP/Contents/MacOS/Codex"
+FAKE_BUNDLED_CLI="$FAKE_APP/Contents/Resources/codex"
 FAKE_CODEX="$WORK_DIR/fake-codex"
 LAUNCH_LOG="$WORK_DIR/fake-app-launch.log"
 SERVICE="${CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE:-com.4lau.codex-profile-switcher.smoke.$(date +%s).$$}"
@@ -69,12 +71,29 @@ assert_same_file() {
 
 mkdir -p "$TEST_HOME/.codex"
 
-cat > "$FAKE_APP" <<'SH'
+mkdir -p "$(dirname "$FAKE_APP_BIN")" "$(dirname "$FAKE_BUNDLED_CLI")"
+
+cat > "$FAKE_APP_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf "launch:%s\n" "$*" >> "${FAKE_APP_LAUNCH_LOG:?}"
 SH
-chmod +x "$FAKE_APP"
+chmod +x "$FAKE_APP_BIN"
+
+cat > "$FAKE_BUNDLED_CLI" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  app)
+    printf "launch:%s\n" "$*" >> "${FAKE_APP_LAUNCH_LOG:?}"
+    ;;
+  *)
+    printf "unexpected fake bundled Codex command: %s\n" "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+chmod +x "$FAKE_BUNDLED_CLI"
 
 cat > "$FAKE_CODEX" <<'SH'
 #!/usr/bin/env bash
@@ -107,7 +126,8 @@ COMMON_ENV=(
   CODEX_PROFILE_HOME="$TEST_HOME"
   CODEX_PROFILE_KEYCHAIN_SERVICE="$SERVICE"
   CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1
-  CODEX_APP_BIN="$FAKE_APP"
+  CODEX_APP="$FAKE_APP"
+  CODEX_APP_BIN="$FAKE_APP_BIN"
   CODEX_CLI="$FAKE_CODEX"
   FAKE_APP_LAUNCH_LOG="$LAUNCH_LOG"
 )
