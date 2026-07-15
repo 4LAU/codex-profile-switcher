@@ -90,11 +90,11 @@ public struct LegacyKeychainAuthVault: AuthVault {
 
     func captureLegacyAuthBlobsForMigration() throws -> [LegacyKeychainAuthBlobCapture] {
         try self.listProfileIDs().map { profileID in
-            try self.captureLegacyAuthBlob(profileID: profileID)
+            try self.captureLegacyAuthBlobForMigration(profileID: profileID)
         }
     }
 
-    private func captureLegacyAuthBlob(profileID: String) throws -> LegacyKeychainAuthBlobCapture {
+    func captureLegacyAuthBlobForMigration(profileID: String) throws -> LegacyKeychainAuthBlobCapture {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(
             self.migrationCaptureQuery(profileID: profileID) as CFDictionary,

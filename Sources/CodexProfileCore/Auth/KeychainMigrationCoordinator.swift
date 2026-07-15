@@ -123,11 +123,14 @@ public final class KeychainMigrationCoordinator {
     private struct Session {
         let id: UUID
         let captures: [LegacyKeychainAuthBlobCapture]
+        let legacyProfileIDs: [String]
         let pendingCompletionProfileIDs: [String]
         let preview: KeychainMigrationPreview
     }
 
     private let captureLegacyRecords: () throws -> [LegacyKeychainAuthBlobCapture]
+    private let listLegacyProfileIDs: (() throws -> [String])?
+    private let captureLegacyRecord: ((String) throws -> LegacyKeychainAuthBlobCapture)?
     private let deleteLegacyRecord: (LegacyKeychainAuthBlobCapture) throws -> Void
     private let destination: KeychainMigrationDestination
     private let profiles: [ProfileConfig]
@@ -147,6 +150,8 @@ public final class KeychainMigrationCoordinator {
     ) {
         self.init(
             captureLegacyRecords: { try legacyVault.captureLegacyAuthBlobsForMigration() },
+            listLegacyProfileIDs: { try legacyVault.listProfileIDs() },
+            captureLegacyRecord: { try legacyVault.captureLegacyAuthBlobForMigration(profileID: $0) },
             deleteLegacyRecord: { capture in try legacyVault.deleteCapturedLegacyAuthBlob(capture) },
             destination: destination,
             profiles: profiles,
@@ -157,6 +162,8 @@ public final class KeychainMigrationCoordinator {
 
     init(
         captureLegacyRecords: @escaping () throws -> [LegacyKeychainAuthBlobCapture],
+        listLegacyProfileIDs: (() throws -> [String])? = nil,
+        captureLegacyRecord: ((String) throws -> LegacyKeychainAuthBlobCapture)? = nil,
         deleteLegacyRecord: @escaping (LegacyKeychainAuthBlobCapture) throws -> Void,
         destination: KeychainMigrationDestination,
         profiles: [ProfileConfig],
@@ -165,6 +172,8 @@ public final class KeychainMigrationCoordinator {
         checkpoint: @escaping (String, AuthMigrationState, String?) throws -> Void
     ) {
         self.captureLegacyRecords = captureLegacyRecords
+        self.listLegacyProfileIDs = listLegacyProfileIDs
+        self.captureLegacyRecord = captureLegacyRecord
         self.deleteLegacyRecord = deleteLegacyRecord
         self.destination = destination
         self.profiles = profiles
@@ -187,22 +196,34 @@ public final class KeychainMigrationCoordinator {
         }
 
         let captures: [LegacyKeychainAuthBlobCapture]
-        do {
-            captures = try self.captureLegacyRecords()
-        } catch {
-            throw KeychainMigrationError.legacySourceFailed
+        let legacyProfileIDs: [String]
+        if let listLegacyProfileIDs = self.listLegacyProfileIDs {
+            do {
+                legacyProfileIDs = try listLegacyProfileIDs()
+            } catch {
+                throw KeychainMigrationError.legacySourceFailed
+            }
+            try self.validateLegacyProfileIDs(legacyProfileIDs)
+            captures = []
+        } else {
+            do {
+                captures = try self.captureLegacyRecords()
+            } catch {
+                throw KeychainMigrationError.legacySourceFailed
+            }
+            try self.validateLegacyCaptures(captures)
+            try self.validateDestinationCopies(captures)
+            legacyProfileIDs = captures.map(\.profileID)
         }
-        try self.validateLegacyCaptures(captures)
-        try self.validateDestinationCopies(captures)
 
-        let pendingCompletionProfileIDs = try self.pendingCompletionProfileIDs(excluding: captures)
-        let candidates = captures
-            .sorted { $0.profileID < $1.profileID }
+        let pendingCompletionProfileIDs = try self.pendingCompletionProfileIDs(excluding: legacyProfileIDs)
+        let candidates = legacyProfileIDs
+            .sorted()
             .map { capture in
                 KeychainMigrationCandidate(
-                    id: capture.profileID,
-                    label: self.label(for: capture.profileID),
-                    status: self.migrationStates[capture.profileID] == .copiedCleanupPending
+                    id: capture,
+                    label: self.label(for: capture),
+                    status: self.migrationStates[capture] == .copiedCleanupPending
                         ? .cleanupPending
                         : .ready,
                     action: .moveAndRemoveLegacyCopy)
@@ -222,6 +243,7 @@ public final class KeychainMigrationCoordinator {
         self.activeSession = Session(
             id: sessionID,
             captures: captures,
+            legacyProfileIDs: legacyProfileIDs,
             pendingCompletionProfileIDs: pendingCompletionProfileIDs,
             preview: preview)
         return preview
@@ -237,7 +259,7 @@ public final class KeychainMigrationCoordinator {
         guard !self.isOperationInProgress else {
             throw KeychainMigrationError.staleOrConsumedPreview
         }
-        guard let session = self.consumeSession(matching: preview), !session.captures.isEmpty else {
+        guard let session = self.consumeSession(matching: preview), !session.legacyProfileIDs.isEmpty else {
             throw KeychainMigrationError.staleOrConsumedPreview
         }
         self.isOperationInProgress = true
@@ -245,9 +267,25 @@ public final class KeychainMigrationCoordinator {
         guard approvedCount == session.preview.candidateCount else {
             throw KeychainMigrationError.candidateCountMismatch
         }
-        try self.validateDestinationCopies(session.captures)
-
-        for capture in session.captures.sorted(by: { $0.profileID < $1.profileID }) {
+        if self.captureLegacyRecord == nil {
+            try self.validateDestinationCopies(session.captures)
+        }
+        for profileID in session.legacyProfileIDs.sorted() {
+            let capture: LegacyKeychainAuthBlobCapture
+            if let captureLegacyRecord = self.captureLegacyRecord {
+                do {
+                    capture = try captureLegacyRecord(profileID)
+                } catch {
+                    throw KeychainMigrationError.legacySourceFailed
+                }
+                try self.validateLegacyCaptures([capture])
+                try self.validateDestinationCopies([capture])
+            } else {
+                guard let existingCapture = session.captures.first(where: { $0.profileID == profileID }) else {
+                    throw KeychainMigrationError.staleOrConsumedPreview
+                }
+                capture = existingCapture
+            }
             try self.copyAndVerify(capture)
             try self.saveCheckpoint(
                 .copiedCleanupPending,
@@ -292,17 +330,25 @@ public final class KeychainMigrationCoordinator {
     }
 
     private func validateLegacyCaptures(_ captures: [LegacyKeychainAuthBlobCapture]) throws {
-        var profileIDs = Set<String>()
+        try self.validateLegacyProfileIDs(captures.map(\.profileID))
         for capture in captures {
-            guard ProfileValidator.isValid(capture.profileID),
-                  AuthBlob.isPlausibleAuthBlob(capture.authBlob),
+            guard AuthBlob.isPlausibleAuthBlob(capture.authBlob),
                   !capture.persistentReference.isEmpty else {
                 throw KeychainMigrationError.invalidLegacyRecord
             }
-            guard profileIDs.insert(capture.profileID).inserted else {
+        }
+    }
+
+    private func validateLegacyProfileIDs(_ profileIDs: [String]) throws {
+        var seenProfileIDs = Set<String>()
+        for profileID in profileIDs {
+            guard ProfileValidator.isValid(profileID) else {
+                throw KeychainMigrationError.invalidLegacyRecord
+            }
+            guard seenProfileIDs.insert(profileID).inserted else {
                 throw KeychainMigrationError.duplicateProfileID
             }
-            guard self.migrationStates[capture.profileID] != .complete else {
+            guard self.migrationStates[profileID] != .complete else {
                 throw KeychainMigrationError.completeProfileStillInLegacy
             }
         }
@@ -415,10 +461,8 @@ public final class KeychainMigrationCoordinator {
         }
     }
 
-    private func pendingCompletionProfileIDs(
-        excluding captures: [LegacyKeychainAuthBlobCapture]
-    ) throws -> [String] {
-        let sourceProfileIDs = Set(captures.map(\.profileID))
+    private func pendingCompletionProfileIDs(excluding legacyProfileIDs: [String]) throws -> [String] {
+        let sourceProfileIDs = Set(legacyProfileIDs)
         let profileIDs = self.migrationStates.compactMap { profileID, state in
             state == .copiedCleanupPending
                 && !sourceProfileIDs.contains(profileID)

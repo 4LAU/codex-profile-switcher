@@ -38,6 +38,39 @@ final class KeychainMigrationCoordinatorTests {
     }
 
     @Test
+    func reviewInventoriesLegacyProfilesBeforeReadingCredentials() throws {
+        let alpha = try migrationCapture(profileID: "alpha", reference: "ref-alpha")
+        let bravo = try migrationCapture(profileID: "bravo", reference: "ref-bravo")
+        let source = MigrationSource(captures: [bravo, alpha])
+        let destination = MigrationDestination()
+        let checkpoints = MigrationCheckpoints()
+        let coordinator = KeychainMigrationCoordinator(
+            captureLegacyRecords: { throw MigrationTestError.expected },
+            listLegacyProfileIDs: { source.listProfileIDs() },
+            captureLegacyRecord: { try source.capture(profileID: $0) },
+            deleteLegacyRecord: { capture in try source.delete(capture) },
+            destination: destination,
+            profiles: [],
+            migrationStates: nil,
+            pendingFingerprints: nil,
+            checkpoint: { profileID, state, _ in
+                try checkpoints.save(profileID: profileID, state: state)
+            })
+
+        let preview = try coordinator.review()
+
+        try expectEqual(preview.candidates.map(\.id), ["alpha", "bravo"],
+                        "Review must list every legacy profile")
+        try expectEqual(source.individualCaptureProfileIDs, [],
+                        "Review must not read protected legacy credentials")
+        try coordinator.confirm(preview, approvedCount: preview.candidateCount)
+        try expectEqual(source.individualCaptureProfileIDs, ["alpha", "bravo"],
+                        "Confirmation must read credentials one profile at a time")
+        try expectEqual(source.deletedReferences, [alpha.persistentReference, bravo.persistentReference],
+                        "Each legacy copy must be deleted only after migration")
+    }
+
+    @Test
     func confirmedMigrationUsesExactReferencesAndPersistsBothCheckpoints() throws {
         let alpha = try migrationCapture(profileID: "alpha", reference: "exact-alpha")
         let bravo = try migrationCapture(profileID: "bravo", reference: "exact-bravo")
@@ -683,6 +716,7 @@ private final class MigrationSource {
     let deleteError: Bool
     private(set) var deletedReferences: [Data] = []
     private(set) var captureCallCount = 0
+    private(set) var individualCaptureProfileIDs: [String] = []
     var beforeCapture: (() -> Void)?
 
     init(captures: [LegacyKeychainAuthBlobCapture], deleteError: Bool = false) {
@@ -694,6 +728,18 @@ private final class MigrationSource {
         self.beforeCapture?()
         self.captureCallCount += 1
         return self.captures
+    }
+
+    func listProfileIDs() -> [String] {
+        self.captures.map(\.profileID).sorted()
+    }
+
+    func capture(profileID: String) throws -> LegacyKeychainAuthBlobCapture {
+        self.individualCaptureProfileIDs.append(profileID)
+        guard let capture = self.captures.first(where: { $0.profileID == profileID }) else {
+            throw KeychainAuthVaultError.staleMigrationSource
+        }
+        return capture
     }
 
     func delete(_ capture: LegacyKeychainAuthBlobCapture) throws {
