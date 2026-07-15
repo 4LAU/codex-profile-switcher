@@ -145,3 +145,10 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Base branch:** `program/keychain-data-protection-migration`
 - **Port:** none
 - **Logged by:** orchestrator.
+
+### `2026-07-14`: AMENDMENT
+
+- **Change:** Add a small shared primary-vault selector in existing Wave 1 auth code, route the app and CLI through it, and test that a rejected exact-access-group resolution selects the file vault.
+- **Reason:** The Wave 1 gate requires a direct hermetic proof of entitlement rejection routing. Existing independently passing resolver and unsigned-process tests did not connect those two facts.
+- **Approved by L:** not required; this stays within the approved Wave 1 inventory and does not change wave assignment.
+- **Logged by:** orchestrator.
