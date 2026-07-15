@@ -491,7 +491,7 @@ struct GeneralTab: View {
 
                 Picker("Refresh interval", selection: self.$refreshPreferences.interval) {
                     ForEach(RefreshInterval.allCases) { interval in
-                        Text(interval.title).tag(interval)
+                        Text(self.refreshIntervalLabel(interval)).tag(interval)
                     }
                 }
                 .pickerStyle(.menu)
@@ -549,6 +549,16 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func refreshIntervalLabel(_ interval: RefreshInterval) -> String {
+        switch interval {
+        case .manual: return "Manual"
+        case .oneMinute: return "1 min"
+        case .twoMinutes: return "2 min"
+        case .fiveMinutes: return "5 min"
+        case .fifteenMinutes: return "15 min"
+        }
     }
 }
 
