@@ -81,7 +81,7 @@ The release machine must also hold the existing Developer ID Application certifi
 | 3 | Entitlements, profile-aware packaging and release preflight, separate helper identifier, manual disposable-service smoke support, and exact runtime deletion guardrails. This is the last wave that can enable legacy cleanup. | critical | code changes yes, user data cleanup no | Both profile files available and metadata-only preflight passes; signed app-helper smoke uses disposable records only; every legacy delete has a verified v2 backup and exact approved inventory. No publication. |
 | 4 | Documentation closeout, release notes, developer guidance, and program cleanup. | low | yes | Docs match implemented behavior; manifest log records all gates; every recorded worktree is reaped. |
 
-**Baseline approved by L:** pending
+**Baseline approved by L:** `2026-07-14`
 
 <!-- ===================== END FROZEN BASELINE ===================== -->
 
@@ -90,6 +90,12 @@ The release machine must also hold the existing Developer ID Application certifi
 # REGION 2: AMENDMENT + GATE LOG
 
 > Append only. Each entry has a date and an explicit approval marker. A WAVE START without a later GATE RESULT means the wave is in flight and must be recovered from Git state before more work begins.
+
+### `2026-07-14`: BASELINE APPROVAL
+
+- **Decision:** L approved the frozen baseline and authorized Wave 1 planning.
+- **Approved by L:** `2026-07-14`
+- **Logged by:** orchestrator.
 
 ### `2026-07-14`: AUDIT COMPLETE
 
