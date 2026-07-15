@@ -76,3 +76,9 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Reason:** Each code-writing wave must have a committed task plan and execution log. The Phase 0 inventory omitted that required program record.
 - **Product scope:** Unchanged.
 - **Approved by L:** pending.
+
+### 2026-07-15: AMENDMENT APPROVAL
+
+- **Approved change:** Add `docs/plans/2026-07-15-configurable-refresh-execution.md` as the durable plan and execution log for Waves 1 through 3.
+- **Approved by L:** 2026-07-15.
+- **Logged by:** orchestrator.
