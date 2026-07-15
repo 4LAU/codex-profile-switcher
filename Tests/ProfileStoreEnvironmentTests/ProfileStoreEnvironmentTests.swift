@@ -23,6 +23,125 @@ private struct FailingSaveAuthVault: AuthVault {
     func hasAuthBlob(profileID: String) throws -> Bool { false }
 }
 
+private final class MigrationTestVault: AuthVault, KeychainMigrationDestination, @unchecked Sendable {
+    private(set) var blobs: [String: Data]
+    private(set) var createCount = 0
+    private(set) var deleteCount = 0
+
+    init(blobs: [String: Data] = [:]) {
+        self.blobs = blobs
+    }
+
+    func listProfileIDs() throws -> [String] {
+        self.blobs.keys.sorted()
+    }
+
+    func loadAuthBlob(profileID: String) throws -> Data? {
+        self.blobs[profileID]
+    }
+
+    func saveAuthBlob(_ data: Data, profileID: String) throws {
+        self.blobs[profileID] = data
+    }
+
+    func deleteAuthBlob(profileID: String) throws {
+        self.deleteCount += 1
+        self.blobs.removeValue(forKey: profileID)
+    }
+
+    func hasAuthBlob(profileID: String) throws -> Bool {
+        self.blobs[profileID] != nil
+    }
+
+    func diagnostics() -> AuthVaultDiagnostics {
+        AuthVaultDiagnostics(activeBackend: .dataProtectionKeychain)
+    }
+
+    func createAuthBlobIfAbsentForMigration(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult {
+        self.createCount += 1
+        guard self.blobs[profileID] == nil else {
+            return .alreadyExists
+        }
+        self.blobs[profileID] = data
+        return .created
+    }
+}
+
+private final class MigrationTestSource {
+    var captures: [LegacyKeychainAuthBlobCapture]
+    var shouldFailDelete = false
+    private(set) var captureCount = 0
+    private(set) var deleteCount = 0
+
+    init(captures: [LegacyKeychainAuthBlobCapture]) {
+        self.captures = captures
+    }
+
+    func capture() throws -> [LegacyKeychainAuthBlobCapture] {
+        self.captureCount += 1
+        return self.captures
+    }
+
+    func delete(_ capture: LegacyKeychainAuthBlobCapture) throws {
+        self.deleteCount += 1
+        guard !self.shouldFailDelete else {
+            throw ProfileStoreEnvironmentTestFailure.failed("intentional cleanup failure")
+        }
+        self.captures.removeAll { $0.persistentReference == capture.persistentReference }
+    }
+}
+
+private final class MigrationFactoryCounter {
+    private(set) var invocationCount = 0
+
+    func recordInvocation() {
+        self.invocationCount += 1
+    }
+}
+
+private func migrationCoordinatorFactory(
+    source: MigrationTestSource,
+    counter: MigrationFactoryCounter
+) -> ProfileStore.KeychainMigrationCoordinatorFactory {
+    { vault, profiles, states, checkpoint in
+        counter.recordInvocation()
+        guard let destination = vault as? MigrationTestVault else {
+            throw KeychainMigrationError.destinationUnavailable
+        }
+        return KeychainMigrationCoordinator(
+            captureLegacyRecords: { try source.capture() },
+            deleteLegacyRecord: { capture in try source.delete(capture) },
+            destination: destination,
+            profiles: profiles,
+            migrationStates: states,
+            checkpoint: checkpoint)
+    }
+}
+
+private func migrationCapture(profileID: String, data: Data) -> LegacyKeychainAuthBlobCapture {
+    LegacyKeychainAuthBlobCapture(
+        profileID: profileID,
+        authBlob: data,
+        persistentReference: Data("persistent-reference-\(profileID)".utf8),
+        service: LegacyKeychainAuthVault.defaultService)
+}
+
+private func expectMigrationError(
+    _ expected: KeychainMigrationError,
+    _ operation: () throws -> Void
+) throws {
+    do {
+        try operation()
+    } catch let error as KeychainMigrationError {
+        try envExpect(error == expected, "Expected \(expected), got \(error)")
+        return
+    }
+    try envFail("Expected migration error \(expected)")
+}
+
 func envFail(_ message: String) throws -> Never {
     throw ProfileStoreEnvironmentTestFailure.failed(message)
 }
@@ -193,6 +312,207 @@ final class ProfileStoreEnvironmentTests {
         try envExpect(
             diskCache.exhaustionOverrides["1"] != nil,
             "clearSavedAuth incorrectly removed another profile's exhaustion override from disk")
+    }
+
+    @Test @MainActor
+    func testNormalProfileStorePathsNeverInvokeMigrationFactory() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-boundary-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let auth = Data(#"{"OPENAI_API_KEY":"sk-test-normal-path-1111111111"}"#.utf8)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let vault = MigrationTestVault(blobs: ["1": auth])
+        let source = MigrationTestSource(captures: [migrationCapture(profileID: "1", data: auth)])
+        let counter = MigrationFactoryCounter()
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(source: source, counter: counter))
+
+        _ = store.debugSummaryLines()
+        _ = store.usageAuthSource()
+        _ = try store.prepareProfileSwitch(to: "1", isCodexDesktopRunning: { false })
+
+        try envExpect(counter.invocationCount == 0, "A normal ProfileStore path invoked migration review")
+        try envExpect(source.captureCount == 0, "A normal ProfileStore path read a legacy migration source")
+        try envExpect(source.deleteCount == 0, "A normal ProfileStore path deleted a legacy migration source")
+    }
+
+    @Test @MainActor
+    func testForcedUsageRefreshNeverInvokesMigrationFactory() async throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-usage-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let vault = MigrationTestVault()
+        let source = MigrationTestSource(captures: [])
+        let counter = MigrationFactoryCounter()
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(source: source, counter: counter))
+        let provider = UsageProvider(store: store)
+
+        await withCheckedContinuation { continuation in
+            provider.onRefreshComplete = { continuation.resume() }
+            provider.refreshAll(force: true)
+        }
+
+        try envExpect(counter.invocationCount == 0, "Forced usage refresh invoked migration review")
+        try envExpect(source.captureCount == 0, "Forced usage refresh read a legacy migration source")
+        try envExpect(source.deleteCount == 0, "Forced usage refresh deleted a legacy migration source")
+    }
+
+    @Test @MainActor
+    func testReviewRequiresInjectedFactoryForCustomDataProtectionVault() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-default-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let store = ProfileStore(
+            authVault: MigrationTestVault(),
+            environment: ["CODEX_PROFILE_HOME": home.path])
+
+        try expectMigrationError(.destinationUnavailable) {
+            _ = try store.reviewLegacyKeychainMigration()
+        }
+    }
+
+    @Test @MainActor
+    func testReviewDoesNotDeleteBeforeConfirmationAndCancelDiscardsSession() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-review-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let auth = Data(#"{"OPENAI_API_KEY":"sk-test-review-1111111111"}"#.utf8)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let vault = MigrationTestVault()
+        let source = MigrationTestSource(captures: [migrationCapture(profileID: "1", data: auth)])
+        let counter = MigrationFactoryCounter()
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(source: source, counter: counter))
+
+        let preview = try store.reviewLegacyKeychainMigration()
+
+        try envExpect(counter.invocationCount == 1, "Explicit review did not construct a migration coordinator")
+        try envExpect(source.captureCount == 1, "Explicit review did not capture the migration source")
+        try envExpect(source.deleteCount == 0, "Review deleted a legacy copy before confirmation")
+        try envExpect(vault.createCount == 0, "Review wrote a Data Protection copy before confirmation")
+        try envExpect(preview.candidateCount == 1, "Review did not expose the legacy candidate")
+
+        store.cancelLegacyKeychainMigrationReview(preview)
+        try expectMigrationError(.staleOrConsumedPreview) {
+            try store.confirmLegacyKeychainMigration(preview, approvedCount: 1)
+        }
+        try envExpect(source.deleteCount == 0, "Cancel deleted a legacy copy")
+    }
+
+    @Test @MainActor
+    func testMismatchedMigrationConfirmationDoesNotMutateEitherVault() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-count-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let auth = Data(#"{"OPENAI_API_KEY":"sk-test-count-1111111111"}"#.utf8)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let vault = MigrationTestVault()
+        let source = MigrationTestSource(captures: [migrationCapture(profileID: "1", data: auth)])
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
+                source: source,
+                counter: MigrationFactoryCounter()))
+        let preview = try store.reviewLegacyKeychainMigration()
+
+        try expectMigrationError(.candidateCountMismatch) {
+            try store.confirmLegacyKeychainMigration(preview, approvedCount: 2)
+        }
+
+        try envExpect(source.deleteCount == 0, "Mismatched approval deleted a legacy copy")
+        try envExpect(vault.createCount == 0, "Mismatched approval wrote a Data Protection copy")
+        let destinationData = try vault.loadAuthBlob(profileID: "1")
+        try envExpect(destinationData == nil, "Mismatched approval changed destination auth")
+    }
+
+    @Test @MainActor
+    func testCleanupFailureKeepsDurablePendingState() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-cleanup-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let auth = Data(#"{"OPENAI_API_KEY":"sk-test-cleanup-1111111111"}"#.utf8)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let vault = MigrationTestVault()
+        let source = MigrationTestSource(captures: [migrationCapture(profileID: "1", data: auth)])
+        source.shouldFailDelete = true
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
+                source: source,
+                counter: MigrationFactoryCounter()))
+        let preview = try store.reviewLegacyKeychainMigration()
+
+        try expectMigrationError(.legacyCleanupFailed) {
+            try store.confirmLegacyKeychainMigration(preview, approvedCount: 1)
+        }
+
+        let configURL = home.appendingPathComponent(".codex-switcher/config.json")
+        let config = try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: configURL))
+        let destinationData = try vault.loadAuthBlob(profileID: "1")
+        try envExpect(source.deleteCount == 1, "Confirmed migration did not attempt legacy cleanup")
+        try envExpect(destinationData == auth, "Cleanup failure lost the verified destination copy")
+        try envExpect(
+            config.authMigrationStates?["1"] == .copiedCleanupPending,
+            "Cleanup failure did not persist the pending migration checkpoint")
+    }
+
+    @Test @MainActor
+    func testPendingOnlyCompletionDoesNotDeleteAndMarksComplete() throws {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-store-migration-pending-tests-\(UUID().uuidString)", isDirectory: true)
+        let home = workDir.appendingPathComponent("home", isDirectory: true)
+        let switcherHome = home.appendingPathComponent(".codex-switcher", isDirectory: true)
+        let auth = Data(#"{"OPENAI_API_KEY":"sk-test-pending-1111111111"}"#.utf8)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        try FileManager.default.createDirectory(
+            at: switcherHome,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let initialConfig = AppConfig(
+            profiles: [ProfileConfig(id: "1", label: "Saved account")],
+            activeProfile: "1",
+            authMigrationStates: ["1": .copiedCleanupPending])
+        try JSONEncoder().encode(initialConfig).write(to: switcherHome.appendingPathComponent("config.json"))
+
+        let vault = MigrationTestVault(blobs: ["1": auth])
+        let source = MigrationTestSource(captures: [])
+        let store = ProfileStore(
+            authVault: vault,
+            environment: ["CODEX_PROFILE_HOME": home.path],
+            keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
+                source: source,
+                counter: MigrationFactoryCounter()))
+        let preview = try store.reviewLegacyKeychainMigration()
+
+        try envExpect(preview.candidateCount == 0, "Pending-only review exposed a destructive candidate")
+        try envExpect(preview.pendingCompletionCount == 1, "Pending-only review omitted its completion candidate")
+        try store.completePendingKeychainMigration(preview, approvedCount: 1)
+
+        let config = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(contentsOf: switcherHome.appendingPathComponent("config.json")))
+        let destinationData = try vault.loadAuthBlob(profileID: "1")
+        try envExpect(source.deleteCount == 0, "Pending-only completion deleted a legacy copy")
+        try envExpect(destinationData == auth, "Pending-only completion changed destination auth")
+        try envExpect(config.authMigrationStates?["1"] == .complete, "Pending-only completion did not checkpoint complete")
     }
 
 }

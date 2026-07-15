@@ -8,6 +8,13 @@ import CryptoKit
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
 
+    typealias KeychainMigrationCoordinatorFactory = (
+        AuthVault,
+        [ProfileConfig],
+        [String: AuthMigrationState]?,
+        @escaping (String, AuthMigrationState) throws -> Void
+    ) throws -> KeychainMigrationCoordinator
+
     private let paths: AppPaths
     private let configDir: URL
     private let configURL: URL
@@ -15,12 +22,15 @@ final class ProfileStore {
     private let authStoreDir: URL
     private let authVault: AuthVault
     private let authStorageDescription: String
+    private let keychainMigrationCoordinatorFactory: KeychainMigrationCoordinatorFactory?
     private let codexHome: URL
     private let codexAuthPath: URL
     private let codexGlobalStateURL: URL
     private let fileManager = FileManager.default
     private var authMutationInProgress = false
     private var cacheDirty = false
+    private var keychainMigrationCoordinator: KeychainMigrationCoordinator?
+    private var keychainMigrationPreview: KeychainMigrationPreview?
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
@@ -28,7 +38,11 @@ final class ProfileStore {
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
 
-    init(authVault: AuthVault? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
+    init(
+        authVault: AuthVault? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        keychainMigrationCoordinatorFactory: KeychainMigrationCoordinatorFactory? = nil
+    ) {
         let paths = AppPaths(environment: environment)
         self.paths = paths
         self.configDir = paths.switcherHome
@@ -38,6 +52,7 @@ final class ProfileStore {
         self.codexHome = paths.liveCodexHome
         self.codexAuthPath = paths.liveAuthURL
         self.codexGlobalStateURL = paths.globalStateURL
+        self.keychainMigrationCoordinatorFactory = keychainMigrationCoordinatorFactory
 
         do {
             try self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
@@ -384,6 +399,81 @@ final class ProfileStore {
         self.saveCache(excludingOverridesFor: id)
     }
 
+    func reviewLegacyKeychainMigration() throws -> KeychainMigrationPreview {
+        guard self.keychainMigrationCoordinator == nil else {
+            throw KeychainMigrationError.reviewAlreadyInProgress
+        }
+        guard self.authVault.diagnostics().activeBackend == .dataProtectionKeychain else {
+            throw KeychainMigrationError.destinationUnavailable
+        }
+
+        do {
+            let checkpoint = self.keychainMigrationCheckpoint()
+            let coordinator: KeychainMigrationCoordinator
+            if let factory = self.keychainMigrationCoordinatorFactory {
+                coordinator = try factory(
+                    self.authVault,
+                    self.config.profiles,
+                    self.config.authMigrationStates,
+                    checkpoint)
+            } else {
+                guard let destination = self.authVault as? DataProtectionKeychainAuthVault else {
+                    throw KeychainMigrationError.destinationUnavailable
+                }
+                let legacyVault = LegacyKeychainAuthVault(interactionAllowed: true)
+                coordinator = KeychainMigrationCoordinator(
+                    legacyVault: legacyVault,
+                    destination: destination,
+                    profiles: self.config.profiles,
+                    migrationStates: self.config.authMigrationStates,
+                    checkpoint: checkpoint)
+            }
+            let preview = try coordinator.review()
+            self.keychainMigrationCoordinator = coordinator
+            self.keychainMigrationPreview = preview
+            return preview
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func confirmLegacyKeychainMigration(
+        _ preview: KeychainMigrationPreview,
+        approvedCount: Int
+    ) throws {
+        let coordinator = try self.coordinator(for: preview)
+        do {
+            try coordinator.confirm(preview, approvedCount: approvedCount)
+            self.discardKeychainMigrationReview()
+            self.refreshAfterKeychainMigration()
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func completePendingKeychainMigration(
+        _ preview: KeychainMigrationPreview,
+        approvedCount: Int
+    ) throws {
+        let coordinator = try self.coordinator(for: preview)
+        do {
+            try coordinator.completePending(preview, approvedCount: approvedCount)
+            self.discardKeychainMigrationReview()
+            self.refreshAfterKeychainMigration()
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func cancelLegacyKeychainMigrationReview(_ preview: KeychainMigrationPreview) {
+        guard self.keychainMigrationPreview == preview else { return }
+        self.keychainMigrationCoordinator?.cancel(preview)
+        self.discardKeychainMigrationReview()
+    }
+
     func flushCacheIfDirty() {
         guard self.cacheDirty else { return }
         self.cacheDirty = false
@@ -470,6 +560,41 @@ final class ProfileStore {
     private func saveConfigThrowing() throws {
         let data = try Self.configEncoder.encode(self.config)
         try data.write(to: self.configURL, options: .atomic)
+    }
+
+    private func keychainMigrationCheckpoint() -> (String, AuthMigrationState) throws -> Void {
+        { [weak self] profileID, state in
+            guard let self else { throw KeychainMigrationError.checkpointFailed }
+            let previousStates = self.config.authMigrationStates
+            var updatedStates = previousStates ?? [:]
+            updatedStates[profileID] = state
+            self.config.authMigrationStates = updatedStates
+            do {
+                try self.saveConfigThrowing()
+            } catch {
+                self.config.authMigrationStates = previousStates
+                throw error
+            }
+        }
+    }
+
+    private func coordinator(for preview: KeychainMigrationPreview) throws -> KeychainMigrationCoordinator {
+        guard self.keychainMigrationPreview == preview,
+              let coordinator = self.keychainMigrationCoordinator else {
+            self.discardKeychainMigrationReview()
+            throw KeychainMigrationError.staleOrConsumedPreview
+        }
+        return coordinator
+    }
+
+    private func discardKeychainMigrationReview() {
+        self.keychainMigrationCoordinator = nil
+        self.keychainMigrationPreview = nil
+    }
+
+    private func refreshAfterKeychainMigration() {
+        self.discoverProfiles()
+        self.refreshStatusesFromStoredAuth()
     }
 
     private func saveCache() {
