@@ -8,11 +8,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var store: ProfileStore!
     private var usageProvider: UsageProvider!
     private var periodicRefreshTimer: Timer?
-    private var menu: NSMenu!
+    private var menu: PersistentActionMenu!
+    private weak var refreshMenuItem: PersistentRefreshMenuItem?
     private var liveAuthWarning: LiveAuthWarning?
     private var lastLiveAuthMtime: Date?
     private var isMenuOpen = false
     private var menuRefreshRetryTask: Task<Void, Never>?
+    private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,7 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.statusItem.button?.image = IconRenderer.renderEmpty()
         self.statusItem.button?.imageScaling = .scaleNone
 
-        self.menu = NSMenu()
+        self.menu = PersistentActionMenu(refreshAction: { [weak self] in
+            self?.refreshAll()
+        })
         self.menu.delegate = self
         self.statusItem.menu = self.menu
 
@@ -43,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.usageProvider.onRefreshComplete = { [weak self] in
             self?.handleRefreshComplete()
         }
-        self.usageProvider.refreshAll()
+        self.requestRefresh()
         self.startPeriodicRefreshTimer()
 
         self.sparkleUpdater.startIfBundledApp()
@@ -62,8 +66,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.isMenuOpen = true
         self.syncActiveProfile()
         self.rebuildMenu()
-        self.usageProvider.refreshAll()
-        self.scheduleOpenMenuRefreshRetry()
+        if self.refreshPreferences.refreshWhenMenuOpens {
+            self.requestRefresh(force: true)
+            self.scheduleOpenMenuRefreshRetry()
+        }
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -72,15 +78,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menuRefreshRetryTask = nil
     }
 
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        self.refreshMenuItem?.setHighlighted(item === self.refreshMenuItem)
+    }
+
     // MARK: - Timer
 
     private func startPeriodicRefreshTimer() {
         self.periodicRefreshTimer?.invalidate()
-        self.periodicRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        self.periodicRefreshTimer = nil
+        guard let interval = self.refreshPreferences.interval.timerInterval else { return }
+        self.periodicRefreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.syncActiveProfile()
-                self.usageProvider.refreshAll()
+                self.requestRefresh()
             }
         }
     }
@@ -97,15 +109,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AppLogger.info("System woke; forcing usage refresh")
         self.syncActiveProfile(force: true)
         self.updateIcon()
-        self.usageProvider.refreshAll(force: true)
+        self.requestRefresh(force: true)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         self.syncActiveProfile()
-        self.usageProvider.refreshAll()
+        self.requestRefresh()
     }
 
     private func handleRefreshComplete() {
+        self.refreshMenuItem?.setEnabled(true)
         self.updateIcon()
         guard self.isMenuOpen else { return }
         self.rebuildMenu()
@@ -121,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard !self.usageProvider.isRefreshing else { return }
             guard self.hasDisplayedStaleOrLoadingProfiles() else { return }
             AppLogger.info("Retrying menu-open usage refresh because stale data is still visible")
-            self.usageProvider.refreshAll(force: true)
+            self.requestRefresh(force: true)
         }
     }
 
@@ -210,10 +223,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.addItem(.separator())
         }
 
-        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(self.refreshAll), keyEquivalent: "r")
-        refreshItem.target = self
-        refreshItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        refreshItem.image?.size = NSSize(width: 13, height: 13)
+        let refreshItem = self.menu.makeRefreshItem()
+        refreshItem.setEnabled(!self.usageProvider.isRefreshing)
+        self.refreshMenuItem = refreshItem
         self.menu.addItem(refreshItem)
 
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(self.openSettings), keyEquivalent: ",")
@@ -427,7 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.store.setActiveProfile(id)
                 self.store.setLiveProfileId(id)
                 self.liveAuthWarning = nil
-                self.usageProvider.refreshAll(force: true)
+                self.requestRefresh(force: true)
                 self.updateIcon()
                 self.rebuildMenu()
             case .failure(let error):
@@ -445,13 +457,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshAll() {
         self.syncActiveProfile(force: true)
-        self.usageProvider.refreshAll(force: true)
+        self.requestRefresh(force: true)
+    }
+
+    private func requestRefresh(force: Bool = false) {
+        if self.usageProvider.isRefreshing {
+            self.refreshMenuItem?.setEnabled(false)
+            return
+        }
+        self.refreshMenuItem?.setEnabled(false)
+        self.usageProvider.refreshAll(force: force)
+        self.refreshMenuItem?.setEnabled(!self.usageProvider.isRefreshing)
     }
 
     @objc private func openSettings() {
         self.menu.cancelTracking()
         SettingsWindow.show(
             store: self.store,
+            refreshPreferences: self.refreshPreferences,
             actions: SettingsActions(
                 reauthenticateProfile: { [weak self] (id: String, completion: @escaping (Result<Void, SettingsActionError>) -> Void) in
                     self?.startLogin(for: id, presentFailureAlert: false) { result in
@@ -466,6 +489,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         return .failure(SettingsActionError(message: "Settings window is unavailable."))
                     }
                     return self.clearSavedAuth(for: id)
+                },
+                refreshScheduleChanged: { [weak self] in
+                    self?.startPeriodicRefreshTimer()
                 }))
     }
 
@@ -516,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 store.endAuthMutation()
                 self.syncActiveProfile(force: true)
-                self.usageProvider.refreshAll(force: true)
+                self.requestRefresh(force: true)
                 self.updateIcon()
                 finalResult = .success(())
             case .failure(let error):
@@ -536,7 +562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.usageProvider.cancelRefreshes()
             try self.store.clearSavedAuth(for: profileId)
             self.syncActiveProfile(force: true)
-            self.usageProvider.refreshAll(force: true)
+            self.requestRefresh(force: true)
             self.updateIcon()
             return .success(())
         } catch {
