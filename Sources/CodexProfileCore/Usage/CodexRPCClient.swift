@@ -133,7 +133,7 @@ public enum CodexCLIResolver {
         return path.isEmpty ? nil : path
     }
 
-    private static func effectivePATH(environment: [String: String]) -> String {
+    static func effectivePATH(environment: [String: String]) -> String {
         let home = self.fileManager.homeDirectoryForCurrentUser.path
         let defaults = [
             environment["PATH"],
@@ -156,6 +156,97 @@ public enum CodexCLIResolver {
             }
         }
         return parts.joined(separator: ":")
+    }
+}
+
+private final class CodexRPCStderrTail: @unchecked Sendable {
+    private static let maxBytes = 2 * 1024
+    private let lock = NSLock()
+    private var data = Data()
+    private var wasTruncated = false
+    private var isClosed = false
+    private var closeWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    func append(_ newData: Data) {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+
+        if newData.count > Self.maxBytes {
+            self.data = Data(newData.suffix(Self.maxBytes))
+            self.wasTruncated = true
+            return
+        }
+        if newData.count == Self.maxBytes {
+            self.wasTruncated = self.wasTruncated || !self.data.isEmpty
+            self.data = newData
+            return
+        }
+
+        self.data.append(newData)
+        if self.data.count > Self.maxBytes {
+            self.data.removeFirst(self.data.count - Self.maxBytes)
+            self.wasTruncated = true
+        }
+    }
+
+    func close() {
+        self.lock.lock()
+        guard !self.isClosed else {
+            self.lock.unlock()
+            return
+        }
+        self.isClosed = true
+        let waiters = Array(self.closeWaiters.values)
+        self.closeWaiters.removeAll()
+        self.lock.unlock()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilClosed() async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                self.lock.lock()
+                if self.isClosed || Task.isCancelled {
+                    self.lock.unlock()
+                    continuation.resume()
+                } else {
+                    self.closeWaiters[id] = continuation
+                    self.lock.unlock()
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: id)
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        self.lock.lock()
+        let waiter = self.closeWaiters.removeValue(forKey: id)
+        self.lock.unlock()
+        waiter?.resume()
+    }
+
+    func redactedExcerpt() -> String {
+        self.lock.lock()
+        let snapshot = self.data
+        let wasTruncated = self.wasTruncated
+        self.lock.unlock()
+
+        var safeSnapshot = snapshot
+        if wasTruncated {
+            guard let newline = safeSnapshot.firstIndex(of: 0x0A) else {
+                return "...<stderr tail>"
+            }
+            safeSnapshot.removeSubrange(...newline)
+        }
+
+        let redacted = LogRedactor.redact(String(decoding: safeSnapshot, as: UTF8.self))
+            .replacingOccurrences(of: "\n", with: "\\n")
+        let maxLength = 2_000
+        let isExcerpted = redacted.count > maxLength
+        let excerpt = isExcerpted ? String(redacted.suffix(maxLength)) : redacted
+        return wasTruncated || isExcerpted ? "...<stderr tail> \(excerpt)" : excerpt
     }
 }
 
@@ -201,6 +292,7 @@ private final class CodexRPCClient {
     private let stderrPipe = Pipe()
     private let stdoutLineStream: AsyncStream<Data>
     private let stdoutLineContinuation: AsyncStream<Data>.Continuation
+    private let stderrTail = CodexRPCStderrTail()
     private let initializeTimeoutSeconds: TimeInterval
     private let requestTimeoutSeconds: TimeInterval
     private var nextID = 1
@@ -255,11 +347,15 @@ private final class CodexRPCClient {
         }
 
         let stderrHandle = self.stderrPipe.fileHandleForReading
+        let stderrTail = self.stderrTail
         stderrHandle.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
+                stderrTail.close()
+                return
             }
+            stderrTail.append(data)
         }
     }
 
@@ -377,7 +473,11 @@ private final class CodexRPCClient {
                 return json
             }
         }
-        throw CodexRPCError.malformed("codex app-server closed stdout")
+        await self.stderrTail.waitUntilClosed()
+        try Task.checkCancellation()
+        let excerpt = self.stderrTail.redactedExcerpt()
+        let detail = excerpt.isEmpty ? "" : ": \(excerpt)"
+        throw CodexRPCError.malformed("codex app-server closed stdout\(detail)")
     }
 
     private func decodeResult<T: Decodable>(from message: [String: Any]) throws -> T {
@@ -421,6 +521,7 @@ public enum CLIUsageFetcher {
 
         var env = environment
         env["CODEX_HOME"] = tempHome.path
+        env["PATH"] = CodexCLIResolver.effectivePATH(environment: environment)
 
         let rpc = try CodexRPCClient(executablePath: executablePath, environment: env)
         defer { rpc.shutdown() }

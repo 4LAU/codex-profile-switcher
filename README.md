@@ -108,6 +108,22 @@ codex-profile login 1
 codex-profile login 2
 ```
 
+## Refresh
+
+Open **Settings...** > **General** to choose how often the app refreshes usage:
+**Manual**, **1 minute**, **2 minutes**, **5 minutes**, or **15 minutes**. The
+default is 5 minutes. Manual turns off periodic refreshes only. You can still
+refresh from the menu, and the normal launch, activation, wake, and profile
+change refreshes still run.
+
+**Refresh when the menu opens** is off by default. Turn it on if opening the
+menu should also request fresh usage.
+
+Choose **Refresh** or press Command-R to update the open menu in place. The
+menu stays open and the Refresh row is disabled until the work finishes. If a
+refresh cannot get a current reading, the last successful reading stays visible
+with an amber **Cached** marker.
+
 ## CLI Reference
 
 The `codex-profile` helper manages profiles from the terminal.
@@ -291,6 +307,9 @@ Logs redact emails, bearer tokens, cookies, API keys, and OAuth fields before wr
 ## Credits
 
 Auth and usage API patterns adapted from [CodexBar](https://github.com/steipete/codexbar) by Peter Steinberger.
+The persistent refresh interaction pattern was adapted from audited CodexBar
+commit [`c61e01e774c449b06324a1cc260af7c77cf17d47`](https://github.com/steipete/CodexBar/commit/c61e01e774c449b06324a1cc260af7c77cf17d47).
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the license notice.
 
 ## License
 
