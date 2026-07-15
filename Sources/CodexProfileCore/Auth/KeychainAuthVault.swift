@@ -230,7 +230,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         returningItem: Bool = false
     ) -> [CFString: Any] {
         var query = self.itemQuery(profileID: capture.profileID)
-        query[kSecValuePersistentRef] = capture.persistentReference
+        query[kSecMatchItemList] = [capture.persistentReference]
         if returningItem {
             query[kSecReturnAttributes] = kCFBooleanTrue
             query[kSecReturnData] = kCFBooleanTrue

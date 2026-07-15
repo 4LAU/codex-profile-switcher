@@ -59,6 +59,7 @@ public struct KeychainMigrationPreview: Equatable, Sendable {
 
 public enum KeychainMigrationError: LocalizedError, Equatable {
     case legacySourceFailed
+    case legacySourceFailureDetail(String)
     case invalidLegacyRecord
     case duplicateProfileID
     case completeProfileStillInLegacy
@@ -68,6 +69,7 @@ public enum KeychainMigrationError: LocalizedError, Equatable {
     case checkpointFailed
     case staleLegacySource
     case legacyCleanupFailed
+    case legacyCleanupFailureDetail(String)
     case reviewAlreadyInProgress
     case staleOrConsumedPreview
     case candidateCountMismatch
@@ -77,6 +79,8 @@ public enum KeychainMigrationError: LocalizedError, Equatable {
         switch self {
         case .legacySourceFailed:
             return "Could not read legacy Keychain copies for migration."
+        case let .legacySourceFailureDetail(detail):
+            return "Could not read a legacy Keychain copy. \(detail)"
         case .invalidLegacyRecord:
             return "A legacy Keychain copy is not a valid saved account."
         case .duplicateProfileID:
@@ -95,6 +99,8 @@ public enum KeychainMigrationError: LocalizedError, Equatable {
             return "A legacy Keychain copy changed before it could be removed."
         case .legacyCleanupFailed:
             return "The new Keychain copy is safe, but the legacy copy could not be removed."
+        case let .legacyCleanupFailureDetail(detail):
+            return "The new Keychain copy is safe, but the legacy copy could not be removed. \(detail)"
         case .reviewAlreadyInProgress:
             return "A legacy Keychain migration review is already in progress."
         case .staleOrConsumedPreview:
@@ -200,6 +206,8 @@ public final class KeychainMigrationCoordinator {
         if let listLegacyProfileIDs = self.listLegacyProfileIDs {
             do {
                 legacyProfileIDs = try listLegacyProfileIDs()
+            } catch let error as KeychainAuthVaultError {
+                throw KeychainMigrationError.legacySourceFailureDetail(error.localizedDescription)
             } catch {
                 throw KeychainMigrationError.legacySourceFailed
             }
@@ -208,6 +216,8 @@ public final class KeychainMigrationCoordinator {
         } else {
             do {
                 captures = try self.captureLegacyRecords()
+            } catch let error as KeychainAuthVaultError {
+                throw KeychainMigrationError.legacySourceFailureDetail(error.localizedDescription)
             } catch {
                 throw KeychainMigrationError.legacySourceFailed
             }
@@ -275,6 +285,8 @@ public final class KeychainMigrationCoordinator {
             if let captureLegacyRecord = self.captureLegacyRecord {
                 do {
                     capture = try captureLegacyRecord(profileID)
+                } catch let error as KeychainAuthVaultError {
+                    throw KeychainMigrationError.legacySourceFailureDetail(error.localizedDescription)
                 } catch {
                     throw KeychainMigrationError.legacySourceFailed
                 }
@@ -456,6 +468,8 @@ public final class KeychainMigrationCoordinator {
             try self.deleteLegacyRecord(capture)
         } catch KeychainAuthVaultError.staleMigrationSource {
             throw KeychainMigrationError.staleLegacySource
+        } catch let error as KeychainAuthVaultError {
+            throw KeychainMigrationError.legacyCleanupFailureDetail(error.localizedDescription)
         } catch {
             throw KeychainMigrationError.legacyCleanupFailed
         }
