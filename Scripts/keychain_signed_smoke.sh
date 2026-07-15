@@ -9,6 +9,8 @@ HELPER_BUNDLE_ID="com.4lau.codex-profile-switcher"
 ACCESS_GROUP="W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
 SMOKE_SERVICE_PREFIX="com.4lau.codex-profile-switcher.auth.smoke."
 SERVICE="${CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE:-$SMOKE_SERVICE_PREFIX$(date +%s).$$}"
+LEGACY_SMOKE_SERVICE_PREFIX="com.4lau.codex-profile-switcher.auth.legacy-smoke."
+LEGACY_SERVICE="${CODEX_PROFILE_LEGACY_SMOKE_KEYCHAIN_SERVICE:-$LEGACY_SMOKE_SERVICE_PREFIX$(date +%s).$$}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-keychain-smoke.XXXXXX")"
 TEST_HOME="$WORK_DIR/home"
 FAKE_APP="$WORK_DIR/Codex.app"
@@ -131,6 +133,8 @@ canonical_bundle_path() {
 
 [[ "$SERVICE" == "$SMOKE_SERVICE_PREFIX"* && ${#SERVICE} -gt ${#SMOKE_SERVICE_PREFIX} ]] \
   || fail "CODEX_PROFILE_SMOKE_KEYCHAIN_SERVICE must use the disposable smoke-service prefix"
+[[ "$LEGACY_SERVICE" == "$LEGACY_SMOKE_SERVICE_PREFIX"* && ${#LEGACY_SERVICE} -gt ${#LEGACY_SMOKE_SERVICE_PREFIX} ]] \
+  || fail "CODEX_PROFILE_LEGACY_SMOKE_KEYCHAIN_SERVICE must use the disposable legacy smoke-service prefix"
 APP_BUNDLE_CANONICAL="$(canonical_bundle_path "$APP_BUNDLE")" \
   || fail "primary app bundle does not exist: $APP_BUNDLE"
 if [[ -n "$REPACKAGED_APP_BUNDLE" ]]; then
@@ -191,6 +195,7 @@ COMMON_ENV=(
   CODEX_PROFILE_HOME="$TEST_HOME"
   CODEX_PROFILE_SIGNED_SMOKE=1
   CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE="$SERVICE"
+  CODEX_PROFILE_LEGACY_KEYCHAIN_SERVICE="$LEGACY_SERVICE"
   CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1
   CODEX_APP="$FAKE_APP"
   CODEX_APP_BIN="$FAKE_APP_BIN"
@@ -215,6 +220,7 @@ if [[ -n "$REPACKAGED_HELPER" ]]; then
   assert_saved_profile "$REPACKAGED_HELPER" SmokeB
 fi
 
+run_with_timeout 120 env "${COMMON_ENV[@]}" "$HELPER" signed-smoke-migration
 run_with_timeout 120 env "${COMMON_ENV[@]}" "$HELPER" signed-smoke-cleanup SmokeA SmokeB >/dev/null
 cleanup_pending=0
 

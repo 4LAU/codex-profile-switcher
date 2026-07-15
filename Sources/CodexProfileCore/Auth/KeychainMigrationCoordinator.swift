@@ -298,13 +298,16 @@ public final class KeychainMigrationCoordinator {
                 }
                 capture = existingCapture
             }
-            try self.copyAndVerify(capture)
+            try self.validatePendingLegacySource(capture)
+            let destinationCopy = try self.copyAndVerify(capture)
             try self.saveCheckpoint(
                 .copiedCleanupPending,
                 pendingFingerprint: self.integrityFingerprint(capture.authBlob),
                 for: capture.profileID)
             try self.deleteLegacy(capture)
-            try self.verifyDestinationAfterLegacyDeletion(capture)
+            try self.verifyDestinationAfterLegacyDeletion(
+                profileID: capture.profileID,
+                fallbackCopy: destinationCopy)
             try self.saveCheckpoint(.complete, for: capture.profileID)
         }
     }
@@ -381,7 +384,7 @@ public final class KeychainMigrationCoordinator {
         }
     }
 
-    private func copyAndVerify(_ capture: LegacyKeychainAuthBlobCapture) throws {
+    private func copyAndVerify(_ capture: LegacyKeychainAuthBlobCapture) throws -> Data {
         let existing: Data?
         do {
             existing = try self.destination.loadAuthBlob(profileID: capture.profileID)
@@ -393,9 +396,11 @@ public final class KeychainMigrationCoordinator {
                 guard self.migrationStates[capture.profileID] == .copiedCleanupPending else {
                     throw KeychainMigrationError.conflictingDestination
                 }
-                try self.restoreVerifiedDestinationCopy(capture)
+                guard AuthBlob.isPlausibleAuthBlob(existing) else {
+                    throw KeychainMigrationError.destinationReadbackFailed
+                }
             }
-            return
+            return existing
         }
 
         let createResult: KeychainMigrationCreateResult
@@ -408,9 +413,10 @@ public final class KeychainMigrationCoordinator {
         }
         if createResult == .alreadyExists {
             try self.verifyDestinationCopy(for: capture, mismatchedCopyError: .conflictingDestination)
-            return
+            return capture.authBlob
         }
         try self.verifyDestinationCopy(for: capture)
+        return capture.authBlob
     }
 
     private func verifyDestinationCopy(
@@ -431,24 +437,45 @@ public final class KeychainMigrationCoordinator {
         }
     }
 
-    private func verifyDestinationAfterLegacyDeletion(
-        _ capture: LegacyKeychainAuthBlobCapture
-    ) throws {
+    private func verifyDestinationAfterLegacyDeletion(profileID: String, fallbackCopy: Data) throws {
+        let copied: Data?
         do {
-            try self.verifyDestinationCopy(for: capture)
-        } catch let error as KeychainMigrationError {
-            try self.restoreVerifiedDestinationCopy(capture)
-            throw error
-        }
-    }
-
-    private func restoreVerifiedDestinationCopy(_ capture: LegacyKeychainAuthBlobCapture) throws {
-        do {
-            try self.destination.saveAuthBlob(capture.authBlob, profileID: capture.profileID)
+            copied = try self.destination.loadAuthBlob(profileID: profileID)
         } catch {
             throw KeychainMigrationError.destinationReadbackFailed
         }
-        try self.verifyDestinationCopy(for: capture)
+        guard let copied else {
+            try self.restoreVerifiedDestinationCopy(fallbackCopy, profileID: profileID)
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+        guard AuthBlob.isPlausibleAuthBlob(copied) else {
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+    }
+
+    private func restoreVerifiedDestinationCopy(_ data: Data, profileID: String) throws {
+        do {
+            try self.destination.saveAuthBlob(data, profileID: profileID)
+        } catch {
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+        let restored: Data?
+        do {
+            restored = try self.destination.loadAuthBlob(profileID: profileID)
+        } catch {
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+        guard restored == data else {
+            throw KeychainMigrationError.destinationReadbackFailed
+        }
+    }
+
+    private func validatePendingLegacySource(_ capture: LegacyKeychainAuthBlobCapture) throws {
+        guard self.migrationStates[capture.profileID] == .copiedCleanupPending else { return }
+        guard let fingerprint = self.pendingFingerprints[capture.profileID],
+              self.integrityFingerprint(capture.authBlob) == fingerprint else {
+            throw KeychainMigrationError.staleLegacySource
+        }
     }
 
     private func saveCheckpoint(

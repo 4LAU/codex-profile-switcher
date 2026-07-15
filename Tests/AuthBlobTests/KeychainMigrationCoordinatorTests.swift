@@ -329,6 +329,39 @@ final class KeychainMigrationCoordinatorTests {
             "A stale source must retain the verified-copy pending checkpoint")
     }
 
+    /// Without this test, a cleanup retry could silently replace a refreshed login with stale credentials.
+    @Test
+    func pendingCleanupPreservesNewerDestinationAuth() throws {
+        let capture = try migrationCapture(profileID: "pending-refresh", reference: "ref-pending-refresh")
+        let refreshedAuth = try differentAuthBlob()
+        let source = MigrationSource(captures: [capture])
+        let destination = MigrationDestination(authBlobs: [capture.profileID: refreshedAuth])
+        let checkpoints = MigrationCheckpoints()
+        let fingerprint = SHA256.hash(data: capture.authBlob)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let coordinator = KeychainMigrationCoordinator(
+            captureLegacyRecords: { try source.capture() },
+            deleteLegacyRecord: { legacyCapture in try source.delete(legacyCapture) },
+            destination: destination,
+            profiles: [],
+            migrationStates: [capture.profileID: .copiedCleanupPending],
+            pendingFingerprints: [capture.profileID: fingerprint],
+            checkpoint: { profileID, state, _ in
+                try checkpoints.save(profileID: profileID, state: state)
+            })
+
+        let preview = try coordinator.review()
+        try coordinator.confirm(preview, approvedCount: 1)
+
+        try expectEqual(try destination.loadAuthBlob(profileID: capture.profileID), refreshedAuth,
+                        "Cleanup retry replaced refreshed destination auth")
+        try expectEqual(source.deletedReferences, [capture.persistentReference],
+                        "Cleanup retry did not remove the unchanged legacy copy")
+        try expectEqual(destination.normalSaveProfileIDs, [],
+                        "Cleanup retry must not rewrite an existing destination copy")
+    }
+
     @Test
     func finalCheckpointFailureCanBeCompletedLaterWithoutALegacyRecord() throws {
         let capture = try migrationCapture(profileID: "checkpoint-recovery", reference: "ref-recovery")

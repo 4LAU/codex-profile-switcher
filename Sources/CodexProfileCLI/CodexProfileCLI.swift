@@ -1,6 +1,7 @@
 import CodexProfileCore
 import CryptoKit
 import Foundation
+import Security
 
 private enum CLIError: LocalizedError {
     case message(String)
@@ -48,6 +49,7 @@ enum CodexProfileCLI {
     private static let vault = Self.makeVault()
     private static let version = "0.5.10"
     private static let signedSmokeServicePrefix = "com.4lau.codex-profile-switcher.auth.smoke."
+    private static let signedSmokeLegacyServicePrefix = "com.4lau.codex-profile-switcher.auth.legacy-smoke."
 
     /// True when no controlling terminal is attached to stdin. In this mode the
     /// CLI must never trigger a modal Keychain consent prompt (it would hang
@@ -67,6 +69,7 @@ enum CodexProfileCLI {
             case "doctor": try self.commandDoctor(args)
             case "keychain-repair": try self.commandKeychainRepair()
             case "signed-smoke-cleanup": try self.commandSignedSmokeCleanup(args)
+            case "signed-smoke-migration": try self.commandSignedSmokeMigration()
             case "best-auth": try self.commandBestAuth(args)
             case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
@@ -370,6 +373,152 @@ enum CodexProfileCLI {
         for profile in args {
             try self.vault.deleteAuthBlob(profileID: profile)
         }
+    }
+
+    private final class SmokeMigrationCheckpoints {
+        var states: [String: AuthMigrationState]
+        var fingerprints: [String: String]
+
+        init(states: [String: AuthMigrationState] = [:], fingerprints: [String: String] = [:]) {
+            self.states = states
+            self.fingerprints = fingerprints
+        }
+
+        func save(profileID: String, state: AuthMigrationState, fingerprint: String?) throws {
+            self.states[profileID] = state
+            if state == .copiedCleanupPending {
+                guard let fingerprint else { throw CLIError.message("migration smoke lost its fingerprint") }
+                self.fingerprints[profileID] = fingerprint
+            } else {
+                self.fingerprints[profileID] = nil
+            }
+        }
+    }
+
+    private static func commandSignedSmokeMigration() throws {
+        let legacyService = try self.signedSmokeLegacyService()
+        let destination = DataProtectionKeychainAuthVault()
+        let legacy = LegacyKeychainAuthVault(service: legacyService)
+        let profileIDs = ["MigrationFresh", "MigrationPending"]
+        defer {
+            for profileID in profileIDs {
+                try? destination.deleteAuthBlob(profileID: profileID)
+                self.deleteLegacySmokeItem(service: legacyService, profileID: profileID)
+            }
+        }
+        try self.runFreshMigrationSmoke(legacy: legacy, destination: destination)
+        try self.runPendingMigrationSmoke(legacy: legacy, destination: destination)
+        print("Signed disposable Keychain migration smoke passed.")
+    }
+
+    private static func runFreshMigrationSmoke(
+        legacy: LegacyKeychainAuthVault,
+        destination: DataProtectionKeychainAuthVault
+    ) throws {
+        let profileID = "MigrationFresh"
+        let auth = self.smokeAuthData(token: "fresh")
+        try self.addLegacySmokeItem(service: legacy.service, profileID: profileID, data: auth)
+        let checkpoints = SmokeMigrationCheckpoints()
+        let coordinator = self.smokeMigrationCoordinator(
+            legacy: legacy,
+            destination: destination,
+            profileID: profileID,
+            checkpoints: checkpoints)
+        let preview = try coordinator.review()
+        try coordinator.confirm(preview, approvedCount: preview.candidateCount)
+        guard try legacy.loadAuthBlob(profileID: profileID) == nil,
+              try destination.loadAuthBlob(profileID: profileID) == auth,
+              checkpoints.states[profileID] == .complete else {
+            throw CLIError.message("fresh migration smoke did not preserve the credential")
+        }
+        try destination.deleteAuthBlob(profileID: profileID)
+    }
+
+    private static func runPendingMigrationSmoke(
+        legacy: LegacyKeychainAuthVault,
+        destination: DataProtectionKeychainAuthVault
+    ) throws {
+        let profileID = "MigrationPending"
+        let legacyAuth = self.smokeAuthData(token: "legacy")
+        let refreshedAuth = self.smokeAuthData(token: "refreshed")
+        try self.addLegacySmokeItem(service: legacy.service, profileID: profileID, data: legacyAuth)
+        try destination.saveAuthBlob(refreshedAuth, profileID: profileID)
+        let checkpoints = SmokeMigrationCheckpoints(
+            states: [profileID: .copiedCleanupPending],
+            fingerprints: [profileID: self.smokeFingerprint(legacyAuth)])
+        let coordinator = self.smokeMigrationCoordinator(
+            legacy: legacy,
+            destination: destination,
+            profileID: profileID,
+            checkpoints: checkpoints)
+        let preview = try coordinator.review()
+        try coordinator.confirm(preview, approvedCount: preview.candidateCount)
+        guard try legacy.loadAuthBlob(profileID: profileID) == nil,
+              try destination.loadAuthBlob(profileID: profileID) == refreshedAuth,
+              checkpoints.states[profileID] == .complete else {
+            throw CLIError.message("pending migration smoke replaced the refreshed credential")
+        }
+        try destination.deleteAuthBlob(profileID: profileID)
+    }
+
+    private static func smokeMigrationCoordinator(
+        legacy: LegacyKeychainAuthVault,
+        destination: DataProtectionKeychainAuthVault,
+        profileID: String,
+        checkpoints: SmokeMigrationCheckpoints
+    ) -> KeychainMigrationCoordinator {
+        KeychainMigrationCoordinator(
+            legacyVault: legacy,
+            destination: destination,
+            profiles: [ProfileConfig(id: profileID, label: profileID)],
+            migrationStates: checkpoints.states,
+            pendingFingerprints: checkpoints.fingerprints,
+            checkpoint: { id, state, fingerprint in
+                try checkpoints.save(profileID: id, state: state, fingerprint: fingerprint)
+            })
+    }
+
+    private static func signedSmokeLegacyService() throws -> String {
+        guard self.environment("CODEX_PROFILE_SIGNED_SMOKE") == "1",
+              let destinationService = self.environment("CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE"),
+              destinationService.hasPrefix(self.signedSmokeServicePrefix),
+              let legacyService = self.environment("CODEX_PROFILE_LEGACY_KEYCHAIN_SERVICE"),
+              legacyService.hasPrefix(self.signedSmokeLegacyServicePrefix) else {
+            throw CLIError.message("signed-smoke-migration requires disposable Keychain services")
+        }
+        return legacyService
+    }
+
+    private static func addLegacySmokeItem(service: String, profileID: String, data: Data) throws {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: profileID,
+            kSecAttrSynchronizable: kCFBooleanFalse as Any,
+            kSecValueData: data,
+        ]
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw CLIError.message("could not create disposable legacy Keychain item (status \(status))")
+        }
+    }
+
+    private static func deleteLegacySmokeItem(service: String, profileID: String) {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: profileID,
+            kSecAttrSynchronizable: kCFBooleanFalse as Any,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    private static func smokeAuthData(token: String) -> Data {
+        Data("{\"OPENAI_API_KEY\":\"signed-smoke-\(token)\"}".utf8)
+    }
+
+    private static func smokeFingerprint(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private struct BestAuthOptions {
