@@ -47,6 +47,7 @@ enum CodexProfileCLI {
     private static let configStore = ProfileConfigStore(paths: Self.paths)
     private static let vault = Self.makeVault()
     private static let version = "0.5.3"
+    private static let signedSmokeServicePrefix = "com.4lau.codex-profile-switcher.auth.smoke."
 
     /// True when no controlling terminal is attached to stdin. In this mode the
     /// CLI must never trigger a modal Keychain consent prompt (it would hang
@@ -65,6 +66,7 @@ enum CodexProfileCLI {
             case "path": try self.commandPath(args)
             case "doctor": try self.commandDoctor(args)
             case "keychain-repair": try self.commandKeychainRepair()
+            case "signed-smoke-cleanup": try self.commandSignedSmokeCleanup(args)
             case "best-auth": try self.commandBestAuth(args)
             case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
@@ -342,6 +344,32 @@ enum CodexProfileCLI {
     private static func commandKeychainRepair() throws {
         throw CLIError.message(
             "Keychain migration is available only in the app. Open Settings > General and choose “Review Legacy Keychain Copies…”. Legacy Keychain credentials were not changed.")
+    }
+
+    private static func commandSignedSmokeCleanup(_ args: [String]) throws {
+        guard !args.isEmpty else {
+            throw CLIError.message("signed-smoke-cleanup requires at least one profile ID")
+        }
+        for profile in args {
+            try self.validateProfile(profile)
+        }
+        guard Set(args).count == args.count else {
+            throw CLIError.message("signed-smoke-cleanup does not accept duplicate profile IDs")
+        }
+        guard self.vault.diagnostics().activeBackend == .dataProtectionKeychain else {
+            throw CLIError.message("signed-smoke-cleanup requires the Data Protection Keychain vault")
+        }
+        guard self.environment("CODEX_PROFILE_SIGNED_SMOKE") == "1" else {
+            throw CLIError.message("signed-smoke-cleanup requires CODEX_PROFILE_SIGNED_SMOKE=1")
+        }
+        guard let service = self.environment("CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE"),
+              !service.isEmpty,
+              service.hasPrefix(self.signedSmokeServicePrefix) else {
+            throw CLIError.message("signed-smoke-cleanup requires a disposable smoke Keychain service")
+        }
+        for profile in args {
+            try self.vault.deleteAuthBlob(profileID: profile)
+        }
     }
 
     private struct BestAuthOptions {
