@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.5 -- 2026-07-15
+
+### Fixed
+
+- The app and bundled helper now report the same version as the signed package.
+
 ## 0.5.4 -- 2026-07-15
 
 ### Fixed
