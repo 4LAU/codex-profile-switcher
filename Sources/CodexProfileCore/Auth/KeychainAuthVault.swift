@@ -140,10 +140,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
                 profileID: nil,
                 status: validationStatus)
         }
-        guard let item = result as? [String: Any],
-              self.isExpectedMigrationItem(item, profileID: capture.profileID),
-              let authBlob = item[kSecValueData as String] as? Data,
-              authBlob == capture.authBlob else {
+        guard let authBlob = result as? Data, authBlob == capture.authBlob else {
             throw KeychainAuthVaultError.staleMigrationSource
         }
 
@@ -229,10 +226,11 @@ public struct LegacyKeychainAuthVault: AuthVault {
         _ capture: LegacyKeychainAuthBlobCapture,
         returningItem: Bool = false
     ) -> [CFString: Any] {
-        var query = self.itemQuery(profileID: capture.profileID)
-        query[kSecMatchItemList] = [capture.persistentReference]
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecMatchItemList: [capture.persistentReference],
+        ]
         if returningItem {
-            query[kSecReturnAttributes] = kCFBooleanTrue
             query[kSecReturnData] = kCFBooleanTrue
             query[kSecMatchLimit] = kSecMatchLimitOne
         }
