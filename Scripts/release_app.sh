@@ -60,6 +60,11 @@ resolve_notary_args() {
 [[ -n "${APP_IDENTITY:-}" ]] || fail "APP_IDENTITY is required for release builds."
 has_signing_identity "$APP_IDENTITY" || fail "APP_IDENTITY was not found in the codesigning keychain: $APP_IDENTITY"
 
+log "Validating release provisioning profiles..."
+CODEX_PROFILE_REQUIRE_SIGNING=1 \
+  APP_IDENTITY="$APP_IDENTITY" \
+  "$ROOT_DIR/Scripts/package_app.sh" --validate-release-profiles
+
 command -v hdiutil >/dev/null 2>&1 || fail "hdiutil is required."
 command -v codesign >/dev/null 2>&1 || fail "codesign is required."
 command -v spctl >/dev/null 2>&1 || fail "spctl is required."
