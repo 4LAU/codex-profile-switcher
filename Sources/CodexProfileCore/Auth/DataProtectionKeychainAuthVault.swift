@@ -5,11 +5,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault {
     public static let accessGroup = "W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
     public static let defaultService = LegacyKeychainAuthVault.defaultService
 
-    public let service: String
-
-    public init(service: String = Self.defaultService) {
-        self.service = service
-    }
+    public init() {}
 
     public func listProfileIDs() throws -> [String] {
         var result: CFTypeRef?
@@ -159,7 +155,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault {
     private func baseServiceQuery() -> [CFString: Any] {
         [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: self.service,
+            kSecAttrService: Self.defaultService,
             kSecAttrAccessGroup: Self.accessGroup,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
             kSecUseDataProtectionKeychain: kCFBooleanTrue as Any,
