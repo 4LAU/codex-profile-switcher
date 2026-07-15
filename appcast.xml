@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.5.3</title>
+            <pubDate>Tue, 14 Jul 2026 20:20:25 -0700</pubDate>
+            <sparkle:version>22</sparkle:version>
+            <sparkle:shortVersionString>0.5.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.3/CodexProfileSwitcher-0.5.3.dmg" length="4078134" type="application/octet-stream" sparkle:edSignature="j5Vqdt2SfTacAswYelgDjXDPD5GRrBvhTKczsHH7OArF8DI0rYypV6d/9jXrA+48FVzmd1DSh+sn4WbWLGczAg=="/>
+        </item>
+        <item>
             <title>0.5.2</title>
             <pubDate>Tue, 14 Jul 2026 19:14:53 -0700</pubDate>
             <sparkle:version>21</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.1/CodexProfileSwitcher-0.5.1.dmg" length="4081533" type="application/octet-stream" sparkle:edSignature="HVOhzGRCcBDh4pHxGriiTCWht3QXyD91JXo9a5lOE6sJEEO2PKh/Sz8aTjp+uSVLwHEriULn1j7h1sk63rwdAA=="/>
-        </item>
-        <item>
-            <title>0.5.0</title>
-            <pubDate>Wed, 24 Jun 2026 14:10:02 -0700</pubDate>
-            <sparkle:version>19</sparkle:version>
-            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.0/CodexProfileSwitcher-0.5.0.dmg" length="4079017" type="application/octet-stream" sparkle:edSignature="JL+dLXXzwEBK6SATgiLeyQD03CTv01pcqCVohKcyCb3WCwOu3+2alZTQSQNI7j4xGmedcDs3G/5P45HA4XHqAQ=="/>
         </item>
     </channel>
 </rss>
