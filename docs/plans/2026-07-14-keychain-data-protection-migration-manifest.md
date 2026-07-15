@@ -216,3 +216,20 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Reason:** This makes the frozen Wave 3 disposable-service smoke gate possible without reading or changing live v2 credentials.
 - **Approved by L:** `2026-07-15`.
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: AMENDMENT CLARIFICATION
+
+- **Change:** The approved added Wave 3 source surface has an expected count of **1 file**: `Sources/CodexProfileCore/Auth/DataProtectionKeychainAuthVault.swift`.
+- **Reason:** Preserve a concrete, completeness-checkable inventory for the disposable-service smoke override.
+- **Approved by L:** not required; this records the count for the already approved source addition.
+- **Logged by:** orchestrator.
+
+### `2026-07-15`: WAVE START
+
+- **Wave:** 3.
+- **Worktree:** `/Users/aaron/Code/codex-profile-switcher-3001-worktree3`.
+- **Plan branch:** `plan/keychain-data-protection-migration-wave-3`.
+- **Base branch:** `program/keychain-data-protection-migration`.
+- **Dev-server port:** none.
+- **Approved by L:** `2026-07-15`.
+- **Logged by:** orchestrator.
