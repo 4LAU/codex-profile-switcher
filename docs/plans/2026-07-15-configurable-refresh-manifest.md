@@ -185,6 +185,19 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Dev-server port:** none.
 - **Logged by:** orchestrator.
 
+### 2026-07-15: GATE RESULT
+
+- **Gate:** Program closeout on `program/configurable-refresh`.
+- **Result:** PASS with one review-tool limitation.
+- **Merged commit:** Wave 3 merged at `0dad26a`.
+- **Evidence:** The merged branch passed `./build.sh`, `make check` (53 Swift Testing cases, 16 XCTest cases, and integration tests), and `git diff --check` against `base_sha`.
+- **Terminal staffcheck:** Three angle scans and seven deep source reviews found two verified defects. The shared redactor now protects camelCase OAuth-token fields in Codex stderr diagnostics, and forced refreshes after an auth or profile transition coalesce into one follow-up batch instead of being dropped. Both fixes passed dedicated resolution review.
+- **Wave 3 reviews:** Spec review passed. Quality review caught and corrected one outdated design non-goal. Final review caught and corrected the missing completion record. The final re-review approved the docs, MIT notice, and execution log.
+- **Cross-lineage review limitation:** The approved read-only cross-challenge dispatch returned no parseable report or ledger and made no repository changes. It could not be counted as a completed adversarial review.
+- **Manual limitation:** Live tracked-menu interaction and final Settings layout were not visually automated; static AppKit and accessibility seams, direct probes, and source reviews passed.
+- **Approved by L:** pending.
+- **Logged by:** orchestrator.
+
 ### 2026-07-15: AMENDMENT APPROVAL
 
 - **Approved change:** Add `Sources/CodexProfileCore/Support/LogRedactor.swift` for the terminal-review credential-redaction remediation.
