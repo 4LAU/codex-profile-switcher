@@ -112,6 +112,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return try items.map { item in
             guard let profileID = item[kSecAttrAccount as String] as? String,
                   ProfileValidator.isValid(profileID),
+                  self.isExpectedMigrationItem(item, profileID: profileID),
                   let authBlob = item[kSecValueData as String] as? Data,
                   AuthBlob.isPlausibleAuthBlob(authBlob),
                   let persistentReference = item[kSecValuePersistentRef as String] as? Data,
@@ -135,11 +136,9 @@ public struct LegacyKeychainAuthVault: AuthVault {
         }
 
         var result: CFTypeRef?
-        let validationStatus = SecItemCopyMatching([
-            kSecValuePersistentRef: capture.persistentReference,
-            kSecReturnData: kCFBooleanTrue as Any,
-            kSecMatchLimit: kSecMatchLimitOne,
-        ] as CFDictionary, &result)
+        let validationStatus = SecItemCopyMatching(
+            self.capturedItemQuery(capture, returningItem: true) as CFDictionary,
+            &result)
         if validationStatus == errSecItemNotFound {
             throw KeychainAuthVaultError.staleMigrationSource
         }
@@ -149,13 +148,14 @@ public struct LegacyKeychainAuthVault: AuthVault {
                 profileID: nil,
                 status: validationStatus)
         }
-        guard let authBlob = result as? Data, authBlob == capture.authBlob else {
+        guard let item = result as? [String: Any],
+              self.isExpectedMigrationItem(item, profileID: capture.profileID),
+              let authBlob = item[kSecValueData as String] as? Data,
+              authBlob == capture.authBlob else {
             throw KeychainAuthVaultError.staleMigrationSource
         }
 
-        let deleteStatus = SecItemDelete([
-            kSecValuePersistentRef: capture.persistentReference,
-        ] as CFDictionary)
+        let deleteStatus = SecItemDelete(self.capturedItemQuery(capture) as CFDictionary)
         if deleteStatus == errSecItemNotFound {
             throw KeychainAuthVaultError.staleMigrationSource
         }
@@ -233,6 +233,29 @@ public struct LegacyKeychainAuthVault: AuthVault {
         return query
     }
 
+    private func capturedItemQuery(
+        _ capture: LegacyKeychainAuthBlobCapture,
+        returningItem: Bool = false
+    ) -> [CFString: Any] {
+        var query = self.itemQuery(profileID: capture.profileID)
+        query[kSecAttrLabel] = self.label(profileID: capture.profileID)
+        query[kSecValuePersistentRef] = capture.persistentReference
+        if returningItem {
+            query[kSecReturnAttributes] = kCFBooleanTrue
+            query[kSecReturnData] = kCFBooleanTrue
+            query[kSecMatchLimit] = kSecMatchLimitOne
+        }
+        self.applyInteractionPolicy(to: &query)
+        return query
+    }
+
+    private func isExpectedMigrationItem(_ item: [String: Any], profileID: String) -> Bool {
+        item[kSecClass as String] as? String == kSecClassGenericPassword as String
+            && item[kSecAttrService as String] as? String == self.service
+            && item[kSecAttrAccount as String] as? String == profileID
+            && item[kSecAttrLabel as String] as? String == self.label(profileID: profileID)
+    }
+
     /// Adds the fail-closed authentication-UI flag to read queries when
     /// `interactionAllowed == false`, so a Keychain ACL prompt is replaced by an
     /// `errSecInteractionNotAllowed` error instead of a modal dialog.
@@ -253,6 +276,10 @@ public struct LegacyKeychainAuthVault: AuthVault {
         var query = self.baseServiceQuery()
         query[kSecAttrAccount] = profileID
         return query
+    }
+
+    private func label(profileID: String) -> String {
+        "Codex Profile Switcher: \(profileID)"
     }
 }
 
