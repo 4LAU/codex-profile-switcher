@@ -38,7 +38,7 @@ Run this once on the release machine. Preferred: an App Store Connect API key
 [App Store Connect → Users and Access → Integrations → App Store Connect API](https://appstoreconnect.apple.com/access/integrations/api)):
 
 ```bash
-xcrun notarytool store-credentials notarytool \
+xcrun notarytool store-credentials <profile-name> \
   --key "AuthKey_XXXXXXXXXX.p8" \
   --key-id "XXXXXXXXXX" \
   --issuer "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -47,7 +47,7 @@ xcrun notarytool store-credentials notarytool \
 Fallback (Apple is phasing app-specific passwords out for notarization):
 
 ```bash
-xcrun notarytool store-credentials notarytool \
+xcrun notarytool store-credentials <profile-name> \
   --apple-id "you@example.com" \
   --team-id "TEAMID12345" \
   --password "app-specific-password"
@@ -56,7 +56,7 @@ xcrun notarytool store-credentials notarytool \
 Either way, the release script then uses:
 
 ```bash
-NOTARY_KEYCHAIN_PROFILE=notarytool
+NOTARY_KEYCHAIN_PROFILE=<profile-name>
 ```
 
 ## One-Time Homebrew Dispatch Setup
@@ -84,7 +84,7 @@ before handing the token to a run.
 
 ```bash
 APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
-NOTARY_KEYCHAIN_PROFILE=notarytool \
+NOTARY_KEYCHAIN_PROFILE=<profile-name> \
 SPARKLE_ED_PUBLIC_KEY="$(.build/sparkle/bin/generate_keys -p)" \
 Scripts/release_app.sh
 ```
