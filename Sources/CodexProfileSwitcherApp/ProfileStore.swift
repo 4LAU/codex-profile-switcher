@@ -7,7 +7,14 @@ import CryptoKit
 @MainActor
 final class ProfileStore {
     private static let keychainAuthStorageVersion = 2
-    private static let keychainAccessRepairVersion = 4
+
+    typealias KeychainMigrationCoordinatorFactory = (
+        AuthVault,
+        [ProfileConfig],
+        [String: AuthMigrationState]?,
+        [String: String]?,
+        @escaping (String, AuthMigrationState, String?) throws -> Void
+    ) throws -> KeychainMigrationCoordinator
 
     private let paths: AppPaths
     private let configDir: URL
@@ -16,12 +23,15 @@ final class ProfileStore {
     private let authStoreDir: URL
     private let authVault: AuthVault
     private let authStorageDescription: String
+    private let keychainMigrationCoordinatorFactory: KeychainMigrationCoordinatorFactory?
     private let codexHome: URL
     private let codexAuthPath: URL
     private let codexGlobalStateURL: URL
     private let fileManager = FileManager.default
     private var authMutationInProgress = false
     private var cacheDirty = false
+    private var keychainMigrationCoordinator: KeychainMigrationCoordinator?
+    private var keychainMigrationPreview: KeychainMigrationPreview?
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
@@ -29,7 +39,11 @@ final class ProfileStore {
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
 
-    init(authVault: AuthVault? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
+    init(
+        authVault: AuthVault? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        keychainMigrationCoordinatorFactory: KeychainMigrationCoordinatorFactory? = nil
+    ) {
         let paths = AppPaths(environment: environment)
         self.paths = paths
         self.configDir = paths.switcherHome
@@ -39,6 +53,7 @@ final class ProfileStore {
         self.codexHome = paths.liveCodexHome
         self.codexAuthPath = paths.liveAuthURL
         self.codexGlobalStateURL = paths.globalStateURL
+        self.keychainMigrationCoordinatorFactory = keychainMigrationCoordinatorFactory
 
         do {
             try self.fileManager.createDirectory(at: self.configDir, withIntermediateDirectories: true,
@@ -64,24 +79,23 @@ final class ProfileStore {
             isFirstLaunch = true
         }
 
-        let keychainService = Self.keychainService(environment: environment)
         if let authVault {
             self.authVault = authVault
             self.authStorageDescription = "custom auth vault"
-        } else if !ProcessSigningIdentity.isStable {
-            // Unsigned dev builds never touch the real Keychain: every rebuild
-            // has a new code identity, which would trigger a consent prompt
-            // per saved profile. They get a separate file-based dev vault.
-            self.authVault = FileAuthVault(root: paths.devAuthStoreURL)
-            self.authStorageDescription = "file auth vault (unsigned dev build)"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "file", "reason": "unsigned dev build"])
         } else {
-            let vault = LegacyKeychainAuthVault(service: keychainService)
-            self.authVault = vault
-            self.authStorageDescription = "macOS Keychain (\(keychainService))"
-            AppLogger.info("Auth vault selected",
-                           metadata: ["backend": "legacyACL"])
+            let hasDataProtectionKeychainAccess = ProcessSigningIdentity.hasDataProtectionKeychainAccess
+            self.authVault = PrimaryAuthVaultSelector.makeVault(
+                hasDataProtectionKeychainAccess: hasDataProtectionKeychainAccess,
+                fileVaultRoot: paths.devAuthStoreURL)
+            if hasDataProtectionKeychainAccess {
+                self.authStorageDescription = "data-protection Keychain auth vault"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "dataProtectionKeychain"])
+            } else {
+                self.authStorageDescription = "file auth vault (no data-protection Keychain entitlement)"
+                AppLogger.info("Auth vault selected",
+                               metadata: ["backend": "file", "reason": "missing data-protection Keychain entitlement"])
+            }
         }
 
         let cacheDecoder = JSONDecoder()
@@ -104,29 +118,21 @@ final class ProfileStore {
         }
 
         if isFirstLaunch, self.legacyAuthStoreFiles().isEmpty {
-            // Only the Keychain backend owns the auth-storage version. A file dev
-            // vault must not stamp it into the shared config, or a later signed
-            // build would see it advanced and skip its real Keychain migration.
-            if self.ownsKeychainBookkeeping {
-                self.config.authStorageVersion = Self.keychainAccessRepairVersion
+            // Only the data-protection Keychain backend owns the disk-auth
+            // migration version. A file vault must leave it untouched so a later
+            // entitlement-bearing build can migrate the old disk store.
+            if self.ownsLegacyDiskMigrationBookkeeping {
+                self.config.authStorageVersion = Self.keychainAuthStorageVersion
             }
             self.config.profiles = [ProfileConfig(id: "1", label: "Profile 1")]
             self.statuses["1"] = .notSetUp
             self.saveConfig()
         } else {
             self.migrateLegacyProfiles()
-            self.repairKeychainAccessIfNeeded()
             self.discoverProfiles()
             self.refreshStatusesFromStoredAuth()
         }
         self.liveProfileId = self.config.activeProfile.isEmpty ? nil : self.config.activeProfile
-    }
-
-    static func keychainService(environment: [String: String]) -> String {
-        if let service = environment["CODEX_PROFILE_KEYCHAIN_SERVICE"], !service.isEmpty {
-            return service
-        }
-        return LegacyKeychainAuthVault.defaultService
     }
 
     static func userHome(environment: [String: String]) -> URL {
@@ -190,6 +196,7 @@ final class ProfileStore {
             throw ProfileMutationError.cannotRemoveActiveProfile
         }
 
+        try self.removeAuthMigrationState(for: id)
         try self.authVault.deleteAuthBlob(profileID: id)
 
         self.config.profiles.removeAll { $0.id == id }
@@ -386,12 +393,90 @@ final class ProfileStore {
             throw ProfileMutationError.cannotClearActiveProfile
         }
 
+        try self.removeAuthMigrationState(for: id)
         try self.authVault.deleteAuthBlob(profileID: id)
         self.cache.snapshots.removeValue(forKey: id)
         self.cache.exhaustionOverrides.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.statuses[id] = .notSetUp
         self.saveCache(excludingOverridesFor: id)
+    }
+
+    func reviewLegacyKeychainMigration() throws -> KeychainMigrationPreview {
+        guard self.keychainMigrationCoordinator == nil else {
+            throw KeychainMigrationError.reviewAlreadyInProgress
+        }
+        guard self.authVault.diagnostics().activeBackend == .dataProtectionKeychain else {
+            throw KeychainMigrationError.destinationUnavailable
+        }
+
+        do {
+            let checkpoint = self.keychainMigrationCheckpoint()
+            let coordinator: KeychainMigrationCoordinator
+            if let factory = self.keychainMigrationCoordinatorFactory {
+                coordinator = try factory(
+                    self.authVault,
+                    self.config.profiles,
+                    self.config.authMigrationStates,
+                    self.config.authMigrationPendingFingerprints,
+                    checkpoint)
+            } else {
+                guard let destination = self.authVault as? DataProtectionKeychainAuthVault else {
+                    throw KeychainMigrationError.destinationUnavailable
+                }
+                let legacyVault = LegacyKeychainAuthVault(interactionAllowed: true)
+                coordinator = KeychainMigrationCoordinator(
+                    legacyVault: legacyVault,
+                    destination: destination,
+                    profiles: self.config.profiles,
+                    migrationStates: self.config.authMigrationStates,
+                    pendingFingerprints: self.config.authMigrationPendingFingerprints,
+                    checkpoint: checkpoint)
+            }
+            let preview = try coordinator.review()
+            self.keychainMigrationCoordinator = coordinator
+            self.keychainMigrationPreview = preview
+            return preview
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func confirmLegacyKeychainMigration(
+        _ preview: KeychainMigrationPreview,
+        approvedCount: Int
+    ) throws {
+        let coordinator = try self.coordinator(for: preview)
+        do {
+            try coordinator.confirm(preview, approvedCount: approvedCount)
+            self.discardKeychainMigrationReview()
+            self.refreshAfterKeychainMigration()
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func completePendingKeychainMigration(
+        _ preview: KeychainMigrationPreview,
+        approvedCount: Int
+    ) throws {
+        let coordinator = try self.coordinator(for: preview)
+        do {
+            try coordinator.completePending(preview, approvedCount: approvedCount)
+            self.discardKeychainMigrationReview()
+            self.refreshAfterKeychainMigration()
+        } catch {
+            self.discardKeychainMigrationReview()
+            throw error
+        }
+    }
+
+    func cancelLegacyKeychainMigrationReview(_ preview: KeychainMigrationPreview) {
+        guard self.keychainMigrationPreview == preview else { return }
+        self.keychainMigrationCoordinator?.cancel(preview)
+        self.discardKeychainMigrationReview()
     }
 
     func flushCacheIfDirty() {
@@ -482,6 +567,79 @@ final class ProfileStore {
         try data.write(to: self.configURL, options: .atomic)
     }
 
+    private func keychainMigrationCheckpoint() -> (String, AuthMigrationState, String?) throws -> Void {
+        { [weak self] profileID, state, pendingFingerprint in
+            guard let self else { throw KeychainMigrationError.checkpointFailed }
+            let previousStates = self.config.authMigrationStates
+            let previousFingerprints = self.config.authMigrationPendingFingerprints
+            var updatedStates = previousStates ?? [:]
+            var updatedFingerprints = previousFingerprints ?? [:]
+            updatedStates[profileID] = state
+            switch state {
+            case .copiedCleanupPending:
+                guard let pendingFingerprint else {
+                    throw KeychainMigrationError.checkpointFailed
+                }
+                updatedFingerprints[profileID] = pendingFingerprint
+            case .complete:
+                updatedFingerprints.removeValue(forKey: profileID)
+            }
+            self.config.authMigrationStates = updatedStates
+            self.config.authMigrationPendingFingerprints = updatedFingerprints.isEmpty
+                ? nil
+                : updatedFingerprints
+            do {
+                try self.saveConfigThrowing()
+            } catch {
+                self.config.authMigrationStates = previousStates
+                self.config.authMigrationPendingFingerprints = previousFingerprints
+                throw error
+            }
+        }
+    }
+
+    /// Persist this before deleting destination auth. A pending cleanup marker
+    /// without a destination copy cannot be completed safely.
+    private func removeAuthMigrationState(for profileID: String) throws {
+        var states = self.config.authMigrationStates ?? [:]
+        var fingerprints = self.config.authMigrationPendingFingerprints ?? [:]
+        guard states.removeValue(forKey: profileID) != nil
+                || fingerprints.removeValue(forKey: profileID) != nil else {
+            return
+        }
+
+        let previousStates = self.config.authMigrationStates
+        let previousFingerprints = self.config.authMigrationPendingFingerprints
+        self.config.authMigrationStates = states.isEmpty ? nil : states
+        self.config.authMigrationPendingFingerprints = fingerprints.isEmpty ? nil : fingerprints
+        do {
+            try self.saveConfigThrowing()
+        } catch {
+            self.config.authMigrationStates = previousStates
+            self.config.authMigrationPendingFingerprints = previousFingerprints
+            throw error
+        }
+    }
+
+    private func coordinator(for preview: KeychainMigrationPreview) throws -> KeychainMigrationCoordinator {
+        guard self.keychainMigrationPreview == preview,
+              let coordinator = self.keychainMigrationCoordinator else {
+            self.discardKeychainMigrationReview()
+            throw KeychainMigrationError.staleOrConsumedPreview
+        }
+        return coordinator
+    }
+
+    private func discardKeychainMigrationReview() {
+        self.keychainMigrationCoordinator = nil
+        self.keychainMigrationPreview = nil
+    }
+
+    private func refreshAfterKeychainMigration() {
+        self.discoverProfiles()
+        self.refreshStatusesFromStoredAuth()
+    }
+
     private func saveCache() {
         self.saveCache(excludingOverridesFor: nil)
     }
@@ -549,19 +707,14 @@ final class ProfileStore {
             .sorted()
     }
 
-    /// The file dev vault (unsigned builds) must never perform Keychain-specific
-    /// bookkeeping — advancing `authStorageVersion`, migrating legacy auth into
-    /// the active vault, or deleting the legacy store — because that state lives
-    /// in the shared `config.json`. A later signed Keychain build would see the
-    /// advanced version, skip its real migration/repair, and find an empty
-    /// Keychain. Only the Keychain backend (and injected non-file test vaults)
-    /// owns this bookkeeping.
-    private var ownsKeychainBookkeeping: Bool {
+    /// File vaults must leave the disk-auth migration incomplete so a later
+    /// entitlement-bearing build can move those credentials.
+    private var ownsLegacyDiskMigrationBookkeeping: Bool {
         self.authVault.diagnostics().activeBackend != .file
     }
 
     private func migrateLegacyProfiles() {
-        guard self.ownsKeychainBookkeeping else { return }
+        guard self.ownsLegacyDiskMigrationBookkeeping else { return }
         let currentVersion = self.config.authStorageVersion ?? 0
         guard currentVersion < Self.keychainAuthStorageVersion else {
             self.cleanupLegacyAuthStoreIfMigrated()
@@ -617,37 +770,11 @@ final class ProfileStore {
             self.config.authStorageVersion = Self.keychainAuthStorageVersion
             try self.saveConfigThrowing()
             self.cleanupLegacyAuthStoreIfMigrated()
-            AppLogger.info("Migrated legacy disk auth store to Keychain",
+            AppLogger.info("Migrated legacy disk auth store to primary auth vault",
                            metadata: ["profile_count": "\(validatedFiles.count)"])
         } catch {
-            self.rollbackKeychainMigration(touchedProfileIDs: touchedProfileIDs, priorBlobs: priorBlobs)
-            AppLogger.error("Failed to migrate legacy disk auth store to Keychain",
-                            metadata: ["error": error.localizedDescription])
-        }
-    }
-
-    private func repairKeychainAccessIfNeeded() {
-        guard self.ownsKeychainBookkeeping else { return }
-        let currentVersion = self.config.authStorageVersion ?? 0
-        guard currentVersion >= Self.keychainAuthStorageVersion,
-              currentVersion < Self.keychainAccessRepairVersion else { return }
-
-        do {
-            let result = try self.authVault.repairStoredAuthAccess()
-            if result.isComplete {
-                self.config.authStorageVersion = Self.keychainAccessRepairVersion
-                try self.saveConfigThrowing()
-            }
-            if result.repaired > 0 {
-                AppLogger.info("Repaired saved auth Keychain access",
-                               metadata: [
-                                   "complete": "\(result.isComplete)",
-                                   "repaired": "\(result.repaired)",
-                                   "total": "\(result.total)",
-                               ])
-            }
-        } catch {
-            AppLogger.error("Failed to repair saved auth Keychain access",
+            self.rollbackLegacyDiskAuthMigration(touchedProfileIDs: touchedProfileIDs, priorBlobs: priorBlobs)
+            AppLogger.error("Failed to migrate legacy disk auth store to primary auth vault",
                             metadata: ["error": error.localizedDescription])
         }
     }
@@ -670,7 +797,7 @@ final class ProfileStore {
         .sorted { $0.0 < $1.0 }
     }
 
-    private func rollbackKeychainMigration(touchedProfileIDs: [String], priorBlobs: [String: Data?]) {
+    private func rollbackLegacyDiskAuthMigration(touchedProfileIDs: [String], priorBlobs: [String: Data?]) {
         for id in Set(touchedProfileIDs) {
             do {
                 if let prior = priorBlobs[id] ?? nil {
@@ -679,14 +806,14 @@ final class ProfileStore {
                     try self.authVault.deleteAuthBlob(profileID: id)
                 }
             } catch {
-                AppLogger.error("Failed to roll back migrated Keychain auth",
+                AppLogger.error("Failed to roll back migrated auth vault data",
                                 metadata: ["profile": id, "error": error.localizedDescription])
             }
         }
     }
 
     private func cleanupLegacyAuthStoreIfMigrated() {
-        guard self.ownsKeychainBookkeeping else { return }
+        guard self.ownsLegacyDiskMigrationBookkeeping else { return }
         guard (self.config.authStorageVersion ?? 0) >= Self.keychainAuthStorageVersion else { return }
         guard self.fileManager.fileExists(atPath: self.authStoreDir.path) else { return }
 

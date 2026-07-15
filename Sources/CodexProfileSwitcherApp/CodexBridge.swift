@@ -107,11 +107,13 @@ enum CodexBridge {
     }
 
     private static func codexProfilePath() -> String? {
-        let candidates: [String?] = [
-            Bundle.main.bundleURL.pathExtension == "app"
-                ? Bundle.main.bundleURL
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            let bundledHelper = Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Helpers/codex-profile").path
-                : nil,
+            return FileManager.default.isExecutableFile(atPath: bundledHelper) ? bundledHelper : nil
+        }
+
+        let candidates: [String?] = [
             Bundle.main.executableURL?
                 .deletingLastPathComponent()
                 .appendingPathComponent("codex-profile").path,
