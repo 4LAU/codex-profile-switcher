@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.6 -- 2026-07-15
+
+### Fixed
+
+- Keychain migration now shows its actual safe error instead of a generic retry message.
+
 ## 0.5.5 -- 2026-07-15
 
 ### Fixed

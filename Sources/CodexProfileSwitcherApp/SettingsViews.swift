@@ -690,8 +690,8 @@ struct GeneralTab: View {
                 self.actions.cancelLegacyKeychainMigrationReview(preview)
                 self.toast.show("No legacy Keychain copies need migration", style: .info)
             }
-        case .failure:
-            self.clearMigrationUIWithError()
+        case let .failure(error):
+            self.clearMigrationUIWithError(error)
         }
     }
 
@@ -716,8 +716,8 @@ struct GeneralTab: View {
             self.migrationLifecycle.finish(sheet.preview)
             self.migrationSheet = nil
             self.toast.show(sheet.successMessage, style: .success)
-        case .failure:
-            self.clearMigrationUIWithError()
+        case let .failure(error):
+            self.clearMigrationUIWithError(error)
         }
     }
 
@@ -727,12 +727,12 @@ struct GeneralTab: View {
         self.migrationLifecycle.cancelMigrationReview(sheet.preview)
     }
 
-    private func clearMigrationUIWithError() {
+    private func clearMigrationUIWithError(_ error: SettingsActionError) {
         if let preview = self.migrationSheet?.preview {
             self.migrationLifecycle.cancelMigrationReview(preview)
         }
         self.migrationSheet = nil
-        self.migrationError = "Keychain migration could not be completed. Review the migration again before trying."
+        self.migrationError = error.localizedDescription
     }
 
     private func refreshIntervalLabel(_ interval: RefreshInterval) -> String {
