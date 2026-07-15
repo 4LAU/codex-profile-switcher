@@ -191,3 +191,12 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Port:** none
 - **Approved by L:** `2026-07-14`
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: GATE RESULT
+
+- **Wave:** 2
+- **Result:** checks passed; authorization for Wave 3 is pending L approval.
+- **Checks:** task-level specification and code-quality reviews approved; final combined specification review and final quality review approved after a mixed-preview recovery bypass was corrected; `./build.sh`, `make check`, and `git diff --check` passed on the merged program branch.
+- **Safety evidence:** The hermetic coordinator matrix proves no legacy deletion before an atomic, byte-verified v2 copy and durable pending checkpoint; an exact persistent reference is revalidated before deletion; cleanup and final-readback failures remain pending; a mixed live-plus-pending review cannot complete recovery and must be re-reviewed explicitly. Only the Settings > General review action constructs `LegacyKeychainAuthVault`; app launch, refresh, profile switch, usage polling, and normal CLI operations remain legacy-free. The Settings sheet exposes only IDs and labels, and `keychain-repair` refuses without changing config or the file vault. No automated test invokes a `SecItem` operation.
+- **Approval to begin Wave 3:** pending L approval.
+- **Logged by:** orchestrator.
