@@ -65,15 +65,14 @@ codex-profile-switcher
 The menu bar app is installed to `~/.local/bin/codex-profile-switcher`, and the
 matching Swift CLI helper is installed to `~/.local/bin/codex-profile`.
 
-**No Keychain prompts for source builds.** Keychain item ACLs trust the
-binary's code-signing identity. The DMG and Homebrew builds are Developer
-ID-signed, so the one-time "Always Allow" per profile holds across updates.
-Self-built binaries are ad-hoc signed — every rebuild looks like a new program
-to macOS — so they never touch the real Keychain at all: they automatically use
-a separate file-based vault at `~/.codex-switcher/dev-auth-store` (0600 files,
-the same protection Codex itself uses for `~/.codex/auth.json`). No Apple
-account or certificate is needed, and no prompts appear. To build a CLI that
-shares the real Keychain profiles, sign it with any Apple certificate:
+**No Keychain prompts for source builds.** Released app bundles use the macOS
+Data Protection Keychain, which lets the signed app and its bundled helper read
+their shared saved profiles without per-account access-control prompts. Self-built
+binaries never touch the real Keychain. They automatically use a separate
+file-based vault at `~/.codex-switcher/dev-auth-store` (0600 files, the same
+protection Codex itself uses for `~/.codex/auth.json`). No Apple account or
+certificate is needed, and no prompts appear. To build a CLI that shares the
+real Keychain profiles, sign it with any Apple certificate:
 
 ```bash
 make install-cli APP_IDENTITY="Apple Development: you@example.com (TEAMID)"
@@ -135,7 +134,6 @@ codex-profile status [profile] [--json]
 codex-profile list [--json]
 codex-profile path <profile>
 codex-profile doctor
-codex-profile keychain-repair
 codex-profile best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
 codex-profile exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
 codex-profile import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
@@ -153,7 +151,6 @@ codex-profile lease gc
 - `list` — lists known profiles. `--json` emits a JSON array.
 - `path` — prints the Keychain location for a profile.
 - `doctor` — prints environment, installed Codex binaries, auth backend, and profile status.
-- `keychain-repair` — rewrites saved auth items with current Keychain access settings. Run once if repeated prompts appear after upgrading.
 
 ### best-auth
 
@@ -276,13 +273,13 @@ command when it self-fetches usage before ranking.
 
 ## macOS Permissions
 
-The app stores auth tokens in macOS Keychain. On signed releases (DMG or Homebrew), macOS asks for Keychain approval once during initial setup. After that, profile switching should not prompt again.
+The app stores auth tokens in the Data Protection Keychain. Signed releases use
+an Apple-authorized storage group shared by the app and bundled helper, so
+ordinary profile switches do not need a per-account Keychain approval prompt.
 
-Local unsigned builds may trigger a Keychain prompt each time a different binary reads or writes saved auth. Install the signed release to avoid repeated prompts.
-
-If upgrading from an older unsigned build, run `codex-profile keychain-repair` once to rewrite saved auth with current access settings.
-
-If a signed build still prompts for Keychain access, open Keychain Access.app, find the `CodexProfileSwitcher` entry, and add `CodexProfileSwitcher.app` under Access Control > "Always allow access by these applications."
+After upgrading from an older release, open Settings > General and review any
+legacy Keychain copies before moving them. The app lists the affected profiles
+and does not remove the old copies unless you confirm that exact list.
 
 ## Troubleshooting
 

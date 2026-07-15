@@ -71,6 +71,6 @@ The CLI exposes the same usage-aware selection the app uses, for scripts and age
 
 ## Security
 
-- Auth tokens stored in macOS Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
+- Auth tokens stored in the Data Protection Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`; older ACL-backed copies move only through a reviewed, explicit Settings action
 - Log output redacts emails, bearer tokens, cookies, API keys, and OAuth fields
 - No network calls except to Codex's `app-server` JSON-RPC endpoint (via a local process, authenticated per-profile)

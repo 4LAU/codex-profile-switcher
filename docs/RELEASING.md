@@ -1,9 +1,9 @@
 # Release Process
 
 This project is open source, but public macOS releases should still use
-Developer ID signing and Apple notarization. That is what lets most users open
-the app normally and keeps Keychain prompts limited to initial approval instead
-of recurring during ordinary profile switching.
+Developer ID signing and Apple notarization. The release also embeds the
+existing Developer ID provisioning profile required for Data Protection
+Keychain storage.
 
 ## Prerequisites
 
@@ -174,19 +174,19 @@ APP_IDENTITY="Developer ID Application: Your Name (TEAMID12345)" \
 Scripts/keychain_signed_smoke.sh
 ```
 
-For the official bundle ID, the signed smoke performs a launched helper
-Keychain round-trip. Run it manually only; it can trigger interactive macOS
-password prompts.
+For the official bundle ID, the signed smoke performs a disposable
+Data Protection Keychain round-trip through the bundled helper. It creates and
+removes its own temporary records; it does not touch saved user credentials.
 
 Expected behavior:
 
-- macOS may ask for Keychain approval during the initial profile saves.
-- `codex-profile keychain-repair` should complete against the signed helper.
-- Repeat profile switches should complete without repeated prompts after
-  approval.
+- The signed helper saves, reads, switches, and removes only disposable smoke
+  credentials.
+- A separately rebuilt signed bundle can read the same disposable credentials.
+- Cleanup completes before the script reports success.
 
-Do not add this smoke to CI. It is intentionally manual because it can trigger
-interactive macOS password prompts.
+Do not add this smoke to CI. It writes temporary credentials to the local
+Keychain and must run only against a signed release candidate.
 
 ## User-Facing Prompt Expectation
 
@@ -194,10 +194,7 @@ For a normal release, users should expect:
 
 1. A standard first-open macOS warning because the app was downloaded from the
    internet.
-2. A one-time Keychain prompt when each profile's auth is first saved or accessed.
-   After clicking "Always Allow", subsequent access is silent.
-3. No recurring password prompt on every ordinary profile switch after access is
-   approved.
+2. No Keychain password prompt for ordinary profile setup, reads, or switches.
+3. A reviewed migration screen after upgrading from an older ACL-based release.
 
-Recurring prompts during every switch should be treated as a release-blocking
-bug.
+Any Keychain password prompt during ordinary switching is release-blocking.

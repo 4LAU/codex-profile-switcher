@@ -266,3 +266,19 @@ The release machine must also hold the existing Developer ID Application certifi
 - **Reason:** An entitled cleanup path is required for the manual signed smoke test to leave no protected disposable records behind.
 - **Approved by L:** `2026-07-15`.
 - **Logged by:** orchestrator.
+
+### `2026-07-15`: AMENDMENT
+
+- **Change:** The app and bundled helper retain the shared bundle identifier `com.4lau.codex-profile-switcher` and use the same existing Developer ID provisioning profile.
+- **Reason:** The installed, notarized release uses that shared identity. The local profile authorizes the matching application identifier and wildcard Keychain group, and a signed disposable-record smoke confirmed that the app and helper can use it together. No second helper profile or Apple Developer portal change is needed.
+- **Approved by L:** standing one-shot approval, `2026-07-15`.
+- **Logged by:** orchestrator.
+
+### `2026-07-15`: GATE RESULT
+
+- **Wave:** 3.
+- **Result:** passed.
+- **Checks:** signed package creation, profile metadata validation, app and helper signature and entitlement verification, and the disposable signed Keychain smoke all passed using the existing local Developer ID profile.
+- **Safety evidence:** the smoke used a uniquely named disposable service, saved and switched two synthetic credentials, verified a separately rebuilt bundle could read them, and removed both records before success. No production credential was read, changed, or listed.
+- **Approval to begin Wave 4:** standing one-shot approval, `2026-07-15`.
+- **Logged by:** orchestrator.

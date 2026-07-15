@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.4 -- 2026-07-15
+
+### Fixed
+
+- Saved profile credentials now use the macOS Data Protection Keychain instead of per-account access-control lists. New saves and ordinary profile switches no longer create a password prompt for every account after an app update.
+- Older Keychain copies can be moved only from Settings > General after reviewing the exact accounts that will be affected. The app never performs that cleanup automatically.
+- The refresh schedule and menu-open refresh setting remain available alongside the new migration controls.
+
 ## 0.5.1 -- 2026-07-14
 
 ### Fixed
