@@ -109,6 +109,7 @@ final class PersistentRefreshMenuView: NSView {
         self.configureSelectionView()
         self.configureIconView()
         self.configureTextFields()
+        self.installClickRecognizer()
         self.updateColors()
     }
 
@@ -131,13 +132,6 @@ final class PersistentRefreshMenuView: NSView {
         guard self.isRowEnabled else { return false }
         self.refreshAction()
         return true
-    }
-
-    override func mouseDown(with _: NSEvent) {}
-
-    override func mouseUp(with _: NSEvent) {
-        guard self.isRowEnabled else { return }
-        self.refreshAction()
     }
 
     func applySize(width: CGFloat) {
@@ -233,6 +227,12 @@ final class PersistentRefreshMenuView: NSView {
         self.addSubview(self.shortcutField)
     }
 
+    private func installClickRecognizer() {
+        let recognizer = NSClickGestureRecognizer(target: self, action: #selector(self.handlePrimaryClick(_:)))
+        recognizer.buttonMask = 0x1
+        self.addGestureRecognizer(recognizer)
+    }
+
     private func updateColors() {
         guard self.isRowEnabled else {
             self.titleField.textColor = .disabledControlTextColor
@@ -249,5 +249,11 @@ final class PersistentRefreshMenuView: NSView {
             self.shortcutField.textColor = .tertiaryLabelColor
             self.iconView.contentTintColor = .labelColor
         }
+    }
+
+    @objc private func handlePrimaryClick(_ recognizer: NSClickGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        guard self.isRowEnabled else { return }
+        self.refreshAction()
     }
 }
