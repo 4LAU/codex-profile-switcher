@@ -10,6 +10,12 @@ BUILD_DIR="${CODEX_PROFILE_PACKAGE_BUILD_DIR:-$ROOT_DIR/.build/package-app}"
 PACKAGE_SCRATCH="$BUILD_DIR/swiftpm"
 BUNDLE_ID="${BUNDLE_ID:-com.4lau.codex-profile-switcher}"
 OFFICIAL_BUNDLE_ID="com.4lau.codex-profile-switcher"
+OFFICIAL_HELPER_BUNDLE_ID="com.4lau.codex-profile-switcher.helper"
+HELPER_BUNDLE_ID="${HELPER_BUNDLE_ID:-$BUNDLE_ID.helper}"
+TEAM_ID="W3ZHLSH96F"
+AUTH_GROUP="$TEAM_ID.com.4lau.codex-profile-switcher.auth-v2"
+APP_APPLICATION_IDENTIFIER="$TEAM_ID.$OFFICIAL_BUNDLE_ID"
+HELPER_APPLICATION_IDENTIFIER="$TEAM_ID.$OFFICIAL_HELPER_BUNDLE_ID"
 MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '1')}"
 REQUIRE_SIGNING="${CODEX_PROFILE_REQUIRE_SIGNING:-0}"
@@ -17,6 +23,8 @@ APP_ENTITLEMENTS_BASE="${CODEX_PROFILE_APP_ENTITLEMENTS:-$ROOT_DIR/CodexProfileS
 HELPER_ENTITLEMENTS_BASE="${CODEX_PROFILE_HELPER_ENTITLEMENTS:-$ROOT_DIR/CodexProfileHelper.entitlements}"
 APP_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileSwitcher.signed.entitlements"
 HELPER_ENTITLEMENTS_SIGNED="$BUILD_DIR/CodexProfileHelper.signed.entitlements"
+EMPTY_ENTITLEMENTS="$BUILD_DIR/empty.entitlements"
+PROFILE_VALIDATION_DIR=""
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app
@@ -35,6 +43,116 @@ fail() {
   exit 1
 }
 
+plist_value() {
+  /usr/libexec/PlistBuddy -c "Print $2" "$1" 2>/dev/null
+}
+
+require_plist_scalar() {
+  local plist="$1"
+  local key="$2"
+  local expected="$3"
+  local subject="$4"
+  local actual
+
+  if ! actual="$(plist_value "$plist" "$key")"; then
+    fail "$subject is missing $key."
+  fi
+  [[ "$actual" == "$expected" ]] || fail "$subject has an unexpected value for $key."
+}
+
+require_plist_singleton_array() {
+  local plist="$1"
+  local key="$2"
+  local expected="$3"
+  local subject="$4"
+  local inventory
+  local first_value
+
+  if ! inventory="$(plist_value "$plist" "$key")"; then
+    fail "$subject is missing $key."
+  fi
+  [[ "$inventory" == "Array {"* ]] || fail "$subject must contain an array at $key."
+  if ! first_value="$(plist_value "$plist" "$key:0")"; then
+    fail "$subject must contain one value at $key."
+  fi
+  [[ "$first_value" == "$expected" ]] || fail "$subject has an unexpected value at $key."
+  if plist_value "$plist" "$key:1" >/dev/null 2>&1; then
+    fail "$subject must contain exactly one value at $key."
+  fi
+}
+
+validate_entitlements_file() {
+  local entitlements="$1"
+  local expected_application_identifier="$2"
+  local subject="$3"
+
+  [[ -r "$entitlements" ]] || fail "$subject file is not readable: $entitlements"
+  plutil -lint "$entitlements" >/dev/null || fail "$subject is not a valid plist."
+  require_plist_scalar "$entitlements" ":application-identifier" "$expected_application_identifier" "$subject"
+  require_plist_scalar "$entitlements" ":com.apple.developer.team-identifier" "$TEAM_ID" "$subject"
+  require_plist_singleton_array "$entitlements" ":keychain-access-groups" "$AUTH_GROUP" "$subject"
+}
+
+cleanup_profile_validation() {
+  [[ -z "$PROFILE_VALIDATION_DIR" ]] || rm -rf "$PROFILE_VALIDATION_DIR"
+}
+
+validate_provisioning_profile() {
+  local profile="$1"
+  local expected_application_identifier="$2"
+  local role="$3"
+  local environment_variable="$4"
+  local decoded_profile="$PROFILE_VALIDATION_DIR/$role.plist"
+
+  [[ -n "$profile" ]] || fail "$environment_variable is required."
+  [[ -f "$profile" && -r "$profile" ]] || fail "$role provisioning profile is not readable: $profile"
+  if ! security cms -D -i "$profile" > "$decoded_profile"; then
+    fail "could not decode the $role provisioning profile."
+  fi
+  plutil -lint "$decoded_profile" >/dev/null || fail "$role provisioning profile is not a valid plist."
+  require_plist_singleton_array "$decoded_profile" ":ApplicationIdentifierPrefix" "$TEAM_ID" "$role provisioning profile"
+  require_plist_singleton_array "$decoded_profile" ":TeamIdentifier" "$TEAM_ID" "$role provisioning profile"
+  require_plist_scalar "$decoded_profile" ":Entitlements:application-identifier" "$expected_application_identifier" "$role provisioning profile"
+  require_plist_scalar "$decoded_profile" ":Entitlements:com.apple.developer.team-identifier" "$TEAM_ID" "$role provisioning profile"
+  require_plist_singleton_array "$decoded_profile" ":Entitlements:keychain-access-groups" "$AUTH_GROUP" "$role provisioning profile"
+}
+
+validate_release_profiles() {
+  PROFILE_VALIDATION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-release-profiles.XXXXXX")" \
+    || fail "could not create a temporary directory for profile validation."
+  trap cleanup_profile_validation EXIT
+  validate_provisioning_profile "${CODEX_PROFILE_APP_PROVISIONING_PROFILE:-}" "$APP_APPLICATION_IDENTIFIER" "APP" "CODEX_PROFILE_APP_PROVISIONING_PROFILE"
+  validate_provisioning_profile "${CODEX_PROFILE_HELPER_PROVISIONING_PROFILE:-}" "$HELPER_APPLICATION_IDENTIFIER" "HELPER" "CODEX_PROFILE_HELPER_PROVISIONING_PROFILE"
+}
+
+validate_release_profiles_only=0
+case "${1:-}" in
+  --validate-release-profiles)
+    validate_release_profiles_only=1
+    shift
+    ;;
+  "")
+    ;;
+  *)
+    fail "usage: $0 [--validate-release-profiles]"
+    ;;
+esac
+[[ "$#" == "0" ]] || fail "usage: $0 [--validate-release-profiles]"
+
+if [[ "$validate_release_profiles_only" == "1" ]]; then
+  validate_release_profiles
+  log "Release provisioning profiles are valid."
+  exit 0
+fi
+
+if [[ "$REQUIRE_SIGNING" == "1" ]]; then
+  [[ "$BUNDLE_ID" == "$OFFICIAL_BUNDLE_ID" ]] || fail "BUNDLE_ID must be $OFFICIAL_BUNDLE_ID for signed release builds."
+  [[ "$HELPER_BUNDLE_ID" == "$OFFICIAL_HELPER_BUNDLE_ID" ]] || fail "HELPER_BUNDLE_ID must be $OFFICIAL_HELPER_BUNDLE_ID for signed release builds."
+  validate_entitlements_file "$APP_ENTITLEMENTS_BASE" "$APP_APPLICATION_IDENTIFIER" "app entitlements"
+  validate_entitlements_file "$HELPER_ENTITLEMENTS_BASE" "$HELPER_APPLICATION_IDENTIFIER" "helper entitlements"
+  validate_release_profiles
+fi
+
 has_signing_identity() {
   local identity="${1:-}"
   [[ -n "$identity" ]] || return 1
@@ -46,6 +164,18 @@ verify_signature() {
 
   codesign --verify --strict --verbose=2 "$target"
   codesign -d --entitlements :- "$target"
+}
+
+verify_signed_entitlements() {
+  local target="$1"
+  local expected_application_identifier="$2"
+  local subject="$3"
+  local inspected_entitlements="$BUILD_DIR/$(basename "$target").final.entitlements"
+
+  if ! codesign -d --entitlements :- "$target" > "$inspected_entitlements" 2>/dev/null; then
+    fail "could not inspect $subject."
+  fi
+  validate_entitlements_file "$inspected_entitlements" "$expected_application_identifier" "$subject"
 }
 
 codesign_args=()
@@ -76,8 +206,15 @@ mkdir -p "$BUILD_DIR" "$PACKAGE_SCRATCH"
 [[ -f "$APP_ENTITLEMENTS_BASE" ]] || fail "app entitlements file not found: $APP_ENTITLEMENTS_BASE"
 [[ -f "$HELPER_ENTITLEMENTS_BASE" ]] || fail "helper entitlements file not found: $HELPER_ENTITLEMENTS_BASE"
 
-cp "$APP_ENTITLEMENTS_BASE" "$APP_ENTITLEMENTS_SIGNED"
-cp "$HELPER_ENTITLEMENTS_BASE" "$HELPER_ENTITLEMENTS_SIGNED"
+if [[ "$REQUIRE_SIGNING" == "1" ]]; then
+  cp "$APP_ENTITLEMENTS_BASE" "$APP_ENTITLEMENTS_SIGNED"
+  cp "$HELPER_ENTITLEMENTS_BASE" "$HELPER_ENTITLEMENTS_SIGNED"
+else
+  rm -f "$EMPTY_ENTITLEMENTS"
+  plutil -create xml1 "$EMPTY_ENTITLEMENTS"
+  cp "$EMPTY_ENTITLEMENTS" "$APP_ENTITLEMENTS_SIGNED"
+  cp "$EMPTY_ENTITLEMENTS" "$HELPER_ENTITLEMENTS_SIGNED"
+fi
 plutil -lint "$APP_ENTITLEMENTS_SIGNED" >/dev/null
 plutil -lint "$HELPER_ENTITLEMENTS_SIGNED" >/dev/null
 
@@ -127,6 +264,11 @@ cp "$APP_BINARY" "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 cp "$HELPER_BINARY" "$HELPER_APP_EXECUTABLE"
 ln -s "CodexProfileHelper.app/Contents/MacOS/codex-profile" "$HELPER_COMPAT_LINK"
 chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$HELPER_APP_EXECUTABLE"
+
+if [[ "$REQUIRE_SIGNING" == "1" ]]; then
+  cp "$CODEX_PROFILE_APP_PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
+  cp "$CODEX_PROFILE_HELPER_PROVISIONING_PROFILE" "$HELPER_APP_BUNDLE/Contents/embedded.provisionprofile"
+fi
 
 log "Embedding Sparkle.framework..."
 cp -R "$SPARKLE_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
@@ -193,7 +335,7 @@ cat > "$HELPER_APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key>
   <string>Codex Profile Helper</string>
   <key>CFBundleIdentifier</key>
-  <string>$BUNDLE_ID</string>
+  <string>$HELPER_BUNDLE_ID</string>
   <key>CFBundleExecutable</key>
   <string>codex-profile</string>
   <key>CFBundlePackageType</key>
@@ -221,6 +363,9 @@ find "$APP_BUNDLE" -name '._*' -delete
 log "Signing helper..."
 codesign "${codesign_args[@]}" --entitlements "$HELPER_ENTITLEMENTS_SIGNED" "$HELPER_APP_BUNDLE"
 verify_signature "$HELPER_APP_BUNDLE"
+if [[ "$REQUIRE_SIGNING" == "1" ]]; then
+  verify_signed_entitlements "$HELPER_APP_BUNDLE" "$HELPER_APPLICATION_IDENTIFIER" "signed helper entitlements"
+fi
 
 log "Signing Sparkle framework components..."
 if [[ -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ]]; then
@@ -236,5 +381,8 @@ codesign "${codesign_args[@]}" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framewor
 log "Signing app..."
 codesign "${codesign_args[@]}" --entitlements "$APP_ENTITLEMENTS_SIGNED" "$APP_BUNDLE"
 verify_signature "$APP_BUNDLE"
+if [[ "$REQUIRE_SIGNING" == "1" ]]; then
+  verify_signed_entitlements "$APP_BUNDLE" "$APP_APPLICATION_IDENTIFIER" "signed app entitlements"
+fi
 
 log "Created $APP_BUNDLE"
