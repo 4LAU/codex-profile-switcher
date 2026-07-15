@@ -7,6 +7,7 @@ import CodexProfileCore
 final class UsageProvider {
     private let store: ProfileStore
     private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration: UUID?
     private var lastRefreshAll: Date = .distantPast
     private(set) var isRefreshing = false
     var onRefreshComplete: (() -> Void)?
@@ -18,6 +19,7 @@ final class UsageProvider {
     func cancelRefreshes() {
         self.refreshTask?.cancel()
         self.refreshTask = nil
+        self.refreshGeneration = nil
         self.isRefreshing = false
     }
 
@@ -37,6 +39,8 @@ final class UsageProvider {
 
         self.lastRefreshAll = Date()
         self.isRefreshing = true
+        let generation = UUID()
+        self.refreshGeneration = generation
 
         let profiles = self.store.config.profiles
         let liveId = self.store.liveProfileId ?? ""
@@ -62,10 +66,13 @@ final class UsageProvider {
                     }
                 }
             }
-            self.isRefreshing = false
-            self.refreshTask = nil
-            self.store.flushCacheIfDirty()
-            self.onRefreshComplete?()
+            if self.refreshGeneration == generation {
+                self.isRefreshing = false
+                self.refreshTask = nil
+                self.refreshGeneration = nil
+                self.store.flushCacheIfDirty()
+                self.onRefreshComplete?()
+            }
         }
     }
 
