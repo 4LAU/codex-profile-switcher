@@ -405,6 +405,28 @@ test_login_rejects_duplicate_auth_and_preserves_target_auth() {
     "duplicate login overwrote the target profile auth"
 }
 
+test_file_vault_login_preserves_incomplete_legacy_disk_migration() {
+  reset_home
+  local legacy_auth="$WORK_DIR/legacy-disk-auth.json"
+  local login="$WORK_DIR/file-vault-login.json"
+  local legacy_store="$TEST_HOME/.codex-switcher/auth/Legacy.json"
+  make_api_auth "$legacy_auth" "sk-test-legacy-disk-1111111111" "legacy-disk"
+  make_api_auth "$login" "sk-test-file-vault-login-2222222222" "file-vault-login"
+  mkdir -p "$(dirname "$legacy_store")"
+  cp "$legacy_auth" "$legacy_store"
+
+  FAKE_CODEX_LOGIN_AUTH="$login" run_helper_dev login FileVaultLogin >/dev/null
+
+  [[ -f "$legacy_store" ]] || fail "file-vault login removed the legacy disk auth source"
+  assert_same_file "$legacy_store" "$legacy_auth" \
+    "file-vault login changed the legacy disk auth source"
+  [[ -f "$TEST_HOME/.codex-switcher/config.json" ]] \
+    || fail "file-vault login did not create its profile config"
+  if grep -Fq '"authStorageVersion"' "$TEST_HOME/.codex-switcher/config.json"; then
+    fail "file-vault login incorrectly marked legacy disk auth migration complete"
+  fi
+}
+
 test_keychain_repair_reports_no_migration_yet() {
   reset_home
   local saved_a="$WORK_DIR/repair-a.json"
@@ -1161,6 +1183,7 @@ test_switch_refuses_ambiguous_live_auth
 test_switch_uses_active_profile_to_disambiguate_live_auth
 test_login_uses_isolated_home_and_preserves_live_auth
 test_login_rejects_duplicate_auth_and_preserves_target_auth
+test_file_vault_login_preserves_incomplete_legacy_disk_migration
 test_keychain_repair_reports_no_migration_yet
 test_best_auth_exports_lowest_usage_configured_profile
 test_mark_exhausted_persists_to_cache_and_best_auth_skips_it

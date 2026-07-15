@@ -267,8 +267,6 @@ public struct ProfileTransactionService {
 }
 
 public struct ProfileConfigStore {
-    public static let keychainAuthStorageVersion = 2
-
     private let paths: AppPaths
     private let fileManager: FileManager
 
@@ -313,22 +311,11 @@ public struct ProfileConfigStore {
         try AtomicFileWriter.ensurePrivateDirectory(self.paths.switcherHome, fileManager: self.fileManager)
         var config = self.loadConfig() ?? AppConfig(
             profiles: [],
-            activeProfile: profileID,
-            authStorageVersion: Self.keychainAuthStorageVersion)
+            activeProfile: profileID)
         config.activeProfile = profileID
-        config.authStorageVersion = max(
-            config.authStorageVersion ?? Self.keychainAuthStorageVersion,
-            Self.keychainAuthStorageVersion)
         if !config.profiles.contains(where: { $0.id == profileID }) {
             config.profiles.append(ProfileConfig(id: profileID, label: "Profile \(profileID)"))
         }
-        let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
-        try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
-    }
-
-    public func markAuthStorageVersion(_ version: Int) throws {
-        guard var config = self.loadConfig() else { return }
-        config.authStorageVersion = max(config.authStorageVersion ?? version, version)
         let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
         try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
     }
@@ -341,8 +328,7 @@ public struct ProfileConfigStore {
 
         var config = self.loadConfig() ?? AppConfig(
             profiles: [],
-            activeProfile: sortedIDs[0],
-            authStorageVersion: Self.keychainAuthStorageVersion)
+            activeProfile: sortedIDs[0])
         if config.activeProfile.isEmpty {
             config.activeProfile = sortedIDs[0]
         }
