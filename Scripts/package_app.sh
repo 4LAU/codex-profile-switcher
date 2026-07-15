@@ -97,14 +97,11 @@ profile_allows_access_group() {
   local plist="$1"
   local expected="$2"
   local wildcard="$TEAM_ID.*"
-  local index=0
   local group
 
-  while group="$(plist_value "$plist" ":Entitlements:keychain-access-groups:$index")"; do
-    [[ "$group" == "$expected" || "$group" == "$wildcard" ]] && return 0
-    index=$((index + 1))
-  done
-  return 1
+  group="$(plist_value "$plist" ':Entitlements:keychain-access-groups:0')" || return 1
+  [[ "$group" == "$expected" || "$group" == "$wildcard" ]] || return 1
+  ! plist_value "$plist" ':Entitlements:keychain-access-groups:1' >/dev/null 2>&1
 }
 
 profile_is_unexpired() {
