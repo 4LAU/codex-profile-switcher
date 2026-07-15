@@ -108,6 +108,18 @@ Implement these requirements:
 
 Before editing, rebuild with `./build.sh`. After editing, rebuild again and use an isolated SwiftUI/AppKit preview or running-app state to show stale-with-snapshot, stale-without-snapshot, and available states. Run `git diff --check`.
 
+### Task 3A: Keep cancelled refreshes from completing replacements
+
+Modify only `Sources/CodexProfileSwitcherApp/UsageProvider.swift`.
+
+Implement refresh-generation ownership so a cancelled task that finishes late cannot clear the running state or task reference of a newer refresh, flush its completion state, or call `onRefreshComplete` for that newer refresh. Preserve profile fetching, cancellation, cache, auth, and concurrency-limit behavior.
+
+Verify with a bounded one-off probe that starts refresh A, cancels it, starts refresh B, and lets A unwind after B begins. The observation must show that B remains the sole current refresh and only B emits completion. Do not add a test file.
+
+### Compressed remaining review
+
+Tasks 3A and 4 run in one serialized implementation pass and remain separate commits. After both land, one spec reviewer checks Tasks 3, 3A, and 4 together, followed by one quality reviewer over the same combined range. Run one final `./build.sh`, the focused existing suites, `make check`, all direct Wave 2 probes, and `git diff --check` before the Wave 2 merge.
+
 ### Wave 2 completion conditions
 
 - Each task is committed separately on the Wave 2 plan branch.

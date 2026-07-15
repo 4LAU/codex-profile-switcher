@@ -139,3 +139,11 @@ No wave mutates or deletes user data, so no backup or destructive inventory appr
 - **Product scope:** Unchanged. This is required to make the approved no-overlap and disabled-for-the-full-refresh behavior true.
 - **Approved by L:** pending.
 - **Logged by:** orchestrator.
+
+### 2026-07-15: AMENDMENT APPROVAL
+
+- **Approved change:** Add `Sources/CodexProfileSwitcherApp/UsageProvider.swift` to Wave 2 as inventory item 11 and add refresh-generation ownership.
+- **Expected count reconciled:** 1 requested source file, 1 approved source file.
+- **Execution adjustment:** Finish the race fix and cached-state label in one serialized implementation pass, then use one combined spec review, one combined quality review, and one full verification pass for the remaining Wave 2 diff.
+- **Approved by L:** 2026-07-15.
+- **Logged by:** orchestrator.
