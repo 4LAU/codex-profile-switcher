@@ -7,6 +7,7 @@ import CodexProfileCore
 final class UsageProvider {
     private let store: ProfileStore
     private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration: UUID?
     private var lastRefreshAll: Date = .distantPast
     private(set) var isRefreshing = false
     var onRefreshComplete: (() -> Void)?
@@ -16,9 +17,14 @@ final class UsageProvider {
     }
 
     func cancelRefreshes() {
+        let cancelledActiveRefresh = self.refreshGeneration != nil
         self.refreshTask?.cancel()
         self.refreshTask = nil
+        self.refreshGeneration = nil
         self.isRefreshing = false
+        if cancelledActiveRefresh {
+            self.store.flushCacheIfDirty()
+        }
     }
 
     func refreshAll(force: Bool = false) {
@@ -37,6 +43,8 @@ final class UsageProvider {
 
         self.lastRefreshAll = Date()
         self.isRefreshing = true
+        let generation = UUID()
+        self.refreshGeneration = generation
 
         let profiles = self.store.config.profiles
         let liveId = self.store.liveProfileId ?? ""
@@ -51,26 +59,31 @@ final class UsageProvider {
                 for _ in 0 ..< initialBatch {
                     let (id, cached) = pending.removeFirst()
                     group.addTask { @MainActor in
-                        await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
+                        await self.refreshProfile(
+                            id, activeProfileId: liveId, cached: cached, generation: generation)
                     }
                 }
                 for await _ in group {
                     if let (id, cached) = pending.popFirst() {
                         group.addTask { @MainActor in
-                            await self.refreshProfile(id, activeProfileId: liveId, cached: cached)
+                            await self.refreshProfile(
+                                id, activeProfileId: liveId, cached: cached, generation: generation)
                         }
                     }
                 }
             }
-            self.isRefreshing = false
-            self.refreshTask = nil
-            self.store.flushCacheIfDirty()
-            self.onRefreshComplete?()
+            if self.refreshGeneration == generation {
+                self.isRefreshing = false
+                self.refreshTask = nil
+                self.refreshGeneration = nil
+                self.store.flushCacheIfDirty()
+                self.onRefreshComplete?()
+            }
         }
     }
 
     private func refreshProfile(
-        _ id: String, activeProfileId: String, cached: UsageSnapshot?
+        _ id: String, activeProfileId: String, cached: UsageSnapshot?, generation: UUID
     ) async {
         guard !self.store.isAuthMutationInProgress() else { return }
         var diagnostics = ProfileRefreshDiagnostics(lastAttemptAt: Date())
@@ -85,7 +98,7 @@ final class UsageProvider {
         func finalize(_ status: ProfileStatus, decision: String) async {
             // Bail if the refresh was cancelled (e.g. by cancelRefreshes() during
             // a profile switch). Prevents in-flight stale writes from landing.
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.refreshGeneration == generation else { return }
 
             // Re-derive liveness at finalize time. The snapshot was fetched under
             // whichever credentials were live at refresh START; if the live
@@ -103,6 +116,7 @@ final class UsageProvider {
             let stillAvailable = currentlyLive
                 ? self.store.liveAuthExists()
                 : await Self.loadAuthAvailability(source: source, profileID: id)
+            guard !Task.isCancelled, self.refreshGeneration == generation else { return }
             if !stillAvailable {
                 let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
                 diagnostics.lastDecision = overrideDecision

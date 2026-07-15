@@ -6,14 +6,22 @@ struct SettingsActions {
     let reauthenticateProfile: (String, @escaping (Result<Void, SettingsActionError>) -> Void) -> Void
     let cancelLogin: (String) -> Bool
     let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
+    let refreshScheduleChanged: () -> Void
 }
 
 enum SettingsWindow {
     private static var windowController: NSWindowController?
 
-    static func show(store: ProfileStore, actions: SettingsActions) {
+    static func show(
+        store: ProfileStore,
+        refreshPreferences: RefreshPreferences,
+        actions: SettingsActions
+    ) {
         if let wc = Self.windowController {
-            wc.window?.contentView = NSHostingView(rootView: SettingsView(store: store, actions: actions))
+            wc.window?.contentView = NSHostingView(rootView: SettingsView(
+                store: store,
+                refreshPreferences: refreshPreferences,
+                actions: actions))
             wc.showWindow(nil)
             wc.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -29,7 +37,10 @@ enum SettingsWindow {
         window.center()
         window.isReleasedWhenClosed = false
 
-        let view = SettingsView(store: store, actions: actions)
+        let view = SettingsView(
+            store: store,
+            refreshPreferences: refreshPreferences,
+            actions: actions)
         window.contentView = NSHostingView(rootView: view)
 
         let wc = NSWindowController(window: window)
@@ -42,6 +53,7 @@ enum SettingsWindow {
 
 struct SettingsView: View {
     let store: ProfileStore
+    @ObservedObject var refreshPreferences: RefreshPreferences
     let actions: SettingsActions
     @State private var selectedTab = 0
     @StateObject private var toast = ToastState()
@@ -63,7 +75,11 @@ struct SettingsView: View {
 
                 switch self.selectedTab {
                 case 0: ProfilesTab(store: self.store, actions: self.actions, toast: self.toast)
-                case 1: GeneralTab(store: self.store, toast: self.toast)
+                case 1: GeneralTab(
+                    store: self.store,
+                    refreshPreferences: self.refreshPreferences,
+                    actions: self.actions,
+                    toast: self.toast)
                 case 2: AboutTab()
                 default: EmptyView()
                 }
@@ -446,6 +462,8 @@ struct ProfilesTab: View {
 
 struct GeneralTab: View {
     let store: ProfileStore
+    @ObservedObject var refreshPreferences: RefreshPreferences
+    let actions: SettingsActions
     @ObservedObject var toast: ToastState
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
@@ -462,6 +480,34 @@ struct GeneralTab: View {
                 Text("Opens automatically when your Mac starts.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("REFRESHING")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Picker("Refresh interval", selection: self.$refreshPreferences.interval) {
+                    ForEach(RefreshInterval.allCases) { interval in
+                        Text(self.refreshIntervalLabel(interval)).tag(interval)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: self.refreshPreferences.interval) { _, _ in
+                    self.actions.refreshScheduleChanged()
+                }
+
+                Toggle(
+                    "Refresh when the menu opens",
+                    isOn: self.$refreshPreferences.refreshWhenMenuOpens)
+
+                if self.refreshPreferences.interval == .manual {
+                    Text("Automatic background refresh is off. Refresh from the menu or press Command-R.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Divider()
@@ -503,6 +549,16 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func refreshIntervalLabel(_ interval: RefreshInterval) -> String {
+        switch interval {
+        case .manual: return "Manual"
+        case .oneMinute: return "1 min"
+        case .twoMinutes: return "2 min"
+        case .fiveMinutes: return "5 min"
+        case .fifteenMinutes: return "15 min"
+        }
     }
 }
 

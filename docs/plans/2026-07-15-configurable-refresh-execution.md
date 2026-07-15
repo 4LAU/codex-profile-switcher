@@ -126,3 +126,7 @@ Tasks 3A and 4 run in one serialized implementation pass and remain separate com
 - After each task, a separate spec reviewer confirms the task matches its requirements, followed by a separate quality reviewer with no open findings.
 - A final reviewer checks the whole Wave 2 diff for refresh lifecycle, menu tracking, preference persistence, accessibility, and stale-state correctness.
 - The merged program branch passes `./build.sh`, the existing focused tests, `make check`, `git diff --check`, and the direct checks named in the manifest gate.
+
+## Wave 2 Execution Log
+
+- **PLAN START 2026-07-15:** base `program/configurable-refresh`; base_sha `e47e4d1f2d179672a89b3cf9d37956e52c5aba69`; branch `plan/configurable-refresh-wave-2`; worktree `/Users/aaron/Code/codex-profile-switcher-3002-worktree3`; port none.
