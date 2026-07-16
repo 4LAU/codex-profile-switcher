@@ -187,6 +187,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.addItem(.separator())
         }
 
+        self.addUsageHeader()
+        self.menu.addItem(.separator())
+
         let healthRecords = ProfileHealth.build(
             profiles: self.store.config.profiles,
             statuses: self.store.statuses,
@@ -269,6 +272,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             y: 0,
             width: 290,
             height: self.cardHeight(for: health.status, hasDuplicate: duplicateLine != nil))
+
+        let menuItem = NSMenuItem()
+        menuItem.view = hostView
+        self.menu.addItem(menuItem)
+    }
+
+    private func addUsageHeader() {
+        let updatedAt = self.store.statuses.values
+            .compactMap { $0.snapshot?.fetchedAt }
+            .max()
+        let header = UsageHeaderView(
+            isRefreshing: self.usageProvider.isRefreshing,
+            updatedAt: updatedAt)
+        let hostView = NSHostingView(rootView: header)
+        hostView.frame = NSRect(x: 0, y: 0, width: 290, height: 42)
 
         let menuItem = NSMenuItem()
         menuItem.view = hostView
@@ -477,6 +495,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.refreshMenuItem?.setEnabled(false)
         self.usageProvider.refreshAll(force: force)
         self.refreshMenuItem?.setEnabled(!self.usageProvider.isRefreshing)
+        if self.isMenuOpen {
+            self.rebuildMenu()
+        }
     }
 
     @objc private func openSettings() {

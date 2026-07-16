@@ -50,6 +50,19 @@ func planDisplayName(_ raw: String?) -> String {
     }
 }
 
+func updatedLabel(from date: Date, now: Date = Date()) -> String {
+    let age = max(0, Int(now.timeIntervalSince(date)))
+    if age < 60 { return "Updated just now" }
+
+    let minutes = age / 60
+    if minutes < 60 { return "Updated \(minutes)m ago" }
+
+    let hours = minutes / 60
+    if hours < 24 { return "Updated \(hours)h ago" }
+
+    return "Updated \(hours / 24)d ago"
+}
+
 func creditsDisplayName(_ value: Double?) -> String? {
     guard let value else { return nil }
     let clamped = max(0, value)
@@ -204,6 +217,32 @@ struct UsageRow: View {
     }
 }
 
+struct UsageHeaderView: View {
+    let isRefreshing: Bool
+    let updatedAt: Date?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Codex")
+                .font(.system(size: 12, weight: .semibold))
+
+            Text(self.statusLabel)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(width: 290, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var statusLabel: String {
+        if self.isRefreshing { return "Refreshing..." }
+        guard let updatedAt else { return "No usage data" }
+        return updatedLabel(from: updatedAt)
+    }
+}
+
 struct ProfileCardView: View {
     let profile: ProfileConfig
     let status: ProfileStatus
@@ -251,12 +290,6 @@ struct ProfileCardView: View {
             Spacer()
 
             HStack(spacing: 5) {
-                if self.isStale {
-                    Text("Cached")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.warning)
-                }
-
                 if let credits = self.credits {
                     Text(credits)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -278,7 +311,7 @@ struct ProfileCardView: View {
         case .available(let snap):
             self.usageBars(snap)
         case .loading:
-            Text("Refreshing...")
+            Text("No data yet")
                 .font(.system(size: 10))
                 .foregroundStyle(self.metadataColor)
         case .stale(let snap):
@@ -344,11 +377,6 @@ struct ProfileCardView: View {
     private var credits: String? {
         guard let snap = self.status.snapshot else { return nil }
         return creditsDisplayName(snap.creditsRemaining)
-    }
-
-    private var isStale: Bool {
-        if case .stale = self.status { return true }
-        return false
     }
 
     private var titleColor: Color {
