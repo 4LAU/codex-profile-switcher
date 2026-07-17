@@ -347,6 +347,52 @@ PLIST
   fi
   assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "stale test PID changed live auth"
   assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "stale test PID changed active profile"
+
+  local protected_pid_file="$WORK_DIR/protected.pid"
+  "$valid_desktop" 60 &
+  local protected_pid=$!
+  printf '%s' "$protected_pid" > "$protected_pid_file"
+  local missing_apps_root="$WORK_DIR/missing-applications"
+  if CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_APP="$valid_app" \
+    CODEX_BUNDLED_CLI="$bundled" \
+    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$missing_apps_root" \
+    CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$protected_pid_file" \
+    CODEX_CLI="$FAKE_CODEX" \
+    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/missing-applications.err"; then
+    kill "$protected_pid" 2>/dev/null || true
+    wait "$protected_pid" 2>/dev/null || true
+    fail "switch succeeded with a missing isolated applications root"
+  fi
+  kill -0 "$protected_pid" 2>/dev/null || fail "missing isolated root signaled the protected desktop"
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "missing isolated root changed live auth"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "missing isolated root changed active profile"
+  kill "$protected_pid" 2>/dev/null || true
+  wait "$protected_pid" 2>/dev/null || true
+
+  local isolated_apps_root="$WORK_DIR/isolated-applications"
+  mkdir -p "$isolated_apps_root"
+  "$valid_desktop" 60 &
+  protected_pid=$!
+  printf '%s' "$protected_pid" > "$protected_pid_file"
+  if CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_APP="$valid_app" \
+    CODEX_BUNDLED_CLI="$bundled" \
+    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$isolated_apps_root" \
+    CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$protected_pid_file" \
+    CODEX_CLI="$FAKE_CODEX" \
+    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/outside-isolated-root.err"; then
+    kill "$protected_pid" 2>/dev/null || true
+    wait "$protected_pid" 2>/dev/null || true
+    fail "switch succeeded with CODEX_APP outside the isolated applications root"
+  fi
+  kill -0 "$protected_pid" 2>/dev/null || fail "outside CODEX_APP signaled the protected desktop"
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "outside CODEX_APP changed live auth"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "outside CODEX_APP changed active profile"
+  kill "$protected_pid" 2>/dev/null || true
+  wait "$protected_pid" 2>/dev/null || true
 }
 
 test_switch_rolls_back_after_auth_write_failure() {

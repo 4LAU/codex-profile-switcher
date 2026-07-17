@@ -57,7 +57,11 @@ public struct CodexDesktopLifecycle {
     public func resolveInstallation() throws -> CodexDesktopInstallation {
         let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP")
         if let appOverride {
-            return try self.installation(at: appOverride)
+            let installation = try self.installation(at: appOverride)
+            guard self.isAllowedTestInstallation(installation) else {
+                throw CodexDesktopLifecycleError.invalidInstallation(appOverride)
+            }
+            return installation
         }
         guard let installation = self.resolveInstallations().first else {
             throw CodexDesktopLifecycleError.installationNotFound
@@ -67,7 +71,10 @@ public struct CodexDesktopLifecycle {
 
     public func resolveBundledCLI() throws -> String {
         if let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP") {
-            _ = try self.installation(at: appOverride)
+            let installation = try self.installation(at: appOverride)
+            guard self.isAllowedTestInstallation(installation) else {
+                throw CodexDesktopLifecycleError.invalidInstallation(appOverride)
+            }
         }
         if let override = self.value("CODEX_PROFILE_TEST_BUNDLED_CLI")
             ?? self.value("CODEX_BUNDLED_CLI") {
@@ -160,9 +167,13 @@ public struct CodexDesktopLifecycle {
     }
 
     private func resolveInstallations() -> [CodexDesktopInstallation] {
+        if self.isolatedTestMode && self.isolatedTestApplicationsRoot() == nil {
+            return []
+        }
         let discovered = self.discoveredAppPaths().compactMap { try? self.installation(at: $0) }
         guard let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP"),
-              let explicit = try? self.installation(at: appOverride) else {
+              let explicit = try? self.installation(at: appOverride),
+              self.isAllowedTestInstallation(explicit) else {
             return discovered
         }
         let explicitPath = self.normalizePath(explicit.appPath ?? "")
@@ -173,15 +184,8 @@ public struct CodexDesktopLifecycle {
 
     private func discoveredAppPaths() -> [String] {
         let roots: [String]
-        let isolatedMode = self.value("CODEX_PROFILE_TEST_AUTH_STORE_DIR") != nil
-            || self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil
-            || self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1"
-        if isolatedMode {
-            guard let isolatedRoot = self.value("CODEX_PROFILE_TEST_APPLICATIONS_DIR"),
-                  self.fileManager.fileExists(atPath: isolatedRoot),
-                  (try? self.fileManager.contentsOfDirectory(atPath: isolatedRoot)) != nil else {
-                return []
-            }
+        if self.isolatedTestMode {
+            guard let isolatedRoot = self.isolatedTestApplicationsRoot() else { return [] }
             roots = [isolatedRoot]
         } else {
             roots = ["/Applications", self.fileManager.homeDirectoryForCurrentUser.path + "/Applications"]
@@ -190,6 +194,31 @@ public struct CodexDesktopLifecycle {
             (try? self.fileManager.contentsOfDirectory(atPath: root))?.filter { $0.hasSuffix(".app") }
                 .map { URL(fileURLWithPath: root).appendingPathComponent($0).path } ?? []
         }
+    }
+
+    private var isolatedTestMode: Bool {
+        self.value("CODEX_PROFILE_TEST_AUTH_STORE_DIR") != nil
+            || self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil
+            || self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1"
+    }
+
+    private func isolatedTestApplicationsRoot() -> String? {
+        guard let root = self.value("CODEX_PROFILE_TEST_APPLICATIONS_DIR"),
+              self.fileManager.fileExists(atPath: root),
+              (try? self.fileManager.contentsOfDirectory(atPath: root)) != nil else {
+            return nil
+        }
+        return root
+    }
+
+    private func isAllowedTestInstallation(_ installation: CodexDesktopInstallation) -> Bool {
+        guard self.isolatedTestMode else { return true }
+        guard let root = self.isolatedTestApplicationsRoot(),
+              let appPath = installation.appPath else { return false }
+        let normalizedRoot = self.normalizePath(root).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let normalizedApp = self.normalizePath(appPath)
+        return normalizedApp == "/" + normalizedRoot
+            || normalizedApp.hasPrefix("/" + normalizedRoot + "/")
     }
 
     private func requestNormalQuit() throws {
