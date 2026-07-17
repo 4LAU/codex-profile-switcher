@@ -219,8 +219,8 @@ enum CodexBridge {
                 do {
                     let lifecycle = CodexDesktopLifecycle()
                     _ = try lifecycle.resolveBundledCLI()
-                    let transaction = try prepareTransaction()
-                    if transaction.alreadyActive {
+                    let initialTransaction = try prepareTransaction()
+                    if initialTransaction.alreadyActive {
                         AppLogger.info("Profile switch skipped; profile is already active",
                                        metadata: ["profile": profileId])
                         continuation.resume(returning: .success(()))
@@ -228,6 +228,7 @@ enum CodexBridge {
                     }
 
                     try lifecycle.stopDesktop()
+                    let transaction = try prepareTransaction()
                     _ = try transaction.commit()
                     do {
                         let logDir = AppPaths().liveCodexHome.appendingPathComponent("logs", isDirectory: true)

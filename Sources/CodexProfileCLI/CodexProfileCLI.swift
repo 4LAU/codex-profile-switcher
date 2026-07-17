@@ -186,17 +186,22 @@ enum CodexProfileCLI {
         let workspace = try self.resolveWorkspace(requestedWorkspace)
         let lifecycle = CodexDesktopLifecycle()
         _ = try lifecycle.resolveBundledCLI()
-        let transaction = try ProfileTransactionService(
+        let initialTransaction = try ProfileTransactionService(
             vault: self.vault,
             paths: self.paths,
             isCodexDesktopRunning: lifecycle.isDesktopRunning
         ).prepareSwitch(to: profile)
-        if transaction.alreadyActive {
+        if initialTransaction.alreadyActive {
             self.note("Profile '\(profile)' is already active.")
             return
         }
 
         try lifecycle.stopDesktop()
+        let transaction = try ProfileTransactionService(
+            vault: self.vault,
+            paths: self.paths,
+            isCodexDesktopRunning: lifecycle.isDesktopRunning
+        ).prepareSwitch(to: profile)
         _ = try transaction.commit()
         do {
             let logURL = self.paths.liveCodexHome.appendingPathComponent("logs/desktop.log")

@@ -193,6 +193,11 @@ public struct CodexDesktopLifecycle {
         return roots.flatMap { root in
             (try? self.fileManager.contentsOfDirectory(atPath: root))?.filter { $0.hasSuffix(".app") }
                 .map { URL(fileURLWithPath: root).appendingPathComponent($0).path } ?? []
+        }.sorted { lhs, rhs in
+            let lhsIsCurrent = URL(fileURLWithPath: lhs).lastPathComponent == "ChatGPT.app"
+            let rhsIsCurrent = URL(fileURLWithPath: rhs).lastPathComponent == "ChatGPT.app"
+            if lhsIsCurrent != rhsIsCurrent { return lhsIsCurrent }
+            return self.normalizePath(lhs) < self.normalizePath(rhs)
         }
     }
 
@@ -259,9 +264,11 @@ public struct CodexDesktopLifecycle {
     }
 
     private func waitUntilRunning() -> Bool {
-        for _ in 0 ..< 40 {
+        let attempts = Int(self.value("CODEX_PROFILE_LAUNCH_ATTEMPTS") ?? "200") ?? 200
+        let sleepSeconds = Double(self.value("CODEX_PROFILE_LAUNCH_SLEEP") ?? "0.05") ?? 0.05
+        for _ in 0 ..< attempts {
             if self.isDesktopRunning() { return true }
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: sleepSeconds)
         }
         return self.isDesktopRunning()
     }
@@ -332,9 +339,12 @@ public struct CodexDesktopLifecycle {
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
         var data = [UInt8](repeating: 0, count: size)
         guard sysctl(&mib, 3, &data, &size, nil, 0) == 0 else { return [] }
-        return data.dropFirst(4).split(separator: 0).compactMap {
+        let argumentCount = data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        guard argumentCount > 0 else { return [] }
+        let values = data.dropFirst(4).split(separator: 0).compactMap {
             String(bytes: $0, encoding: .utf8)
         }
+        return Array(values.dropFirst().prefix(Int(argumentCount)))
     }
 
     private func normalizePath(_ path: String) -> String {

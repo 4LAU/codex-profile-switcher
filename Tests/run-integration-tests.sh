@@ -202,6 +202,20 @@ test_switch_current_chatgpt_layout_stops_running_desktop() {
   local workspace="$WORK_DIR"
   workspace="$(cd "$workspace" && pwd -P)"
   workspace="${workspace#/private}"
+  local legacy="$WORK_DIR/Codex.app"
+  local legacy_desktop="$legacy/Contents/MacOS/Codex"
+  local legacy_bundled="$legacy/Contents/Resources/codex"
+  mkdir -p "$(dirname "$legacy_desktop")" "$(dirname "$legacy_bundled")"
+  cat > "$legacy/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundleExecutable</key><string>Codex</string>
+</dict></plist>
+PLIST
+  cp /bin/sleep "$legacy_desktop"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$legacy_bundled"
+  chmod +x "$legacy_desktop" "$legacy_bundled"
   mkdir -p "$(dirname "$desktop")" "$(dirname "$bundled")"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -217,7 +231,9 @@ set -euo pipefail
 pid_file="$1"
 stopped="$2"
 event_log="$3"
-trap 'printf stopped > "$stopped"; printf "stop\\n" >> "$event_log"; exit 0' TERM INT
+refresh_source="$4"
+auth_path="$5"
+trap 'printf stopped > "$stopped"; printf "stop\\n" >> "$event_log"; cp "$refresh_source" "$auth_path"; exit 0' TERM INT
 printf '%s' "$$" > "$pid_file"
 while true; do sleep 0.05; done
 SCRIPT
@@ -228,16 +244,19 @@ set -euo pipefail
 printf 'launch:%s\n' "\$*" >> "$LAUNCH_LOG"
 if [[ "\${1:-}" == app ]]; then
   printf '%s' "\${2:-}" > "$workspace_log"
-  "$desktop" "$pid_file" "$stopped" "$event_log" &
+  "$desktop" "$pid_file" "$stopped" "$event_log" "$WORK_DIR/chatgpt-refreshed-a.json" "$TEST_HOME/.codex/auth.json" &
 fi
 SCRIPT
   chmod +x "$bundled"
 
   local saved_a="$WORK_DIR/chatgpt-saved-a.json"
   local live_a="$WORK_DIR/chatgpt-live-a.json"
+  local refreshed_a="$WORK_DIR/chatgpt-refreshed-a.json"
   local saved_b="$WORK_DIR/chatgpt-saved-b.json"
+  local exported_a="$WORK_DIR/chatgpt-exported-a.json"
   make_api_auth "$saved_a" "sk-test-chatgpt-a-1111111111111111" "saved-a"
   make_api_auth "$live_a" "sk-test-chatgpt-a-1111111111111111" "live-a"
+  make_api_auth "$refreshed_a" "sk-test-chatgpt-a-1111111111111111" "refreshed-a"
   make_api_auth "$saved_b" "sk-test-chatgpt-b-2222222222222222" "saved-b"
   save_auth "ChatGPTA" "$saved_a"
   save_auth "ChatGPTB" "$saved_b"
@@ -252,13 +271,12 @@ SCRIPT
     done
   ) &
   local watcher_pid=$!
-  "$desktop" "$pid_file" "$stopped" "$event_log" &
+  "$desktop" "$pid_file" "$stopped" "$event_log" "$refreshed_a" "$TEST_HOME/.codex/auth.json" &
   for _ in {1..40}; do [[ -f "$pid_file" ]] && break; sleep 0.05; done
   [[ -f "$pid_file" ]] || fail "fake ChatGPT desktop did not start"
 
   CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
-    CODEX_APP="$app" \
     CODEX_PROFILE_TEST_APPLICATIONS_DIR="$WORK_DIR" \
     CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$pid_file" \
     CODEX_CLI="$FAKE_CODEX" \
@@ -269,6 +287,8 @@ SCRIPT
 
   [[ -f "$stopped" ]] || fail "running ChatGPT desktop was not stopped before switch"
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected ChatGPT profile auth was not restored"
+  export_auth "ChatGPTA" "$exported_a"
+  assert_same_file "$exported_a" "$refreshed_a" "outgoing ChatGPT auth was not saved after desktop shutdown"
   wait_for_launch_log "launch:app" || fail "ChatGPT app was not relaunched"
   for _ in {1..40}; do [[ -f "$workspace_log" ]] && break; sleep 0.05; done
   [[ "$(<"$workspace_log")" == "$workspace" ]] || fail "ChatGPT app was relaunched without the workspace"
