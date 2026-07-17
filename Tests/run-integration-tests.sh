@@ -198,6 +198,7 @@ test_switch_current_chatgpt_layout_stops_running_desktop() {
   local pid_file="$WORK_DIR/chatgpt.pid"
   local stopped="$WORK_DIR/chatgpt.stopped"
   local workspace_log="$WORK_DIR/chatgpt-workspace.log"
+  local event_log="$WORK_DIR/chatgpt-events.log"
   local workspace="$WORK_DIR"
   workspace="$(cd "$workspace" && pwd -P)"
   workspace="${workspace#/private}"
@@ -215,7 +216,8 @@ PLIST
 set -euo pipefail
 pid_file="$1"
 stopped="$2"
-trap 'printf stopped > "$stopped"; exit 0' TERM INT
+event_log="$3"
+trap 'printf stopped > "$stopped"; printf "stop\\n" >> "$event_log"; exit 0' TERM INT
 printf '%s' "$$" > "$pid_file"
 while true; do sleep 0.05; done
 SCRIPT
@@ -226,7 +228,7 @@ set -euo pipefail
 printf 'launch:%s\n' "\$*" >> "$LAUNCH_LOG"
 if [[ "\${1:-}" == app ]]; then
   printf '%s' "\${2:-}" > "$workspace_log"
-  "$desktop" "$pid_file" "$stopped" &
+  "$desktop" "$pid_file" "$stopped" "$event_log" &
 fi
 SCRIPT
   chmod +x "$bundled"
@@ -240,7 +242,12 @@ SCRIPT
   save_auth "ChatGPTA" "$saved_a"
   save_auth "ChatGPTB" "$saved_b"
   cp "$live_a" "$TEST_HOME/.codex/auth.json"
-  "$desktop" "$pid_file" "$stopped" &
+  (
+    while ! cmp -s "$TEST_HOME/.codex/auth.json" "$saved_b"; do sleep 0.01; done
+    printf 'auth\n' >> "$event_log"
+  ) &
+  local watcher_pid=$!
+  "$desktop" "$pid_file" "$stopped" "$event_log" &
   for _ in {1..40}; do [[ -f "$pid_file" ]] && break; sleep 0.05; done
   [[ -f "$pid_file" ]] || fail "fake ChatGPT desktop did not start"
 
@@ -260,6 +267,9 @@ SCRIPT
   wait_for_launch_log "launch:app" || fail "ChatGPT app was not relaunched"
   for _ in {1..40}; do [[ -f "$workspace_log" ]] && break; sleep 0.05; done
   [[ "$(<"$workspace_log")" == "$workspace" ]] || fail "ChatGPT app was relaunched without the workspace"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  [[ "$(tr -d '\n' < "$event_log")" == stopauth ]] || fail "auth changed before ChatGPT stopped"
   kill "$(<"$pid_file")" 2>/dev/null || true
 }
 

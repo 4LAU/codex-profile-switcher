@@ -19,6 +19,7 @@ public enum CodexDesktopLifecycleError: LocalizedError {
     case installationNotFound
     case invalidInstallation(String)
     case bundledCLINotFound(String)
+    case unsafeTestBoundary
     case shutdownFailed
     case launchFailed(String)
 
@@ -30,6 +31,8 @@ public enum CodexDesktopLifecycleError: LocalizedError {
             return "Invalid Codex Desktop installation at " + path
         case .bundledCLINotFound(let path):
             return "Codex CLI not found at " + path
+        case .unsafeTestBoundary:
+            return "Refusing desktop shutdown without a fake test PID boundary"
         case .shutdownFailed:
             return "Codex Desktop is still running after shutdown attempts"
         case .launchFailed(let message):
@@ -109,7 +112,7 @@ public struct CodexDesktopLifecycle {
 
     public func stopDesktop() throws {
         guard self.isDesktopRunning() else { return }
-        self.requestNormalQuit()
+        try self.requestNormalQuit()
         if self.waitUntilStopped() { return }
         self.terminateDesktop(signal: SIGTERM)
         if self.waitUntilStopped() { return }
@@ -177,16 +180,16 @@ public struct CodexDesktopLifecycle {
         }
     }
 
-    private func requestNormalQuit() {
+    private func requestNormalQuit() throws {
         if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
            let pid = self.readPID(from: pidFile),
            pid > 0 {
             _ = kill(pid, SIGTERM)
             return
         }
-        if self.value("CODEX_PROFILE_HOME") != nil
-            || self.value("CODEX_PROFILE_TEST_AUTH_STORE_DIR") != nil {
-            return
+        if self.value("CODEX_PROFILE_TEST_AUTH_STORE_DIR") != nil
+            || self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
+            throw CodexDesktopLifecycleError.unsafeTestBoundary
         }
         _ = self.runAndWait(
             "/usr/bin/osascript",
@@ -195,6 +198,11 @@ public struct CodexDesktopLifecycle {
     }
 
     private func terminateDesktop(signal: Int32) {
+        if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
+           let pid = self.readPID(from: pidFile), pid > 0 {
+            _ = kill(pid, signal)
+            return
+        }
         guard let installation = try? self.resolveInstallation() else { return }
         if let executable = installation.executablePath {
             _ = self.runAndWait("/usr/bin/pkill", arguments: ["-\(signal == SIGKILL ? "KILL" : "TERM")", "-f", executable], quiet: true)
