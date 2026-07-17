@@ -22,6 +22,18 @@ struct StartupIdentityGateTests {
     }
 
     @Test
+    func installedBuildWithoutProductionCapabilityRequiresRecovery() throws {
+        let result = StartupIdentityGate.classify(
+            bundleURL: self.installedBundle,
+            environment: [:],
+            realHome: self.realHome,
+            hasDataProtectionKeychainAccess: false)
+
+        try envExpect(result == .recovery,
+                      "The installed bundle without the production capability must recover")
+    }
+
+    @Test
     func profileHomeOverrideUsesIsolatedIdentity() throws {
         let result = StartupIdentityGate.classify(
             bundleURL: URL(fileURLWithPath: "/tmp/dev/CodexProfileSwitcher.app"),
@@ -71,5 +83,28 @@ struct StartupIdentityGateTests {
 
         try envExpect(result == .recovery,
                       "An override resolving to the real home must recover")
+    }
+
+    @Test
+    func overrideSymlinkResolvingToRealHomeRequiresRecovery() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("startup-identity-gate-" + UUID().uuidString, isDirectory: true)
+        let realHomeDirectory = root.appendingPathComponent("home", isDirectory: true)
+        let realHome = URL(fileURLWithPath: realHomeDirectory.path)
+        let alias = root.appendingPathComponent("home-alias", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        try fileManager.createDirectory(at: realHomeDirectory, withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: alias.path, withDestinationPath: realHomeDirectory.path)
+
+        let result = StartupIdentityGate.classify(
+            bundleURL: URL(fileURLWithPath: "/tmp/dev/codex-profile-switcher"),
+            environment: ["CODEX_PROFILE_HOME": alias.path],
+            realHome: realHome,
+            hasDataProtectionKeychainAccess: true)
+
+        try envExpect(result == .recovery,
+                      "A symlink override resolving to the real home must recover")
     }
 }
