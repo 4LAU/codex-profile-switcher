@@ -296,6 +296,11 @@ SCRIPT
   wait "$watcher_pid" 2>/dev/null || true
   [[ "$(tr -d '\n' < "$event_log")" == stopauth ]] || fail "auth changed before ChatGPT stopped"
   kill "$(<"$pid_file")" 2>/dev/null || true
+  for _ in {1..40}; do
+    [[ "$(grep -c '^stop$' "$event_log")" -ge 2 ]] && break
+    sleep 0.05
+  done
+  [[ "$(grep -c '^stop$' "$event_log")" -ge 2 ]] || fail "relaunched fake ChatGPT did not stop"
 }
 
 test_switch_invalid_desktop_installation_preserves_state() {
