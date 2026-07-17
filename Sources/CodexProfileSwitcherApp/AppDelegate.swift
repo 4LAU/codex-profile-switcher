@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuRefreshRetryTask: Task<Void, Never>?
     private var hasPendingForcedRefresh = false
     private var hasPendingRecoveryNotice = false
+    private var hasShownRecoveryNotice = false
     private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
@@ -60,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         })
         self.menu.delegate = self
         self.statusItem.menu = self.menu
+        self.registerRecoveryNoticeObserver()
 
         self.registerWorkspaceObservers()
         self.usageProvider.onRefreshComplete = { [weak self] in
@@ -77,16 +79,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.menuRefreshRetryTask?.cancel()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
     }
 
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        guard self.store != nil, self.usageProvider != nil else { return }
         self.isMenuOpen = true
         self.syncActiveProfile()
-        let showRecoveryNotice = self.hasPendingRecoveryNotice
-        self.hasPendingRecoveryNotice = false
-        self.rebuildMenu(showRecoveryNotice: showRecoveryNotice)
+        self.rebuildMenu()
         if self.refreshPreferences.refreshWhenMenuOpens {
             self.requestRefresh(force: true)
             self.scheduleOpenMenuRefreshRetry()
@@ -95,6 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuDidClose(_ menu: NSMenu) {
         self.isMenuOpen = false
+        if self.hasShownRecoveryNotice {
+            self.hasPendingRecoveryNotice = false
+            self.hasShownRecoveryNotice = false
+        }
         self.menuRefreshRetryTask?.cancel()
         self.menuRefreshRetryTask = nil
     }
@@ -127,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func handleSystemWake() {
+        guard self.store != nil, self.usageProvider != nil else { return }
         AppLogger.info("System woke; forcing usage refresh")
         self.syncActiveProfile(force: true)
         self.updateIcon()
@@ -134,11 +141,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard self.store != nil, self.usageProvider != nil else { return }
         self.syncActiveProfile()
         self.requestRefresh()
     }
 
     private func handleRefreshComplete() {
+        guard self.store != nil, self.usageProvider != nil else { return }
         if self.hasPendingForcedRefresh {
             self.hasPendingForcedRefresh = false
             self.requestRefresh(force: true)
@@ -178,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Icon
 
     func updateIcon() {
+        guard self.store != nil, self.statusItem != nil else { return }
         guard let activeId = self.store.liveProfileId else {
             self.statusItem.button?.image = IconRenderer.renderEmpty()
             return
@@ -194,10 +204,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu Construction
 
-    private func rebuildMenu(showRecoveryNotice: Bool = false) {
+    private func rebuildMenu() {
         self.menu.removeAllItems()
 
-        if showRecoveryNotice {
+        if self.hasPendingRecoveryNotice {
             let noticeItem = NSMenuItem(
                 title: "Startup repaired — saved profiles unchanged",
                 action: nil,
@@ -208,6 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 accessibilityDescription: nil)
             self.menu.addItem(noticeItem)
             self.menu.addItem(.separator())
+            if self.isMenuOpen {
+                self.hasShownRecoveryNotice = true
+            }
         }
 
         if let warning = self.liveAuthWarning {
@@ -297,6 +310,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.hasPendingRecoveryNotice = true
         DispatchQueue.main.async { [weak self] in
             self?.statusItem.button?.performClick(nil)
+        }
+    }
+
+    private func registerRecoveryNoticeObserver() {
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(self.handleRecoveryNotice),
+            name: StartupIdentityGate.recoveryNoticeName,
+            object: nil)
+    }
+
+    @objc private func handleRecoveryNotice(_ notification: Notification) {
+        guard self.store != nil, self.usageProvider != nil else { return }
+        self.hasPendingRecoveryNotice = true
+        if self.isMenuOpen {
+            self.rebuildMenu()
+        } else {
+            self.statusItem.button?.performClick(nil)
         }
     }
 

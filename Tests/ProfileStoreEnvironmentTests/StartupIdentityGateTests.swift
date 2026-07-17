@@ -146,4 +146,87 @@ struct StartupIdentityGateTests {
         try envExpect(events == ["validate", "handoff", "terminate"],
                       "Recovery reached ProfileStore continuation or reordered handoff events")
     }
+
+    @Test
+    func recoveryCanonicalizesInjectedInstalledCandidate() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("startup-recovery-canonical-" + UUID().uuidString, isDirectory: true)
+        let target = root.appendingPathComponent("Applications/CodexProfileSwitcher.app", isDirectory: true)
+        let alias = root.appendingPathComponent("alias.app", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: target, withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: alias.path, withDestinationPath: target.path)
+
+        var validatedURL: URL?
+        var handedOffURL: URL?
+        _ = StartupIdentityGate.resolveRecovery(
+            decision: .recovery,
+            installedBundleURL: alias,
+            validateInstalledBundle: { url in
+                validatedURL = url
+                return true
+            },
+            handoff: { url, completion in
+                handedOffURL = url
+                completion(true)
+            },
+            scheduleTermination: {},
+            continueStartup: {})
+
+        let canonicalTarget = target.standardizedFileURL
+        try envExpect(validatedURL == canonicalTarget,
+                      "Recovery validation received a non-canonical installed URL")
+        try envExpect(handedOffURL == canonicalTarget,
+                      "Recovery handoff received a non-canonical installed URL")
+    }
+
+    @Test
+    func recoveryWaitsForCompletionAndIgnoresDuplicates() throws {
+        var complete: ((Bool) -> Void)?
+        var terminationCount = 0
+        let outcome = StartupIdentityGate.resolveRecovery(
+            decision: .recovery,
+            validateInstalledBundle: { _ in true },
+            handoff: { _, callback in complete = callback },
+            scheduleTermination: { terminationCount += 1 },
+            continueStartup: {})
+
+        try envExpect(outcome == .handedOff, "Recovery did not request an asynchronous handoff")
+        try envExpect(terminationCount == 0, "Recovery terminated before handoff completion")
+        complete?(true)
+        complete?(true)
+        try envExpect(terminationCount == 1,
+                      "Recovery did not schedule exactly one termination after completion")
+    }
+
+    @Test
+    func invalidRecoveryPresentsFailureAndNeverHandoffsOrContinues() throws {
+        var events: [String] = []
+        let outcome = StartupIdentityGate.resolveRecovery(
+            decision: .recovery,
+            validateInstalledBundle: { _ in false },
+            handoff: { _, _ in events.append("handoff") },
+            scheduleTermination: { events.append("terminate") },
+            continueStartup: { events.append("continue") },
+            presentInvalidCandidate: { events.append("present") })
+
+        try envExpect(outcome == .invalidCandidate, "Invalid recovery candidate was accepted")
+        try envExpect(events == ["present", "terminate"],
+                      "Invalid recovery reached handoff or continuation")
+    }
+
+    @Test
+    func runningInstalledInstanceGetsNoticeBeforeActivation() throws {
+        var events: [String] = []
+        let activated = StartupIdentityGate.activateValidatedRunningInstance(
+            runningBundleURL: URL(fileURLWithPath: "/tmp/alias.app"),
+            validatedURL: URL(fileURLWithPath: "/tmp/alias.app"),
+            postNotice: { events.append("notice") },
+            activate: { events.append("activate"); return true })
+
+        try envExpect(activated, "Validated running app was not activated")
+        try envExpect(events == ["notice", "activate"],
+                      "Running-app recovery notice was not sent before activation")
+    }
 }

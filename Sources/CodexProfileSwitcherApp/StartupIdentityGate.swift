@@ -17,6 +17,8 @@ enum StartupIdentityGate {
 
     static let installedBundleURL = URL(fileURLWithPath: "/Applications/CodexProfileSwitcher.app")
     static let recoveryLaunchArgument = "--codex-profile-switcher-recovery"
+    static let recoveryNoticeName =
+        Notification.Name("com.4lau.codex-profile-switcher.startup-repaired")
 
     private static let expectedBundleIdentifier = "com.4lau.codex-profile-switcher"
     private static let expectedTeamIdentifier = "W3ZHLSH96F"
@@ -44,6 +46,7 @@ enum StartupIdentityGate {
 
     static func resolveRecovery(
         decision: Decision,
+        installedBundleURL: URL = Self.installedBundleURL,
         validateInstalledBundle: (URL) -> Bool,
         handoff: (URL, @escaping (Bool) -> Void) -> Void,
         scheduleTermination: @escaping () -> Void,
@@ -54,7 +57,7 @@ enum StartupIdentityGate {
             return .continued
         }
 
-        let candidate = Self.installedBundleURL
+        let candidate = Self.canonicalURL(installedBundleURL)
         guard validateInstalledBundle(candidate) else {
             presentInvalidCandidate()
             scheduleTermination()
@@ -76,15 +79,19 @@ enum StartupIdentityGate {
     }
 
     static func validateInstalledBundle(_ candidate: URL) -> Bool {
-        guard Self.canonicalURL(candidate) == Self.canonicalURL(Self.installedBundleURL),
-              FileManager.default.fileExists(atPath: candidate.path) else {
+        let canonicalCandidate = Self.canonicalURL(candidate)
+        guard canonicalCandidate == Self.canonicalURL(Self.installedBundleURL),
+              FileManager.default.fileExists(atPath: canonicalCandidate.path) else {
             return false
         }
 
         var staticCode: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(candidate as CFURL, [], &staticCode) == errSecSuccess,
+        guard SecStaticCodeCreateWithPath(canonicalCandidate as CFURL, [], &staticCode) == errSecSuccess,
               let staticCode,
-              SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess else {
+              SecStaticCodeCheckValidity(
+                  staticCode,
+                  SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
+                  nil) == errSecSuccess else {
             return false
         }
 
@@ -114,16 +121,42 @@ enum StartupIdentityGate {
                 return Self.canonicalURL(url) == canonicalInstalledURL
         }
         if let running {
-            completion(running.activate(options: [.activateAllWindows]))
+            let activated = Self.activateValidatedRunningInstance(
+                runningBundleURL: running.bundleURL,
+                validatedURL: canonicalInstalledURL,
+                postNotice: Self.postRecoveryNotice,
+                activate: { running.activate(options: [.activateAllWindows]) })
+            completion(activated)
             return
         }
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.arguments = [Self.recoveryLaunchArgument]
         configuration.activates = true
+        configuration.allowsRunningApplicationSubstitution = false
         NSWorkspace.shared.openApplication(at: validatedURL, configuration: configuration) { application, error in
             completion(application != nil && error == nil)
         }
+    }
+
+    static func activateValidatedRunningInstance(
+        runningBundleURL: URL?,
+        validatedURL: URL,
+        postNotice: () -> Void,
+        activate: () -> Bool) -> Bool {
+        guard let runningBundleURL,
+              Self.canonicalURL(runningBundleURL) == Self.canonicalURL(validatedURL) else {
+            return false
+        }
+        postNotice()
+        return activate()
+    }
+
+    static func postRecoveryNotice() {
+        DistributedNotificationCenter.default().post(
+            name: Self.recoveryNoticeName,
+            object: nil,
+            userInfo: nil)
     }
 
     private static func profileHomeOverride(in environment: [String: String]) -> URL? {
