@@ -107,4 +107,43 @@ struct StartupIdentityGateTests {
         try envExpect(result == .recovery,
                       "A symlink override resolving to the real home must recover")
     }
+
+    @Test
+    func recoveryValidatesInstalledTargetAndNeverContinues() throws {
+        var events: [String] = []
+        var validatedURL: URL?
+        var handedOffURL: URL?
+        let decision = StartupIdentityGate.classify(
+            bundleURL: URL(fileURLWithPath: "/tmp/dev/codex-profile-switcher"),
+            environment: [:],
+            realHome: self.realHome,
+            hasDataProtectionKeychainAccess: true)
+        let outcome = StartupIdentityGate.resolveRecovery(
+            decision: decision,
+            validateInstalledBundle: { url in
+                validatedURL = url
+                events.append("validate")
+                return true
+            },
+            handoff: { url, completion in
+                events.append("handoff")
+                handedOffURL = url
+                completion(true)
+            },
+            scheduleTermination: {
+                events.append("terminate")
+            },
+            continueStartup: {
+                events.append("continue")
+            })
+
+        try envExpect(outcome == .handedOff, "Recovery did not report a successful handoff")
+        try envExpect(decision == .recovery, "A non-installed normal-home process did not enter recovery")
+        try envExpect(validatedURL == self.installedBundle,
+                      "Recovery did not validate the fixed installed bundle")
+        try envExpect(handedOffURL == self.installedBundle,
+                      "Recovery handed off to a non-installed candidate")
+        try envExpect(events == ["validate", "handoff", "terminate"],
+                      "Recovery reached ProfileStore continuation or reordered handoff events")
+    }
 }

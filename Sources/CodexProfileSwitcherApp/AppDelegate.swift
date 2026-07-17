@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isMenuOpen = false
     private var menuRefreshRetryTask: Task<Void, Never>?
     private var hasPendingForcedRefresh = false
+    private var hasPendingRecoveryNotice = false
     private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
@@ -30,6 +31,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         AppLogger.info("App launched", metadata: ["version": AppInfo.version])
+        let decision = StartupIdentityGate.classify(
+            bundleURL: Bundle.main.bundleURL,
+            environment: ProcessInfo.processInfo.environment,
+            realHome: FileManager.default.homeDirectoryForCurrentUser,
+            hasDataProtectionKeychainAccess: ProcessSigningIdentity.hasDataProtectionKeychainAccess)
+        let outcome = StartupIdentityGate.resolveRecovery(
+            decision: decision,
+            validateInstalledBundle: StartupIdentityGate.validateInstalledBundle,
+            handoff: StartupIdentityGate.handoffToInstalledApp,
+            scheduleTermination: { [weak self] in self?.scheduleRecoveryTermination() },
+            continueStartup: { [weak self] in self?.continueStartup() },
+            presentInvalidCandidate: { [weak self] in self?.presentRecoveryFailure() })
+        guard outcome == .continued else { return }
+    }
+
+    private func continueStartup() {
         self.store = ProfileStore()
         self.usageProvider = UsageProvider(store: self.store)
         self.syncActiveProfile(force: true)
@@ -52,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.startPeriodicRefreshTimer()
 
         self.sparkleUpdater.startIfBundledApp()
+        self.prepareRecoveryNoticeIfNeeded()
     }
 
     deinit {
@@ -66,7 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         self.isMenuOpen = true
         self.syncActiveProfile()
-        self.rebuildMenu()
+        let showRecoveryNotice = self.hasPendingRecoveryNotice
+        self.hasPendingRecoveryNotice = false
+        self.rebuildMenu(showRecoveryNotice: showRecoveryNotice)
         if self.refreshPreferences.refreshWhenMenuOpens {
             self.requestRefresh(force: true)
             self.scheduleOpenMenuRefreshRetry()
@@ -174,8 +194,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu Construction
 
-    private func rebuildMenu() {
+    private func rebuildMenu(showRecoveryNotice: Bool = false) {
         self.menu.removeAllItems()
+
+        if showRecoveryNotice {
+            let noticeItem = NSMenuItem(
+                title: "Startup repaired — saved profiles unchanged",
+                action: nil,
+                keyEquivalent: "")
+            noticeItem.isEnabled = false
+            noticeItem.image = NSImage(
+                systemSymbolName: "checkmark.circle.fill",
+                accessibilityDescription: nil)
+            self.menu.addItem(noticeItem)
+            self.menu.addItem(.separator())
+        }
 
         if let warning = self.liveAuthWarning {
             let warningItem = NSMenuItem(title: warning.message, action: nil, keyEquivalent: "")
@@ -255,6 +288,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quitItem.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
         quitItem.image?.size = NSSize(width: 13, height: 13)
         self.menu.addItem(quitItem)
+    }
+
+    private func prepareRecoveryNoticeIfNeeded() {
+        guard ProcessInfo.processInfo.arguments.contains(StartupIdentityGate.recoveryLaunchArgument) else {
+            return
+        }
+        self.hasPendingRecoveryNotice = true
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem.button?.performClick(nil)
+        }
+    }
+
+    private func scheduleRecoveryTermination() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(350)) {
+            AppLogger.info("Recovery process terminating after installed-app handoff")
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func presentRecoveryFailure() {
+        let alert = NSAlert()
+        alert.messageText = "Codex Profile Switcher needs the installed app"
+        alert.informativeText =
+            "Install and open the signed Codex Profile Switcher from /Applications, then try again."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func addProfileCard(for health: ProfileHealth) {
