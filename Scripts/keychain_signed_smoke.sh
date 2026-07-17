@@ -152,6 +152,15 @@ fi
 
 mkdir -p "$TEST_HOME/.codex" "$(dirname "$FAKE_APP_BIN")" "$(dirname "$FAKE_BUNDLED_CLI")"
 
+cat > "$FAKE_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundleExecutable</key><string>Codex</string>
+</dict></plist>
+PLIST
+
 cat > "$FAKE_APP_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -197,6 +206,7 @@ COMMON_ENV=(
   CODEX_PROFILE_DATA_PROTECTION_KEYCHAIN_SERVICE="$SERVICE"
   CODEX_PROFILE_LEGACY_KEYCHAIN_SERVICE="$LEGACY_SERVICE"
   CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1
+  CODEX_PROFILE_TEST_APPLICATIONS_DIR="$WORK_DIR"
   CODEX_APP="$FAKE_APP"
   CODEX_APP_BIN="$FAKE_APP_BIN"
   CODEX_CLI="$FAKE_CODEX"

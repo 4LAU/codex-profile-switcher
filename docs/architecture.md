@@ -25,7 +25,7 @@ macOS Keychain
 | `CodexProfileSwitcherApp` | SwiftUI menu bar app, usage polling, settings UI |
 | `CodexProfileCLI` | CLI helper for login, app switching, status, diagnostics, and scripted rotation (`best-auth`, `exec`, `import-auth`, `lease`) |
 | `CodexProfileCore/Auth` | Auth token parsing plus Keychain and file-backed vaults |
-| `CodexProfileCore/Profiles` | Shared config, paths, validation, and profile switch transactions |
+| `CodexProfileCore/Profiles` | Shared config, paths, validation, profile switch transactions, and Codex Desktop lifecycle |
 | `CodexProfileCore/Usage` | UI-independent usage fetching via Codex JSON-RPC, profile selection, and best-auth reporting |
 | `CodexProfileCore/Support` | Shared low-level helpers such as atomic file writes, the cross-process cache lock, redaction, and core log forwarding |
 | `CodexProfileSwitcherApp/AppDelegate.swift` | Menu bar lifecycle, status item ownership, refresh timers, and action dispatch |
@@ -34,7 +34,7 @@ macOS Keychain
 | `CodexProfileSwitcherApp/ProfileModels.swift` | View-layer profile and usage model types |
 | `CodexProfileSwitcherApp/ProfileStore.swift` | `@MainActor` profile state store — loads, saves, and publishes profile config |
 | `CodexProfileSwitcherApp/UsageProvider.swift` | `@MainActor` usage coordinator — schedules refreshes and merges snapshots |
-| `CodexProfileSwitcherApp/CodexBridge.swift` | Launches `codex app-server` and translates its JSON-RPC responses |
+| `CodexProfileSwitcherApp/CodexBridge.swift` | Uses the shared Codex Desktop lifecycle for profile switches and translates helper responses |
 | `CodexProfileSwitcherApp/DebugInfoBuilder.swift` | Assembles redacted debug info for clipboard copy |
 | `CodexProfileSwitcherApp/MenuViews.swift` | Menu card views and usage display helpers |
 | `CodexProfileSwitcherApp/SettingsViews.swift` | Settings window and profile management UI |
@@ -45,11 +45,11 @@ macOS Keychain
 
 1. Read and classify the current live auth.
 2. Refuse unreadable, unmanaged, or ambiguous live auth.
-3. Quit the running Codex instance at the CLI boundary.
+3. Resolve the `com.openai.codex` installation, stop its desktop process and app-server children, and verify shutdown.
 4. Save outgoing profile auth back to the vault.
 5. Restore selected profile auth to `~/.codex/auth.json`.
 6. Update `~/.codex-switcher/config.json`.
-7. Relaunch Codex.
+7. Relaunch through the bundled `codex app [workspace]` command and verify the desktop process started.
 
 ## Usage Polling
 

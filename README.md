@@ -78,8 +78,10 @@ real Keychain profiles, sign it with any Apple certificate:
 make install-cli APP_IDENTITY="Apple Development: you@example.com (TEAMID)"
 ```
 
-If Codex is not installed at `/Applications/Codex.app`, set `CODEX_APP` or
-`CODEX_CLI` before using the helper.
+The helper finds the installed Codex Desktop bundle by its `com.openai.codex`
+bundle identifier. This supports the current ChatGPT.app layout and the legacy
+Codex.app layout. Set `CODEX_APP`, `CODEX_CLI`, or `CODEX_BUNDLED_CLI` when you
+need to use an explicit installation or test fixture.
 
 To build a signed app bundle instead of loose binaries:
 
