@@ -357,8 +357,12 @@ JSON
 <key>CFBundleExecutable</key><string>ChatGPT</string>
   </dict></plist>
 PLIST
-  cp /bin/sleep "$valid_desktop"
-  /usr/bin/codesign --force --sign - "$valid_desktop" >/dev/null 2>&1
+  cat > "$valid_desktop" <<'SCRIPT'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+SCRIPT
+  chmod +x "$valid_desktop"
   local stale_pid_file="$WORK_DIR/stale.pid"
   printf '%s' "$$" > "$stale_pid_file"
   if CODEX_PROFILE_HOME="$TEST_HOME" \
