@@ -86,18 +86,13 @@ public enum CodexCLIResolver {
     private static let fileManager = FileManager.default
 
     public static func resolvePath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
-        if let override = environment["CODEX_CLI"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !override.isEmpty,
-           self.fileManager.isExecutableFile(atPath: override) {
-            return override
+        if let override = (environment["CODEX_PROFILE_TEST_CLI"] ?? environment["CODEX_CLI"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
+            return self.fileManager.isExecutableFile(atPath: override) ? override : nil
         }
 
-        let bundledRoot = environment["CODEX_APP"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? "/Applications/Codex.app"
-        let bundledCLI = URL(fileURLWithPath: bundledRoot)
-            .appendingPathComponent("Contents/Resources/codex")
-            .path
-        if self.fileManager.isExecutableFile(atPath: bundledCLI) {
+        if let bundledCLI = try? CodexDesktopLifecycle(environment: environment).resolveBundledCLI(),
+           self.fileManager.isExecutableFile(atPath: bundledCLI) {
             return bundledCLI
         }
 

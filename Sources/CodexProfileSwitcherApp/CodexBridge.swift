@@ -217,6 +217,8 @@ enum CodexBridge {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
+                    let lifecycle = CodexDesktopLifecycle()
+                    _ = try lifecycle.resolveBundledCLI()
                     let transaction = try prepareTransaction()
                     if transaction.alreadyActive {
                         AppLogger.info("Profile switch skipped; profile is already active",
@@ -225,10 +227,17 @@ enum CodexBridge {
                         return
                     }
 
-                    try Self.quitCodexApp()
+                    try lifecycle.stopDesktop()
                     _ = try transaction.commit()
                     do {
-                        try Self.launchCodexApp(workspacePath: workspacePath)
+                        let logDir = AppPaths().liveCodexHome.appendingPathComponent("logs", isDirectory: true)
+                        try FileManager.default.createDirectory(
+                            at: logDir,
+                            withIntermediateDirectories: true,
+                            attributes: [.posixPermissions: 0o700])
+                        try lifecycle.launch(
+                            workspacePath: workspacePath,
+                            logURL: logDir.appendingPathComponent("desktop.log"))
                     } catch let error as CodexBridgeError {
                         throw Self.committedLaunchFailure(error)
                     } catch {
@@ -253,9 +262,9 @@ enum CodexBridge {
         switch error.outcome {
         case .rolledBackAfterWriteFailure:
             return .switchRolledBack("Switch failed. Restored previous profile.")
-        case .committedButLaunchFailed:
+        case .committedButLaunchFailed(let error):
             return .switchCommittedButLaunchFailed(
-                "Profile switched. Codex Desktop may need a manual restart.")
+                "Profile switched, but Codex Desktop could not be relaunched: \(error.localizedDescription)")
         case .committed:
             return .stateUpdateFailed(error.localizedDescription)
         }
@@ -266,91 +275,7 @@ enum CodexBridge {
     }
 
     static func isCodexDesktopRunning() -> Bool {
-        Self.runAndWait("/usr/bin/pgrep", arguments: ["-x", "Codex"], quiet: true) == 0
-            || Self.runAndWait(
-                "/usr/bin/pgrep",
-                arguments: ["-f", "\(Self.codexBundledCLI()) app-server"],
-                quiet: true
-            ) == 0
-    }
-
-    private static func quitCodexApp() throws {
-        guard Self.isCodexDesktopRunning() else { return }
-        AppLogger.info("Quitting Codex before profile switch")
-        _ = Self.runAndWait("/usr/bin/osascript", arguments: ["-e", "tell application \"Codex\" to quit"])
-
-        let attempts = Int(Self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 10
-        let sleepSeconds = Double(Self.environment("CODEX_PROFILE_QUIT_SLEEP") ?? "") ?? 0.5
-        for _ in 0 ..< attempts {
-            if !Self.isCodexDesktopRunning() { return }
-            Thread.sleep(forTimeInterval: sleepSeconds)
-        }
-
-        AppLogger.warning("Codex still running after polite quit; sending SIGTERM")
-        _ = Self.runAndWait("/usr/bin/pkill", arguments: ["-TERM", "-x", "Codex"], quiet: true)
-        _ = Self.runAndWait(
-            "/usr/bin/pkill",
-            arguments: ["-TERM", "-f", "\(Self.codexBundledCLI()) app-server"],
-            quiet: true)
-
-        for _ in 0 ..< 10 {
-            if !Self.isCodexDesktopRunning() { return }
-            Thread.sleep(forTimeInterval: 0.5)
-        }
-
-        AppLogger.warning("Codex still running after SIGTERM; sending SIGKILL")
-        _ = Self.runAndWait("/usr/bin/pkill", arguments: ["-KILL", "-x", "Codex"], quiet: true)
-        _ = Self.runAndWait(
-            "/usr/bin/pkill",
-            arguments: ["-KILL", "-f", "\(Self.codexBundledCLI()) app-server"],
-            quiet: true)
-
-        for _ in 0 ..< 6 {
-            if !Self.isCodexDesktopRunning() { return }
-            Thread.sleep(forTimeInterval: 0.5)
-        }
-
-        throw CodexBridgeError.stateUpdateFailed(
-            "Codex or its app-server is still running. Quit Codex with Cmd+Q, then retry.")
-    }
-
-    private static func launchCodexApp(workspacePath: String?) throws {
-        let cli = Self.codexBundledCLI()
-        guard FileManager.default.isExecutableFile(atPath: cli) else {
-            throw CodexBridgeError.launchFailed("Codex CLI not found at \(cli)")
-        }
-        let logDir = AppPaths().liveCodexHome.appendingPathComponent("logs", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: logDir,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        let logFile = logDir.appendingPathComponent("desktop.log")
-        FileManager.default.createFile(
-            atPath: logFile.path,
-            contents: nil,
-            attributes: [.posixPermissions: 0o600])
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cli)
-        process.arguments = ["app"] + (workspacePath.map { [$0] } ?? [])
-        let handle = try FileHandle(forWritingTo: logFile)
-        process.standardOutput = handle
-        process.standardError = handle
-        do {
-            try process.run()
-            try? handle.close()
-        } catch {
-            try? handle.close()
-            throw CodexBridgeError.launchFailed(error.localizedDescription)
-        }
-    }
-
-    private static func codexAppPath() -> String {
-        Self.environment("CODEX_APP") ?? "/Applications/Codex.app"
-    }
-
-    private static func codexBundledCLI() -> String {
-        "\(Self.codexAppPath())/Contents/Resources/codex"
+        CodexDesktopLifecycle().isDesktopRunning()
     }
 
     private static func environment(_ key: String) -> String? {

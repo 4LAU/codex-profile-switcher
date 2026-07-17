@@ -184,26 +184,29 @@ enum CodexProfileCLI {
 
         let requestedWorkspace = args.dropFirst().first
         let workspace = try self.resolveWorkspace(requestedWorkspace)
-        let cli = self.codexBundledCLI()
-        guard self.fileManager.isExecutableFile(atPath: cli) else {
-            throw CLIError.message("Codex CLI not found at \(cli)")
-        }
+        let lifecycle = CodexDesktopLifecycle()
+        _ = try lifecycle.resolveBundledCLI()
         let transaction = try ProfileTransactionService(
             vault: self.vault,
             paths: self.paths,
-            isCodexDesktopRunning: self.codexDesktopRunning
+            isCodexDesktopRunning: lifecycle.isDesktopRunning
         ).prepareSwitch(to: profile)
         if transaction.alreadyActive {
             self.note("Profile '\(profile)' is already active.")
             return
         }
 
-        try self.quitCodexApp()
+        try lifecycle.stopDesktop()
         _ = try transaction.commit()
         do {
-            try self.launchCodexApp(workspace: workspace)
+            let logURL = self.paths.liveCodexHome.appendingPathComponent("logs/desktop.log")
+            try self.fileManager.createDirectory(
+                at: logURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try lifecycle.launch(workspacePath: workspace, logURL: logURL)
         } catch {
-            throw CLIError.message("Profile switched. Codex Desktop may need a manual restart.")
+            throw CLIError.message("Profile switched, but Codex Desktop could not be relaunched: \(error.localizedDescription)")
         }
     }
 
@@ -311,7 +314,7 @@ enum CodexProfileCLI {
         if let desktop = try? self.codexAppBinary() {
             self.note("Desktop: \(desktop)")
         } else {
-            self.note("Desktop: missing (\(self.codexAppPath())/Contents/MacOS/Codex)")
+            self.note("Desktop: missing (install ChatGPT or set CODEX_APP)")
         }
 
         if let cli = try? self.findCodexCLI() {
@@ -1389,56 +1392,6 @@ enum CodexProfileCLI {
         return nil
     }
 
-    private static func launchCodexApp(workspace: String?) throws {
-        let cli = self.codexBundledCLI()
-        guard self.fileManager.isExecutableFile(atPath: cli) else {
-            throw CLIError.message("Codex CLI not found at \(cli)")
-        }
-        let logDir = self.paths.liveCodexHome.appendingPathComponent("logs", isDirectory: true)
-        try self.ensurePrivateDir(logDir)
-        let logFile = logDir.appendingPathComponent("desktop.log")
-        self.fileManager.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600])
-
-        self.note("Launching Codex Desktop")
-        self.note("Log: \(logFile.path)")
-        if let workspace {
-            self.note("Workspace: \(workspace)")
-        } else {
-            self.note("Workspace: <default>")
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cli)
-        process.arguments = ["app"] + (workspace.map { [$0] } ?? [])
-        let handle = try FileHandle(forWritingTo: logFile)
-        process.standardOutput = handle
-        process.standardError = handle
-        try process.run()
-        try? handle.close()
-    }
-
-    private static func quitCodexApp() throws {
-        guard self.codexDesktopRunning() else { return }
-        self.note("Quitting existing Codex app...")
-        _ = self.runAndWait("/usr/bin/osascript", arguments: ["-e", "tell application \"Codex\" to quit"])
-
-        let attempts = Int(self.environment("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "") ?? 30
-        let sleepSeconds = Double(self.environment("CODEX_PROFILE_QUIT_SLEEP") ?? "") ?? 0.5
-        for _ in 0 ..< attempts {
-            if !self.codexDesktopRunning() { return }
-            Thread.sleep(forTimeInterval: sleepSeconds)
-        }
-        throw CLIError.message("Codex or its app-server is still running. Quit Codex with Cmd+Q, then retry.")
-    }
-
-    private static func codexDesktopRunning() -> Bool {
-        if self.environment("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
-            return false
-        }
-        return self.runAndWait("/usr/bin/pgrep", arguments: ["-x", "Codex"], quiet: true) == 0
-            || self.runAndWait("/usr/bin/pgrep", arguments: ["-f", "\(self.codexBundledCLI()) app-server"], quiet: true) == 0
-    }
-
     private static func findCodexCLI() throws -> String {
         if let override = self.environment("CODEX_CLI"), !override.isEmpty {
             guard self.fileManager.isExecutableFile(atPath: override) else {
@@ -1446,8 +1399,7 @@ enum CodexProfileCLI {
             }
             return override
         }
-        let bundled = self.codexBundledCLI()
-        if self.fileManager.isExecutableFile(atPath: bundled) {
+        if let bundled = try? CodexDesktopLifecycle().resolveBundledCLI() {
             return bundled
         }
         if let path = self.which("codex") {
@@ -1457,11 +1409,16 @@ enum CodexProfileCLI {
     }
 
     private static func codexAppBinary() throws -> String {
-        let path = self.environment("CODEX_APP_BIN") ?? "\(self.codexAppPath())/Contents/MacOS/Codex"
-        guard self.fileManager.isExecutableFile(atPath: path) else {
-            throw CLIError.message("Codex Desktop binary not found at \(path)")
+        if let override = self.environment("CODEX_APP_BIN") {
+            guard self.fileManager.isExecutableFile(atPath: override) else {
+                throw CLIError.message("Codex Desktop binary not found at \(override)")
+            }
+            return override
         }
-        return path
+        guard let executable = try CodexDesktopLifecycle().resolveInstallation().executablePath else {
+            throw CLIError.message("Codex Desktop binary not found")
+        }
+        return executable
     }
 
     private static func which(_ name: String) -> String? {
@@ -2234,14 +2191,6 @@ enum CodexProfileCLI {
             }
         }
         return parts.joined(separator: ":")
-    }
-
-    private static func codexAppPath() -> String {
-        self.environment("CODEX_APP") ?? "/Applications/Codex.app"
-    }
-
-    private static func codexBundledCLI() -> String {
-        self.environment("CODEX_BUNDLED_CLI") ?? "\(self.codexAppPath())/Contents/Resources/codex"
     }
 
     private static func environment(_ key: String) -> String? {

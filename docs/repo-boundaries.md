@@ -6,9 +6,9 @@ SwiftPM owns compile and test source membership. Add Swift code under `Sources/`
 
 | Target | Owns |
 |---|---|
-| `CodexProfileCore` | Auth blob parsing, auth vaults, profile config, paths, validation, atomic writes, redaction, usage/RPC clients, and profile switch transactions |
+| `CodexProfileCore` | Auth blob parsing, auth vaults, profile config, paths, validation, atomic writes, redaction, usage/RPC clients, profile switch transactions, and bundle-identity-based Codex Desktop lifecycle |
 | `CodexProfileSwitcherApp` | Menu bar lifecycle, SwiftUI views, settings, usage polling orchestration, icon rendering, launch-at-login, and Sparkle UI hooks |
-| `CodexProfileCLI` | Command parsing, Codex Desktop process control, isolated login, app launch, and terminal output |
+| `CodexProfileCLI` | Command parsing, lifecycle calls for Codex Desktop switching, isolated login, and terminal output |
 
 `CodexProfileCore` must stay UI-free. It may use Foundation and Security. It must not import AppKit, SwiftUI, Cocoa, or Sparkle. App-only orchestration, windows, menu items, status item ownership, and launch-at-login belong in `CodexProfileSwitcherApp`.
 

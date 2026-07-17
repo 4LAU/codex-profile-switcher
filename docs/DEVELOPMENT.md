@@ -4,7 +4,7 @@
 
 - macOS 14+
 - Xcode.app. The test runner uses SwiftPM and Swift Testing; the scripts set `DEVELOPER_DIR=/Applications/Xcode.app` when available.
-- [Codex Desktop](https://openai.com/codex/) installed (or `CODEX_APP` / `CODEX_CLI` overrides)
+- [ChatGPT](https://openai.com/codex/) with Codex Desktop installed (or `CODEX_APP` / `CODEX_CLI` overrides)
 
 ## Build
 
@@ -60,8 +60,9 @@ The public key must be set as `SPARKLE_ED_PUBLIC_KEY` in your environment for re
 | Variable | Purpose |
 |---|---|
 | `CODEX_PROFILE_HOME` | Config directory (default: `~/.codex-switcher`) |
-| `CODEX_APP` | Path to Codex.app (default: `/Applications/Codex.app`) |
+| `CODEX_APP` | Optional path to the Codex Desktop app bundle. Without it, the helper finds the installed `com.openai.codex` bundle, including ChatGPT.app and legacy Codex.app. |
 | `CODEX_CLI` | Path to Codex CLI binary |
+| `CODEX_BUNDLED_CLI` | Optional path to the app's bundled `codex` CLI |
 | `SPARKLE_ED_PUBLIC_KEY` | EdDSA public key for Sparkle update verification |
 
 `CODEX_PROFILE_KEYCHAIN_SERVICE` is no longer supported. Signed builds use the

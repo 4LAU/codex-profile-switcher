@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- Profile switching now finds Codex Desktop by its `com.openai.codex` bundle identity, including the current ChatGPT.app layout. It stops the running desktop and app-server before changing authentication, preserves the last workspace on relaunch, validates the bundled CLI first, and reports the actual launch error when relaunching fails.
+
 ## 0.5.7 -- 2026-07-15
 
 ### Fixed
