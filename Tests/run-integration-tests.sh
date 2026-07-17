@@ -355,9 +355,10 @@ JSON
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.openai.codex</string>
 <key>CFBundleExecutable</key><string>ChatGPT</string>
-</dict></plist>
+  </dict></plist>
 PLIST
   cp /bin/sleep "$valid_desktop"
+  /usr/bin/codesign --force --sign - "$valid_desktop" >/dev/null 2>&1
   local stale_pid_file="$WORK_DIR/stale.pid"
   printf '%s' "$$" > "$stale_pid_file"
   if CODEX_PROFILE_HOME="$TEST_HOME" \
