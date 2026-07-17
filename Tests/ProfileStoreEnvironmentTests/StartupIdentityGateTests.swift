@@ -108,7 +108,7 @@ struct StartupIdentityGateTests {
                       "A symlink override resolving to the real home must recover")
     }
 
-    @Test
+    @Test @MainActor
     func recoveryValidatesInstalledTargetAndNeverContinues() throws {
         var events: [String] = []
         var validatedURL: URL?
@@ -147,7 +147,7 @@ struct StartupIdentityGateTests {
                       "Recovery reached ProfileStore continuation or reordered handoff events")
     }
 
-    @Test
+    @Test @MainActor
     func recoveryCanonicalizesInjectedInstalledCandidate() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
@@ -181,9 +181,9 @@ struct StartupIdentityGateTests {
                       "Recovery handoff received a non-canonical installed URL")
     }
 
-    @Test
+    @Test @MainActor
     func recoveryWaitsForCompletionAndIgnoresDuplicates() throws {
-        var complete: ((Bool) -> Void)?
+        var complete: StartupIdentityGate.HandoffCompletion?
         var terminationCount = 0
         let outcome = StartupIdentityGate.resolveRecovery(
             decision: .recovery,
@@ -200,7 +200,7 @@ struct StartupIdentityGateTests {
                       "Recovery did not schedule exactly one termination after completion")
     }
 
-    @Test
+    @Test @MainActor
     func invalidRecoveryPresentsFailureAndNeverHandoffsOrContinues() throws {
         var events: [String] = []
         let outcome = StartupIdentityGate.resolveRecovery(
@@ -228,5 +228,43 @@ struct StartupIdentityGateTests {
         try envExpect(activated, "Validated running app was not activated")
         try envExpect(events == ["notice", "activate"],
                       "Running-app recovery notice was not sent before activation")
+    }
+
+    @Test @MainActor
+    func concurrentHandoffCompletionFinishesOnceOnMainActor() async throws {
+        var completion: StartupIdentityGate.HandoffCompletion?
+        var presentationCount = 0
+        var terminationCount = 0
+        var callbacksWereMainActor = true
+        var continued = false
+        _ = StartupIdentityGate.resolveRecovery(
+            decision: .recovery,
+            validateInstalledBundle: { _ in true },
+            handoff: { _, callback in completion = callback },
+            scheduleTermination: {
+                terminationCount += 1
+                callbacksWereMainActor = callbacksWereMainActor && Thread.isMainThread
+            },
+            continueStartup: { continued = true },
+            presentInvalidCandidate: {
+                presentationCount += 1
+                callbacksWereMainActor = callbacksWereMainActor && Thread.isMainThread
+            })
+        guard let completion else { try envFail("Recovery did not expose its handoff completion") }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<16 {
+                group.addTask {
+                    await Task.detached {
+                        await completion(false)
+                    }.value
+                }
+            }
+        }
+
+        try envExpect(presentationCount == 1, "Concurrent failures presented recovery UI more than once")
+        try envExpect(terminationCount == 1, "Concurrent failures scheduled termination more than once")
+        try envExpect(callbacksWereMainActor, "Recovery UI callbacks escaped the main actor")
+        try envExpect(!continued, "Concurrent recovery completion reached ProfileStore continuation")
     }
 }

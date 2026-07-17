@@ -3,6 +3,8 @@ import Cocoa
 import Security
 
 enum StartupIdentityGate {
+    typealias HandoffCompletion = @MainActor @Sendable (Bool) -> Void
+
     enum Decision: Equatable {
         case production
         case isolated
@@ -44,14 +46,15 @@ enum StartupIdentityGate {
         return .production
     }
 
+    @MainActor
     static func resolveRecovery(
         decision: Decision,
         installedBundleURL: URL = Self.installedBundleURL,
         validateInstalledBundle: (URL) -> Bool,
-        handoff: (URL, @escaping (Bool) -> Void) -> Void,
-        scheduleTermination: @escaping () -> Void,
-        continueStartup: @escaping () -> Void,
-        presentInvalidCandidate: @escaping () -> Void = {}) -> RecoveryOutcome {
+        handoff: @MainActor (URL, @escaping HandoffCompletion) -> Void,
+        scheduleTermination: @escaping @MainActor () -> Void,
+        continueStartup: @escaping @MainActor () -> Void,
+        presentInvalidCandidate: @escaping @MainActor () -> Void = {}) -> RecoveryOutcome {
         guard decision == .recovery else {
             continueStartup()
             return .continued
@@ -110,9 +113,10 @@ enum StartupIdentityGate {
         return groups.count == 1 && groups[0] == Self.expectedKeychainAccessGroup
     }
 
+    @MainActor
     static func handoffToInstalledApp(
         _ validatedURL: URL,
-        completion: @escaping (Bool) -> Void) {
+        completion: @escaping HandoffCompletion) {
         let canonicalInstalledURL = Self.canonicalURL(validatedURL)
         let running = NSRunningApplication.runningApplications(
             withBundleIdentifier: Self.expectedBundleIdentifier)
@@ -135,7 +139,9 @@ enum StartupIdentityGate {
         configuration.activates = true
         configuration.allowsRunningApplicationSubstitution = false
         NSWorkspace.shared.openApplication(at: validatedURL, configuration: configuration) { application, error in
-            completion(application != nil && error == nil)
+            Task { @MainActor in
+                completion(application != nil && error == nil)
+            }
         }
     }
 
