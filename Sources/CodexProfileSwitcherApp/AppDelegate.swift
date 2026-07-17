@@ -42,12 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             validateInstalledBundle: StartupIdentityGate.validateInstalledBundle,
             handoff: StartupIdentityGate.handoffToInstalledApp,
             scheduleTermination: { [weak self] in self?.scheduleRecoveryTermination() },
-            continueStartup: { [weak self] in self?.continueStartup() },
+            continueStartup: { [weak self] in self?.continueStartup(decision: decision) },
             presentInvalidCandidate: { [weak self] in self?.presentRecoveryFailure() })
         guard outcome == .continued else { return }
     }
 
-    private func continueStartup() {
+    private func continueStartup(decision: StartupIdentityGate.Decision) {
+        if decision == .production {
+            guard !self.terminateIfInstalledInstanceIsRunning() else { return }
+            LaunchAtLogin.migrateLegacyLaunchAgentIfNeeded()
+        }
+
         self.store = ProfileStore()
         self.usageProvider = UsageProvider(store: self.store)
         self.syncActiveProfile(force: true)
@@ -72,6 +77,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         self.sparkleUpdater.startIfBundledApp()
         self.prepareRecoveryNoticeIfNeeded()
+    }
+
+    private func terminateIfInstalledInstanceIsRunning() -> Bool {
+        let installedBundleURL = Self.canonicalURL(StartupIdentityGate.installedBundleURL)
+        let installedExecutableURL = Self.canonicalURL(
+            installedBundleURL.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher"))
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+
+        guard let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.4lau.codex-profile-switcher")
+            .first(where: { application in
+                guard application.processIdentifier != currentPID,
+                      let bundleURL = application.bundleURL,
+                      let executableURL = application.executableURL else { return false }
+                return Self.canonicalURL(bundleURL) == installedBundleURL
+                    && Self.canonicalURL(executableURL) == installedExecutableURL
+            }) else {
+            return false
+        }
+
+        AppLogger.info("Installed app is already running; activating it and terminating newcomer")
+        _ = running.activate(options: [.activateAllWindows])
+        _ = running.terminate()
+        return true
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.resolvingSymlinksInPath().standardizedFileURL
     }
 
     deinit {
