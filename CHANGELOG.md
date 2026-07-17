@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.13 -- 2026-07-17
+
+### Changed
+
+- Launch at Login now uses macOS Service Management instead of a saved path to one build. Existing signed installations safely migrate the old login item after the replacement is enabled.
+
 ### Fixed
 
 - Profile switching now finds Codex Desktop by its `com.openai.codex` bundle identity, including the current ChatGPT.app layout. It stops the running desktop and app-server before changing authentication, preserves the last workspace on relaunch, validates the bundled CLI first, and reports the actual launch error when relaunching fails.
+- Unsigned development builds can no longer open production profile data. If an old login item starts one, it hands control to the signed app without changing saved profiles, preventing repeated crash alerts and misleading re-login warnings.
 
 ## 0.5.7 -- 2026-07-15
 
