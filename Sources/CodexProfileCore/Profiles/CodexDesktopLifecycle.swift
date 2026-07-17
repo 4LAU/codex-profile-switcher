@@ -59,22 +59,10 @@ public struct CodexDesktopLifecycle {
         if let appOverride {
             return try self.installation(at: appOverride)
         }
-
-        if let bundledOverride = self.value("CODEX_PROFILE_TEST_BUNDLED_CLI")
-            ?? self.value("CODEX_BUNDLED_CLI") {
-            return CodexDesktopInstallation(
-                appPath: nil,
-                bundleIdentifier: Self.bundleIdentifier,
-                executablePath: nil,
-                bundledCLIPath: bundledOverride)
+        guard let installation = self.resolveInstallations().first else {
+            throw CodexDesktopLifecycleError.installationNotFound
         }
-
-        for candidate in self.discoveredAppPaths() {
-            if let installation = try? self.installation(at: candidate) {
-                return installation
-            }
-        }
-        throw CodexDesktopLifecycleError.installationNotFound
+        return installation
     }
 
     public func resolveBundledCLI() throws -> String {
@@ -94,20 +82,13 @@ public struct CodexDesktopLifecycle {
 
     public func isDesktopRunning() -> Bool {
         if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" { return false }
+        let installations = self.resolveInstallations()
         if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
            let pid = self.readPID(from: pidFile),
-           pid > 0 {
-            return kill(pid, 0) == 0
-        }
-        guard let installation = try? self.resolveInstallation() else { return false }
-        if let executable = installation.executablePath,
-           self.runAndWait("/usr/bin/pgrep", arguments: ["-f", executable], quiet: true) == 0 {
+           installations.contains(where: { self.process(pid, belongsTo: $0) }) {
             return true
         }
-        return self.runAndWait(
-            "/usr/bin/pgrep",
-            arguments: ["-f", installation.bundledCLIPath + " app-server"],
-            quiet: true) == 0
+        return !self.ownedPIDs(for: installations).isEmpty
     }
 
     public func stopDesktop() throws {
@@ -172,6 +153,14 @@ public struct CodexDesktopLifecycle {
             bundledCLIPath: bundledCLI)
     }
 
+    private func resolveInstallations() -> [CodexDesktopInstallation] {
+        if let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP") {
+            return [try? self.installation(at: appOverride)].compactMap { $0 }
+        }
+        let paths = self.discoveredAppPaths()
+        return paths.compactMap { try? self.installation(at: $0) }
+    }
+
     private func discoveredAppPaths() -> [String] {
         let roots = ["/Applications", self.fileManager.homeDirectoryForCurrentUser.path + "/Applications"]
         return roots.flatMap { root in
@@ -199,18 +188,15 @@ public struct CodexDesktopLifecycle {
 
     private func terminateDesktop(signal: Int32) {
         if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
-           let pid = self.readPID(from: pidFile), pid > 0 {
+           let pid = self.readPID(from: pidFile),
+           let installation = try? self.resolveInstallation(),
+           self.process(pid, belongsTo: installation) {
             _ = kill(pid, signal)
             return
         }
-        guard let installation = try? self.resolveInstallation() else { return }
-        if let executable = installation.executablePath {
-            _ = self.runAndWait("/usr/bin/pkill", arguments: ["-\(signal == SIGKILL ? "KILL" : "TERM")", "-f", executable], quiet: true)
+        for pid in self.ownedPIDs(for: self.resolveInstallations()) {
+            _ = kill(pid, signal)
         }
-        _ = self.runAndWait(
-            "/usr/bin/pkill",
-            arguments: ["-\(signal == SIGKILL ? "KILL" : "TERM")", "-f", installation.bundledCLIPath + " app-server"],
-            quiet: true)
     }
 
     private func waitUntilStopped() -> Bool {
@@ -244,6 +230,46 @@ public struct CodexDesktopLifecycle {
         return pid
     }
 
+    private func ownedPIDs(for installations: [CodexDesktopInstallation]) -> [Int32] {
+        let rows = self.runAndRead("/bin/ps", arguments: ["-axo", "pid=,command="])
+        return rows.split(whereSeparator: \.isNewline).compactMap { row in
+            let fields = row.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard let pid = fields.first.flatMap({ Int32($0) }), fields.count == 2 else { return nil }
+            let command = String(fields[1])
+            return installations.contains { self.commandBelongs(command, to: $0) } ? pid : nil
+        }
+    }
+
+    private func process(_ pid: Int32, belongsTo installation: CodexDesktopInstallation) -> Bool {
+        let state = self.runAndRead("/bin/ps", arguments: ["-p", String(pid), "-o", "stat="])
+        if state.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Z") { return false }
+        let command = self.runAndRead("/bin/ps", arguments: ["-p", String(pid), "-o", "command="])
+        return self.commandBelongs(command, to: installation)
+    }
+
+    private func commandBelongs(_ command: String, to installation: CodexDesktopInstallation) -> Bool {
+        let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        let normalizedTokens = tokens.map(self.normalizePath)
+        if let executable = installation.executablePath,
+           normalizedTokens.contains(self.normalizePath(executable)) {
+            return true
+        }
+        return zip(normalizedTokens, normalizedTokens.dropFirst()).contains {
+            $0.0 == self.normalizePath(installation.bundledCLIPath) && $0.1 == "app-server"
+        }
+    }
+
+    private func normalizePath(_ path: String) -> String {
+        var normalized = path
+        while normalized.contains("//") {
+            normalized = normalized.replacingOccurrences(of: "//", with: "/")
+        }
+        if normalized.hasPrefix("/private/") {
+            normalized = String(normalized.dropFirst("/private".count))
+        }
+        return normalized
+    }
+
     @discardableResult
     private func runAndWait(_ path: String, arguments: [String], quiet: Bool = false) -> Int32 {
         let process = Process()
@@ -256,5 +282,18 @@ public struct CodexDesktopLifecycle {
         guard (try? process.run()) != nil else { return 127 }
         process.waitUntilExit()
         return process.terminationStatus
+    }
+
+    private func runAndRead(_ path: String, arguments: [String]) -> String {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

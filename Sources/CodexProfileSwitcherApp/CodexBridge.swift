@@ -278,35 +278,6 @@ enum CodexBridge {
         CodexDesktopLifecycle().isDesktopRunning()
     }
 
-    private static func environment(_ key: String) -> String? {
-        let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value?.isEmpty == false ? value : nil
-    }
-
-    @discardableResult
-    private static func runAndWait(_ path: String, arguments: [String], quiet: Bool = false) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        if quiet {
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
-        }
-        do {
-            try process.run()
-        } catch {
-            AppLogger.error("Failed to launch process",
-                            metadata: [
-                                "path": path,
-                                "arguments": arguments.joined(separator: " "),
-                                "error": error.localizedDescription,
-                            ])
-            return 127
-        }
-        process.waitUntilExit()
-        return process.terminationStatus
-    }
-
     static func startLogin(
         profileId: String,
         completion: @escaping (Result<Void, CodexBridgeError>) -> Void

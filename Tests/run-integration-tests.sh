@@ -243,8 +243,13 @@ SCRIPT
   save_auth "ChatGPTB" "$saved_b"
   cp "$live_a" "$TEST_HOME/.codex/auth.json"
   (
-    while ! cmp -s "$TEST_HOME/.codex/auth.json" "$saved_b"; do sleep 0.01; done
-    printf 'auth\n' >> "$event_log"
+    for _ in {1..400}; do
+      if cmp -s "$TEST_HOME/.codex/auth.json" "$saved_b"; then
+        printf 'auth\n' >> "$event_log"
+        break
+      fi
+      sleep 0.01
+    done
   ) &
   local watcher_pid=$!
   "$desktop" "$pid_file" "$stopped" "$event_log" &
@@ -254,7 +259,6 @@ SCRIPT
   CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
     CODEX_APP="$app" \
-    CODEX_BUNDLED_CLI="$bundled" \
     CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$pid_file" \
     CODEX_CLI="$FAKE_CODEX" \
     CODEX_PROFILE_QUIT_ATTEMPTS=20 \
