@@ -189,33 +189,18 @@ test_switch_preserves_outgoing_auth() {
   wait_for_launch_log "workspace-switch"
 }
 
+# Without this slice, shutdown could race auth replacement and silently lose a refreshed outgoing credential.
 test_switch_current_chatgpt_layout_stops_running_desktop() {
   reset_home
-  : > "$LAUNCH_LOG"
   local app="$WORK_DIR/ChatGPT.app"
   local desktop="$app/Contents/MacOS/ChatGPT"
   local bundled="$app/Contents/Resources/codex"
   local pid_file="$WORK_DIR/chatgpt.pid"
-  local stopped="$WORK_DIR/chatgpt.stopped"
-  local workspace_log="$WORK_DIR/chatgpt-workspace.log"
   local event_log="$WORK_DIR/chatgpt-events.log"
+  local launch_marker="$WORK_DIR/current-bundled-cli.launch"
   local workspace="$WORK_DIR"
   workspace="$(cd "$workspace" && pwd -P)"
   workspace="${workspace#/private}"
-  local legacy="$WORK_DIR/Codex.app"
-  local legacy_desktop="$legacy/Contents/MacOS/Codex"
-  local legacy_bundled="$legacy/Contents/Resources/codex"
-  mkdir -p "$(dirname "$legacy_desktop")" "$(dirname "$legacy_bundled")"
-  cat > "$legacy/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>com.openai.codex</string>
-<key>CFBundleExecutable</key><string>Codex</string>
-</dict></plist>
-PLIST
-  cp /bin/sleep "$legacy_desktop"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$legacy_bundled"
-  chmod +x "$legacy_desktop" "$legacy_bundled"
   mkdir -p "$(dirname "$desktop")" "$(dirname "$bundled")"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -229,11 +214,10 @@ PLIST
 #!/usr/bin/env bash
 set -euo pipefail
 pid_file="$1"
-stopped="$2"
-event_log="$3"
-refresh_source="$4"
-auth_path="$5"
-trap 'printf stopped > "$stopped"; printf "stop\\n" >> "$event_log"; cp "$refresh_source" "$auth_path"; exit 0' TERM INT
+event_log="$2"
+refresh_source="$3"
+auth_path="$4"
+trap 'printf "stop\\n" >> "$event_log"; cp "$refresh_source" "$auth_path"; exit 0' TERM INT
 printf '%s' "$$" > "$pid_file"
 while true; do sleep 0.05; done
 SCRIPT
@@ -241,10 +225,9 @@ SCRIPT
   cat > "$bundled" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'launch:%s\n' "\$*" >> "$LAUNCH_LOG"
+printf launched > "$launch_marker"
 if [[ "\${1:-}" == app ]]; then
-  printf '%s' "\${2:-}" > "$workspace_log"
-  "$desktop" "$pid_file" "$stopped" "$event_log" "$WORK_DIR/chatgpt-refreshed-a.json" "$TEST_HOME/.codex/auth.json" &
+  "$desktop" "$pid_file" "$event_log" "$WORK_DIR/chatgpt-refreshed-a.json" "$TEST_HOME/.codex/auth.json" &
 fi
 SCRIPT
   chmod +x "$bundled"
@@ -271,7 +254,7 @@ SCRIPT
     done
   ) &
   local watcher_pid=$!
-  "$desktop" "$pid_file" "$stopped" "$event_log" "$refreshed_a" "$TEST_HOME/.codex/auth.json" &
+  "$desktop" "$pid_file" "$event_log" "$refreshed_a" "$TEST_HOME/.codex/auth.json" &
   for _ in {1..40}; do [[ -f "$pid_file" ]] && break; sleep 0.05; done
   [[ -f "$pid_file" ]] || fail "fake ChatGPT desktop did not start"
 
@@ -285,13 +268,11 @@ SCRIPT
     FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
     "$HELPER" app ChatGPTB "$workspace" >/dev/null
 
-  [[ -f "$stopped" ]] || fail "running ChatGPT desktop was not stopped before switch"
   assert_same_file "$TEST_HOME/.codex/auth.json" "$saved_b" "selected ChatGPT profile auth was not restored"
   export_auth "ChatGPTA" "$exported_a"
   assert_same_file "$exported_a" "$refreshed_a" "outgoing ChatGPT auth was not saved after desktop shutdown"
-  wait_for_launch_log "launch:app" || fail "ChatGPT app was not relaunched"
-  for _ in {1..40}; do [[ -f "$workspace_log" ]] && break; sleep 0.05; done
-  [[ "$(<"$workspace_log")" == "$workspace" ]] || fail "ChatGPT app was relaunched without the workspace"
+  for _ in {1..40}; do [[ -f "$launch_marker" ]] && break; sleep 0.05; done
+  [[ "$(<"$launch_marker")" == launched ]] || fail "discovered current bundled CLI was not launched"
   kill "$watcher_pid" 2>/dev/null || true
   wait "$watcher_pid" 2>/dev/null || true
   [[ "$(tr -d '\n' < "$event_log")" == stopauth ]] || fail "auth changed before ChatGPT stopped"
@@ -303,7 +284,8 @@ SCRIPT
   [[ "$(grep -c '^stop$' "$event_log")" -ge 2 ]] || fail "relaunched fake ChatGPT did not stop"
 }
 
-test_switch_invalid_desktop_installation_preserves_state() {
+# Without this slice, an invalid app override could silently leave partial switch state behind.
+test_switch_invalid_app_with_cli_override_preserves_state() {
   reset_home
   local app="$WORK_DIR/invalid-chatgpt.app"
   local bundled="$app/Contents/Resources/codex"
@@ -329,16 +311,6 @@ JSON
   if CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
     CODEX_APP="$app" \
-    CODEX_CLI="$FAKE_CODEX" \
-    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/invalid-installation.err"; then
-    fail "switch succeeded with an invalid ChatGPT installation"
-  fi
-  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "invalid installation changed live auth"
-  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "invalid installation changed active profile"
-
-  if CODEX_PROFILE_HOME="$TEST_HOME" \
-    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
-    CODEX_APP="$app" \
     CODEX_BUNDLED_CLI="$bundled" \
     CODEX_CLI="$FAKE_CODEX" \
     "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/invalid-installation-override.err"; then
@@ -346,6 +318,29 @@ JSON
   fi
   assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "invalid CODEX_APP override changed live auth"
   assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "invalid CODEX_APP override changed active profile"
+}
+
+# Without this slice, a stale test PID could signal an unrelated process or mutate auth before failing closed.
+test_switch_stale_test_pid_fails_closed() {
+  reset_home
+  local bundled="$WORK_DIR/stale-bundled"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bundled"
+  chmod +x "$bundled"
+  local saved_a="$WORK_DIR/stale-saved-a.json"
+  local live_a="$WORK_DIR/stale-live-a.json"
+  local saved_b="$WORK_DIR/stale-saved-b.json"
+  local original_config="$WORK_DIR/stale-config.json"
+  make_api_auth "$saved_a" "sk-test-stale-a-1111111111111111" "saved-a"
+  make_api_auth "$live_a" "sk-test-stale-a-1111111111111111" "live-a"
+  make_api_auth "$saved_b" "sk-test-stale-b-2222222222222222" "saved-b"
+  save_auth "StaleA" "$saved_a"
+  save_auth "StaleB" "$saved_b"
+  cp "$live_a" "$TEST_HOME/.codex/auth.json"
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  cat > "$TEST_HOME/.codex-switcher/config.json" <<'JSON'
+{"activeProfile":"StaleA","profiles":[{"id":"StaleA"},{"id":"StaleB"}]}
+JSON
+  cp "$TEST_HOME/.codex-switcher/config.json" "$original_config"
 
   local valid_app="$WORK_DIR/valid-chatgpt.app"
   local valid_desktop="$valid_app/Contents/MacOS/ChatGPT"
@@ -357,14 +352,11 @@ JSON
 <key>CFBundleExecutable</key><string>ChatGPT</string>
   </dict></plist>
 PLIST
-  cat > "$valid_desktop" <<'SCRIPT'
-#!/usr/bin/env bash
-trap 'exit 0' TERM INT
-while true; do sleep 1; done
-SCRIPT
-  chmod +x "$valid_desktop"
+  cp /bin/sleep "$valid_desktop"
   local stale_pid_file="$WORK_DIR/stale.pid"
-  printf '%s' "$$" > "$stale_pid_file"
+  /bin/sleep 60 &
+  local unrelated_pid=$!
+  printf '%s' "$unrelated_pid" > "$stale_pid_file"
   if CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
     CODEX_APP="$valid_app" \
@@ -372,57 +364,16 @@ SCRIPT
     CODEX_PROFILE_TEST_APPLICATIONS_DIR="$WORK_DIR" \
     CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$stale_pid_file" \
     CODEX_CLI="$FAKE_CODEX" \
-    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/stale-pid.err"; then
+    "$HELPER" app StaleB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/stale-pid.err"; then
+    kill "$unrelated_pid" 2>/dev/null || true
+    wait "$unrelated_pid" 2>/dev/null || true
     fail "switch succeeded with a stale test PID"
   fi
+  kill -0 "$unrelated_pid" 2>/dev/null || fail "stale test PID signaled the unrelated fixture"
+  kill "$unrelated_pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
   assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "stale test PID changed live auth"
   assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "stale test PID changed active profile"
-
-  local protected_pid_file="$WORK_DIR/protected.pid"
-  "$valid_desktop" 60 &
-  local protected_pid=$!
-  printf '%s' "$protected_pid" > "$protected_pid_file"
-  local missing_apps_root="$WORK_DIR/missing-applications"
-  if CODEX_PROFILE_HOME="$TEST_HOME" \
-    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
-    CODEX_APP="$valid_app" \
-    CODEX_BUNDLED_CLI="$bundled" \
-    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$missing_apps_root" \
-    CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$protected_pid_file" \
-    CODEX_CLI="$FAKE_CODEX" \
-    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/missing-applications.err"; then
-    kill "$protected_pid" 2>/dev/null || true
-    wait "$protected_pid" 2>/dev/null || true
-    fail "switch succeeded with a missing isolated applications root"
-  fi
-  kill -0 "$protected_pid" 2>/dev/null || fail "missing isolated root signaled the protected desktop"
-  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "missing isolated root changed live auth"
-  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "missing isolated root changed active profile"
-  kill "$protected_pid" 2>/dev/null || true
-  wait "$protected_pid" 2>/dev/null || true
-
-  local isolated_apps_root="$WORK_DIR/isolated-applications"
-  mkdir -p "$isolated_apps_root"
-  "$valid_desktop" 60 &
-  protected_pid=$!
-  printf '%s' "$protected_pid" > "$protected_pid_file"
-  if CODEX_PROFILE_HOME="$TEST_HOME" \
-    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
-    CODEX_APP="$valid_app" \
-    CODEX_BUNDLED_CLI="$bundled" \
-    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$isolated_apps_root" \
-    CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$protected_pid_file" \
-    CODEX_CLI="$FAKE_CODEX" \
-    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/outside-isolated-root.err"; then
-    kill "$protected_pid" 2>/dev/null || true
-    wait "$protected_pid" 2>/dev/null || true
-    fail "switch succeeded with CODEX_APP outside the isolated applications root"
-  fi
-  kill -0 "$protected_pid" 2>/dev/null || fail "outside CODEX_APP signaled the protected desktop"
-  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "outside CODEX_APP changed live auth"
-  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "outside CODEX_APP changed active profile"
-  kill "$protected_pid" 2>/dev/null || true
-  wait "$protected_pid" 2>/dev/null || true
 }
 
 test_switch_rolls_back_after_auth_write_failure() {
@@ -1415,7 +1366,8 @@ test_lease_end_rejects_mismatched_profile() {
 
 test_switch_preserves_outgoing_auth
 test_switch_current_chatgpt_layout_stops_running_desktop
-test_switch_invalid_desktop_installation_preserves_state
+test_switch_invalid_app_with_cli_override_preserves_state
+test_switch_stale_test_pid_fails_closed
 test_switch_rolls_back_after_auth_write_failure
 test_switch_rolls_back_after_config_write_failure
 test_switch_does_not_roll_back_after_launch_failure

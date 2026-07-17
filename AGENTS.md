@@ -81,10 +81,6 @@ codex-profile-switcher
 
 Save working plans to `.plans/` (gitignored), not to any planning skill's default location. Plan or manifest docs that are meant to ship with a feature go in `docs/plans/` (tracked); everything else in `docs/` is public documentation.
 
-## Testing
-
-Testing policy lives in `docs/testing-policy.md` (self-contained; this is a public repo — do not point it at any private global policy). Thesis: test only behaviors that fail silently — the account/auth/usage/credential-safety invariants — and lean on the hermetic integration suite (`Tests/run-integration-tests.sh`) over unit tests. Everything else is a delete candidate.
-
 ## Open Source Hygiene
 
 This is a public open source project. Before committing:
