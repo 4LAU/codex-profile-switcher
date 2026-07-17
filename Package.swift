@@ -30,6 +30,7 @@ let package = Package(
                 .linkedFramework("Cocoa"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Security"),
+                .linkedFramework("ServiceManagement"),
             ]),
         .executableTarget(
             name: "CodexProfileCLI",
