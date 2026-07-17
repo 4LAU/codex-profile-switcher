@@ -259,6 +259,7 @@ SCRIPT
   CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
     CODEX_APP="$app" \
+    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$WORK_DIR" \
     CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$pid_file" \
     CODEX_CLI="$FAKE_CODEX" \
     CODEX_PROFILE_QUIT_ATTEMPTS=20 \
@@ -309,6 +310,43 @@ JSON
   fi
   assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "invalid installation changed live auth"
   assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "invalid installation changed active profile"
+
+  if CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_APP="$app" \
+    CODEX_BUNDLED_CLI="$bundled" \
+    CODEX_CLI="$FAKE_CODEX" \
+    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/invalid-installation-override.err"; then
+    fail "switch succeeded with invalid CODEX_APP and valid CODEX_BUNDLED_CLI"
+  fi
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "invalid CODEX_APP override changed live auth"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "invalid CODEX_APP override changed active profile"
+
+  local valid_app="$WORK_DIR/valid-chatgpt.app"
+  local valid_desktop="$valid_app/Contents/MacOS/ChatGPT"
+  mkdir -p "$(dirname "$valid_desktop")"
+  cat > "$valid_app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundleExecutable</key><string>ChatGPT</string>
+</dict></plist>
+PLIST
+  cp /bin/sleep "$valid_desktop"
+  local stale_pid_file="$WORK_DIR/stale.pid"
+  printf '%s' "$$" > "$stale_pid_file"
+  if CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_APP="$valid_app" \
+    CODEX_BUNDLED_CLI="$bundled" \
+    CODEX_PROFILE_TEST_APPLICATIONS_DIR="$WORK_DIR" \
+    CODEX_PROFILE_TEST_DESKTOP_PID_FILE="$stale_pid_file" \
+    CODEX_CLI="$FAKE_CODEX" \
+    "$HELPER" app InvalidB "$WORK_DIR" >/dev/null 2>"$WORK_DIR/stale-pid.err"; then
+    fail "switch succeeded with a stale test PID"
+  fi
+  assert_same_file "$TEST_HOME/.codex/auth.json" "$live_a" "stale test PID changed live auth"
+  assert_same_file "$TEST_HOME/.codex-switcher/config.json" "$original_config" "stale test PID changed active profile"
 }
 
 test_switch_rolls_back_after_auth_write_failure() {

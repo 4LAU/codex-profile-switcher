@@ -66,6 +66,9 @@ public struct CodexDesktopLifecycle {
     }
 
     public func resolveBundledCLI() throws -> String {
+        if let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP") {
+            _ = try self.installation(at: appOverride)
+        }
         if let override = self.value("CODEX_PROFILE_TEST_BUNDLED_CLI")
             ?? self.value("CODEX_BUNDLED_CLI") {
             guard self.fileManager.isExecutableFile(atPath: override) else {
@@ -92,6 +95,9 @@ public struct CodexDesktopLifecycle {
     }
 
     public func stopDesktop() throws {
+        if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil {
+            _ = try self.validatedTestPID()
+        }
         guard self.isDesktopRunning() else { return }
         try self.requestNormalQuit()
         if self.waitUntilStopped() { return }
@@ -154,15 +160,32 @@ public struct CodexDesktopLifecycle {
     }
 
     private func resolveInstallations() -> [CodexDesktopInstallation] {
-        if let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP") {
-            return [try? self.installation(at: appOverride)].compactMap { $0 }
+        let discovered = self.discoveredAppPaths().compactMap { try? self.installation(at: $0) }
+        guard let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP"),
+              let explicit = try? self.installation(at: appOverride) else {
+            return discovered
         }
-        let paths = self.discoveredAppPaths()
-        return paths.compactMap { try? self.installation(at: $0) }
+        let explicitPath = self.normalizePath(explicit.appPath ?? "")
+        return [explicit] + discovered.filter {
+            self.normalizePath($0.appPath ?? "") != explicitPath
+        }
     }
 
     private func discoveredAppPaths() -> [String] {
-        let roots = ["/Applications", self.fileManager.homeDirectoryForCurrentUser.path + "/Applications"]
+        let roots: [String]
+        let isolatedMode = self.value("CODEX_PROFILE_TEST_AUTH_STORE_DIR") != nil
+            || self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil
+            || self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1"
+        if isolatedMode {
+            guard let isolatedRoot = self.value("CODEX_PROFILE_TEST_APPLICATIONS_DIR"),
+                  self.fileManager.fileExists(atPath: isolatedRoot),
+                  (try? self.fileManager.contentsOfDirectory(atPath: isolatedRoot)) != nil else {
+                return []
+            }
+            roots = [isolatedRoot]
+        } else {
+            roots = ["/Applications", self.fileManager.homeDirectoryForCurrentUser.path + "/Applications"]
+        }
         return roots.flatMap { root in
             (try? self.fileManager.contentsOfDirectory(atPath: root))?.filter { $0.hasSuffix(".app") }
                 .map { URL(fileURLWithPath: root).appendingPathComponent($0).path } ?? []
@@ -170,9 +193,8 @@ public struct CodexDesktopLifecycle {
     }
 
     private func requestNormalQuit() throws {
-        if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
-           let pid = self.readPID(from: pidFile),
-           pid > 0 {
+        if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil {
+            let pid = try self.validatedTestPID()
             _ = kill(pid, SIGTERM)
             return
         }
@@ -187,10 +209,8 @@ public struct CodexDesktopLifecycle {
     }
 
     private func terminateDesktop(signal: Int32) {
-        if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
-           let pid = self.readPID(from: pidFile),
-           let installation = try? self.resolveInstallation(),
-           self.process(pid, belongsTo: installation) {
+        if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil {
+            guard let pid = try? self.validatedTestPID() else { return }
             _ = kill(pid, signal)
             return
         }
@@ -230,32 +250,61 @@ public struct CodexDesktopLifecycle {
         return pid
     }
 
+    private func validatedTestPID() throws -> Int32 {
+        guard let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
+              let pid = self.readPID(from: pidFile),
+              self.resolveInstallations().contains(where: { self.process(pid, belongsTo: $0) }) else {
+            throw CodexDesktopLifecycleError.unsafeTestBoundary
+        }
+        return pid
+    }
+
     private func ownedPIDs(for installations: [CodexDesktopInstallation]) -> [Int32] {
-        let rows = self.runAndRead("/bin/ps", arguments: ["-axo", "pid=,command="])
+        let rows = self.runAndRead("/bin/ps", arguments: ["-axo", "pid="])
         return rows.split(whereSeparator: \.isNewline).compactMap { row in
-            let fields = row.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
-            guard let pid = fields.first.flatMap({ Int32($0) }), fields.count == 2 else { return nil }
-            let command = String(fields[1])
-            return installations.contains { self.commandBelongs(command, to: $0) } ? pid : nil
+            guard let pid = Int32(row.trimmingCharacters(in: .whitespaces)) else { return nil }
+            return installations.contains { self.process(pid, belongsTo: $0) } ? pid : nil
         }
     }
 
     private func process(_ pid: Int32, belongsTo installation: CodexDesktopInstallation) -> Bool {
-        let state = self.runAndRead("/bin/ps", arguments: ["-p", String(pid), "-o", "stat="])
-        if state.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Z") { return false }
-        let command = self.runAndRead("/bin/ps", arguments: ["-p", String(pid), "-o", "command="])
-        return self.commandBelongs(command, to: installation)
-    }
-
-    private func commandBelongs(_ command: String, to installation: CodexDesktopInstallation) -> Bool {
-        let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        let normalizedTokens = tokens.map(self.normalizePath)
+        guard let identity = self.processIdentity(pid) else { return false }
         if let executable = installation.executablePath,
-           normalizedTokens.contains(self.normalizePath(executable)) {
+           self.normalizePath(identity.executablePath) == self.normalizePath(executable) {
             return true
         }
-        return zip(normalizedTokens, normalizedTokens.dropFirst()).contains {
-            $0.0 == self.normalizePath(installation.bundledCLIPath) && $0.1 == "app-server"
+        if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil,
+           let executable = installation.executablePath,
+           identity.arguments.contains(where: { self.normalizePath($0) == self.normalizePath(executable) }) {
+            return true
+        }
+        guard self.normalizePath(identity.executablePath) == self.normalizePath(installation.bundledCLIPath) else {
+            return false
+        }
+        return identity.arguments.contains("app-server")
+    }
+
+    private struct ProcessIdentity {
+        let executablePath: String
+        let arguments: [String]
+    }
+
+    private func processIdentity(_ pid: Int32) -> ProcessIdentity? {
+        var buffer = [Int8](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        let executable = String(cString: buffer)
+        return ProcessIdentity(executablePath: executable, arguments: self.processArguments(pid))
+    }
+
+    private func processArguments(_ pid: Int32) -> [String] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        var data = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &data, &size, nil, 0) == 0 else { return [] }
+        return data.dropFirst(4).split(separator: 0).compactMap {
+            String(bytes: $0, encoding: .utf8)
         }
     }
 
