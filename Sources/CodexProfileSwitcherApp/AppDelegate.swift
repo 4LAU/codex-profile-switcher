@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasPendingForcedRefresh = false
     private var hasPendingRecoveryNotice = false
     private var hasShownRecoveryNotice = false
+    private var canHandleRecoveryNotices = false
     private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
@@ -48,12 +49,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func continueStartup(decision: StartupIdentityGate.Decision) {
+        self.canHandleRecoveryNotices = StartupIdentityGate.canHandleRecoveryNotice(
+            decision: decision)
         if decision == .production {
             guard !self.terminateIfInstalledInstanceIsRunning() else { return }
             LaunchAtLogin.migrateLegacyLaunchAgentIfNeeded()
         }
 
-        self.store = ProfileStore()
+        let environment = ProcessInfo.processInfo.environment
+        if decision == .isolated {
+            self.store = ProfileStore(
+                authVault: StartupIdentityGate.makeIsolatedAuthVault(environment: environment),
+                environment: environment)
+        } else {
+            self.store = ProfileStore(environment: environment)
+        }
         self.usageProvider = UsageProvider(store: self.store)
         self.syncActiveProfile(force: true)
 
@@ -66,7 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         })
         self.menu.delegate = self
         self.statusItem.menu = self.menu
-        self.registerRecoveryNoticeObserver()
+        if self.canHandleRecoveryNotices {
+            self.registerRecoveryNoticeObserver()
+        }
 
         self.registerWorkspaceObservers()
         self.usageProvider.onRefreshComplete = { [weak self] in
@@ -76,35 +88,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.startPeriodicRefreshTimer()
 
         self.sparkleUpdater.startIfBundledApp()
-        self.prepareRecoveryNoticeIfNeeded()
+        if self.canHandleRecoveryNotices {
+            self.prepareRecoveryNoticeIfNeeded()
+        }
     }
 
     private func terminateIfInstalledInstanceIsRunning() -> Bool {
-        let installedBundleURL = Self.canonicalURL(StartupIdentityGate.installedBundleURL)
-        let installedExecutableURL = Self.canonicalURL(
-            installedBundleURL.appendingPathComponent("Contents/MacOS/CodexProfileSwitcher"))
-        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let installedBundleURL = StartupIdentityGate.installedBundleURL.standardizedFileURL
+        let installedExecutableURL = installedBundleURL
+            .appendingPathComponent("Contents/MacOS/CodexProfileSwitcher")
+        let current = NSRunningApplication.current
 
-        guard let running = NSRunningApplication.runningApplications(
+        let running = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.4lau.codex-profile-switcher")
-            .first(where: { application in
-                guard application.processIdentifier != currentPID,
+            .filter { application in
+                guard application.processIdentifier != current.processIdentifier,
                       let bundleURL = application.bundleURL,
                       let executableURL = application.executableURL else { return false }
-                return Self.canonicalURL(bundleURL) == installedBundleURL
-                    && Self.canonicalURL(executableURL) == installedExecutableURL
-            }) else {
-            return false
-        }
+                return Self.isLiteralURL(bundleURL, expected: installedBundleURL)
+                    && Self.isLiteralURL(executableURL, expected: installedExecutableURL)
+            }
+            .filter { Self.launchedBefore($0, current) }
+            .min { Self.launchedBefore($0, $1) }
+        guard let running else { return false }
 
         AppLogger.info("Installed app is already running; activating it and terminating newcomer")
         _ = running.activate(options: [.activateAllWindows])
-        _ = running.terminate()
+        NSApp.terminate(nil)
         return true
+    }
+
+    private static func launchedBefore(
+        _ lhs: NSRunningApplication,
+        _ rhs: NSRunningApplication
+    ) -> Bool {
+        if let lhsDate = lhs.launchDate,
+           let rhsDate = rhs.launchDate,
+           lhsDate != rhsDate {
+            return lhsDate < rhsDate
+        }
+        return lhs.processIdentifier < rhs.processIdentifier
     }
 
     private static func canonicalURL(_ url: URL) -> URL {
         url.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private static func isLiteralURL(_ url: URL, expected: URL) -> Bool {
+        let standardizedURL = url.standardizedFileURL
+        return standardizedURL == expected
+            && Self.canonicalURL(standardizedURL) == standardizedURL
     }
 
     deinit {
@@ -131,6 +164,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         self.isMenuOpen = false
         if self.hasShownRecoveryNotice {
+            if self.canHandleRecoveryNotices {
+                StartupIdentityGate.acknowledgeRecoveryNotice()
+            }
             self.hasPendingRecoveryNotice = false
             self.hasShownRecoveryNotice = false
         }
@@ -337,7 +373,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func prepareRecoveryNoticeIfNeeded() {
-        guard ProcessInfo.processInfo.arguments.contains(StartupIdentityGate.recoveryLaunchArgument) else {
+        guard self.canHandleRecoveryNotices else { return }
+        let launchedForRecovery = ProcessInfo.processInfo.arguments.contains(
+            StartupIdentityGate.recoveryLaunchArgument)
+        let recoveredRunningInstance = StartupIdentityGate.hasPendingRecoveryNotice
+        guard launchedForRecovery || recoveredRunningInstance else {
             return
         }
         self.hasPendingRecoveryNotice = true
@@ -355,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func handleRecoveryNotice(_ notification: Notification) {
-        guard self.store != nil, self.usageProvider != nil else { return }
+        guard self.canHandleRecoveryNotices, self.store != nil, self.usageProvider != nil else { return }
         self.hasPendingRecoveryNotice = true
         if self.isMenuOpen {
             self.rebuildMenu()

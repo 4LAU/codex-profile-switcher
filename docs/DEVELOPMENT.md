@@ -16,8 +16,22 @@
 Scripts/package_app.sh
 ```
 
-`build.sh` creates loose development binaries that store saved profiles in
-`~/.codex-switcher/dev-auth-store`; they do not access the macOS Keychain. Use
+`build.sh` creates loose development binaries that do not access the macOS
+Keychain. Run the loose menu app with `CODEX_PROFILE_HOME` or
+`CODEX_PROFILE_TEST_HOME` set to a directory other than your normal home:
+
+```bash
+CODEX_PROFILE_HOME="$HOME/.codex-profile-dev" codex-profile-switcher
+```
+
+These variables set an isolated home root. The app creates `.codex-switcher`
+and `.codex` inside it, so this example stores its config at
+`~/.codex-profile-dev/.codex-switcher/config.json` and keeps its Codex data
+under `~/.codex-profile-dev/.codex/`.
+
+A loose build cannot open the production profile home or manage its Launch at
+Login setting. Without an isolated home, it hands startup to the signed app in
+`/Applications` so saved profiles are not mistaken for missing data. Use
 `Scripts/package_app.sh` when you need a signed `.app` bundle, Keychain-backed
 profiles, Sparkle integration, or release-like Gatekeeper behavior.
 
@@ -59,7 +73,8 @@ The public key must be set as `SPARKLE_ED_PUBLIC_KEY` in your environment for re
 
 | Variable | Purpose |
 |---|---|
-| `CODEX_PROFILE_HOME` | Config directory (default: `~/.codex-switcher`) |
+| `CODEX_PROFILE_HOME` | Home root for profile-switcher and Codex data. Defaults to the macOS user home; config is stored in `<root>/.codex-switcher/`. |
+| `CODEX_PROFILE_TEST_HOME` | Isolated home root for development and test runs. Config is stored in `<root>/.codex-switcher/`. |
 | `CODEX_APP` | Optional path to the Codex Desktop app bundle. Without it, the helper finds the installed `com.openai.codex` bundle, including ChatGPT.app and legacy Codex.app. |
 | `CODEX_CLI` | Path to Codex CLI binary |
 | `CODEX_BUNDLED_CLI` | Optional path to the app's bundled `codex` CLI |

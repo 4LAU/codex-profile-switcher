@@ -19,6 +19,7 @@ public enum CodexDesktopLifecycleError: LocalizedError {
     case installationNotFound
     case invalidInstallation(String)
     case bundledCLINotFound(String)
+    case launchTargetMismatch(String, String)
     case unsafeTestBoundary
     case shutdownFailed
     case launchFailed(String)
@@ -31,6 +32,9 @@ public enum CodexDesktopLifecycleError: LocalizedError {
             return "Invalid Codex Desktop installation at " + path
         case .bundledCLINotFound(let path):
             return "Codex CLI not found at " + path
+        case .launchTargetMismatch(let appPath, let cliPath):
+            return "CODEX_APP and CODEX_BUNDLED_CLI must belong to the same Codex Desktop installation (app: "
+                + appPath + ", CLI: " + cliPath + ")"
         case .unsafeTestBoundary:
             return "Refusing desktop shutdown without a fake test PID boundary"
         case .shutdownFailed:
@@ -70,24 +74,7 @@ public struct CodexDesktopLifecycle {
     }
 
     public func resolveBundledCLI() throws -> String {
-        if let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP") {
-            let installation = try self.installation(at: appOverride)
-            guard self.isAllowedTestInstallation(installation) else {
-                throw CodexDesktopLifecycleError.invalidInstallation(appOverride)
-            }
-        }
-        if let override = self.value("CODEX_PROFILE_TEST_BUNDLED_CLI")
-            ?? self.value("CODEX_BUNDLED_CLI") {
-            guard self.fileManager.isExecutableFile(atPath: override) else {
-                throw CodexDesktopLifecycleError.bundledCLINotFound(override)
-            }
-            return override
-        }
-        let installation = try self.resolveInstallation()
-        guard self.fileManager.isExecutableFile(atPath: installation.bundledCLIPath) else {
-            throw CodexDesktopLifecycleError.bundledCLINotFound(installation.bundledCLIPath)
-        }
-        return installation.bundledCLIPath
+        try self.resolveLaunchTarget().bundledCLIPath
     }
 
     public func isDesktopRunning() -> Bool {
@@ -95,17 +82,17 @@ public struct CodexDesktopLifecycle {
         let installations = self.resolveInstallations()
         if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
            let pid = self.readPID(from: pidFile),
-           installations.contains(where: { self.process(pid, belongsTo: $0) }) {
+           installations.contains(where: { self.process(pid, belongsTo: $0, includeBundledCLI: false) }) {
             return true
         }
-        return !self.ownedPIDs(for: installations).isEmpty
+        return !self.ownedPIDs(for: installations, includeBundledCLI: false).isEmpty
     }
 
     public func stopDesktop() throws {
         if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil {
             _ = try self.validatedTestPID()
         }
-        guard self.isDesktopRunning() else { return }
+        guard self.ownedProcessIsRunning() else { return }
         try self.requestNormalQuit()
         if self.waitUntilStopped() { return }
         self.terminateDesktop(signal: SIGTERM)
@@ -115,7 +102,9 @@ public struct CodexDesktopLifecycle {
     }
 
     public func launch(workspacePath: String?, logURL: URL? = nil) throws {
-        let cli = try self.resolveBundledCLI()
+        let target = try self.resolveLaunchTarget()
+        let cli = target.bundledCLIPath
+        let installation = target.installation
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
         process.arguments = ["app"] + (workspacePath.map { [$0] } ?? [])
@@ -136,14 +125,75 @@ public struct CodexDesktopLifecycle {
         if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
             return
         }
-        guard self.waitUntilRunning() else {
-            let status = process.isRunning ? "did not start" : "exited with status " + String(process.terminationStatus)
-            throw CodexDesktopLifecycleError.launchFailed(status)
+        guard let installation,
+              let failure = self.waitUntilRunning(for: installation, launcher: process) else {
+            return
+        }
+        throw CodexDesktopLifecycleError.launchFailed(failure)
+    }
+
+    private struct LaunchTarget {
+        let installation: CodexDesktopInstallation?
+        let bundledCLIPath: String
+    }
+
+    private func resolveLaunchTarget() throws -> LaunchTarget {
+        let appOverride = self.value("CODEX_PROFILE_TEST_APP") ?? self.value("CODEX_APP")
+        let cliOverride = self.value("CODEX_PROFILE_TEST_BUNDLED_CLI")
+            ?? self.value("CODEX_BUNDLED_CLI")
+        if let appOverride {
+            let installation = try self.validatedInstallation(at: appOverride)
+            let cli = self.canonicalPath(cliOverride ?? installation.bundledCLIPath)
+            try self.validateBundledCLI(cli)
+            guard cli == installation.bundledCLIPath else {
+                throw CodexDesktopLifecycleError.launchTargetMismatch(appOverride, cli)
+            }
+            return LaunchTarget(installation: installation, bundledCLIPath: cli)
+        }
+        if let cliOverride {
+            let canonicalCLI = self.canonicalPath(cliOverride)
+            try self.validateBundledCLI(canonicalCLI)
+            if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
+                return LaunchTarget(installation: nil, bundledCLIPath: canonicalCLI)
+            }
+            let appPath = URL(fileURLWithPath: canonicalCLI)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent().path
+            let installation = try self.validatedInstallation(at: appPath)
+            guard canonicalCLI == installation.bundledCLIPath else {
+                throw CodexDesktopLifecycleError.launchTargetMismatch(appPath, canonicalCLI)
+            }
+            return LaunchTarget(installation: installation, bundledCLIPath: canonicalCLI)
+        }
+        let installation = try self.resolveInstallation()
+        let canonicalCLI = self.canonicalPath(installation.bundledCLIPath)
+        try self.validateBundledCLI(canonicalCLI)
+        guard canonicalCLI == installation.bundledCLIPath else {
+            throw CodexDesktopLifecycleError.launchTargetMismatch(
+                installation.appPath ?? "", canonicalCLI)
+        }
+        return LaunchTarget(installation: installation, bundledCLIPath: canonicalCLI)
+    }
+
+    private func validatedInstallation(at appPath: String) throws -> CodexDesktopInstallation {
+        let installation = try self.installation(at: appPath)
+        guard self.isAllowedTestInstallation(installation) else {
+            throw CodexDesktopLifecycleError.invalidInstallation(appPath)
+        }
+        return installation
+    }
+
+    private func validateBundledCLI(_ path: String) throws {
+        guard self.fileManager.isExecutableFile(atPath: path) else {
+            throw CodexDesktopLifecycleError.bundledCLINotFound(path)
         }
     }
 
     private func installation(at appPath: String) throws -> CodexDesktopInstallation {
-        let infoURL = URL(fileURLWithPath: appPath).appendingPathComponent("Contents/Info.plist")
+        let canonicalAppPath = self.canonicalPath(appPath)
+        let appURL = URL(fileURLWithPath: canonicalAppPath)
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
         guard self.fileManager.fileExists(atPath: infoURL.path),
               let info = NSDictionary(contentsOf: infoURL) as? [String: Any],
               info["CFBundleIdentifier"] as? String == Self.bundleIdentifier,
@@ -151,18 +201,18 @@ public struct CodexDesktopLifecycle {
               !executableName.isEmpty else {
             throw CodexDesktopLifecycleError.invalidInstallation(appPath)
         }
-        let executable = URL(fileURLWithPath: appPath)
+        let executable = appURL
             .appendingPathComponent("Contents/MacOS")
             .appendingPathComponent(executableName).path
-        let bundledCLI = URL(fileURLWithPath: appPath)
+        let bundledCLI = appURL
             .appendingPathComponent("Contents/Resources/codex").path
         guard self.fileManager.isExecutableFile(atPath: executable) else {
             throw CodexDesktopLifecycleError.invalidInstallation(appPath)
         }
         return CodexDesktopInstallation(
-            appPath: appPath,
+            appPath: canonicalAppPath,
             bundleIdentifier: Self.bundleIdentifier,
-            executablePath: executable,
+            executablePath: self.canonicalPath(executable),
             bundledCLIPath: bundledCLI)
     }
 
@@ -176,9 +226,9 @@ public struct CodexDesktopLifecycle {
               self.isAllowedTestInstallation(explicit) else {
             return discovered
         }
-        let explicitPath = self.normalizePath(explicit.appPath ?? "")
+        let explicitPath = self.canonicalPath(explicit.appPath ?? "")
         return [explicit] + discovered.filter {
-            self.normalizePath($0.appPath ?? "") != explicitPath
+            self.canonicalPath($0.appPath ?? "") != explicitPath
         }
     }
 
@@ -197,7 +247,7 @@ public struct CodexDesktopLifecycle {
             let lhsIsCurrent = URL(fileURLWithPath: lhs).lastPathComponent == "ChatGPT.app"
             let rhsIsCurrent = URL(fileURLWithPath: rhs).lastPathComponent == "ChatGPT.app"
             if lhsIsCurrent != rhsIsCurrent { return lhsIsCurrent }
-            return self.normalizePath(lhs) < self.normalizePath(rhs)
+            return self.canonicalPath(lhs) < self.canonicalPath(rhs)
         }
     }
 
@@ -213,17 +263,17 @@ public struct CodexDesktopLifecycle {
               (try? self.fileManager.contentsOfDirectory(atPath: root)) != nil else {
             return nil
         }
-        return root
+        return self.canonicalPath(root)
     }
 
     private func isAllowedTestInstallation(_ installation: CodexDesktopInstallation) -> Bool {
         guard self.isolatedTestMode else { return true }
         guard let root = self.isolatedTestApplicationsRoot(),
               let appPath = installation.appPath else { return false }
-        let normalizedRoot = self.normalizePath(root).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let normalizedApp = self.normalizePath(appPath)
-        return normalizedApp == "/" + normalizedRoot
-            || normalizedApp.hasPrefix("/" + normalizedRoot + "/")
+        let canonicalRoot = self.canonicalPath(root)
+        let canonicalApp = self.canonicalPath(appPath)
+        return canonicalApp == canonicalRoot
+            || canonicalApp.hasPrefix(canonicalRoot + "/")
     }
 
     private func requestNormalQuit() throws {
@@ -245,10 +295,14 @@ public struct CodexDesktopLifecycle {
     private func terminateDesktop(signal: Int32) {
         if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil {
             guard let pid = try? self.validatedTestPID() else { return }
-            _ = kill(pid, signal)
+            var pids = Set([pid])
+            pids.formUnion(self.ownedPIDs(for: self.resolveInstallations(), includeBundledCLI: true))
+            for ownedPID in pids {
+                _ = kill(ownedPID, signal)
+            }
             return
         }
-        for pid in self.ownedPIDs(for: self.resolveInstallations()) {
+        for pid in self.ownedPIDs(for: self.resolveInstallations(), includeBundledCLI: true) {
             _ = kill(pid, signal)
         }
     }
@@ -257,20 +311,57 @@ public struct CodexDesktopLifecycle {
         let attempts = Int(self.value("CODEX_PROFILE_QUIT_ATTEMPTS") ?? "10") ?? 10
         let sleepSeconds = Double(self.value("CODEX_PROFILE_QUIT_SLEEP") ?? "0.5") ?? 0.5
         for _ in 0 ..< attempts {
-            if !self.isDesktopRunning() { return true }
+            if !self.ownedProcessIsRunning() { return true }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }
-        return !self.isDesktopRunning()
+        return !self.ownedProcessIsRunning()
     }
 
-    private func waitUntilRunning() -> Bool {
-        let attempts = Int(self.value("CODEX_PROFILE_LAUNCH_ATTEMPTS") ?? "200") ?? 200
-        let sleepSeconds = Double(self.value("CODEX_PROFILE_LAUNCH_SLEEP") ?? "0.05") ?? 0.05
+    private func waitUntilRunning(
+        for installation: CodexDesktopInstallation,
+        launcher: Process
+    ) -> String? {
+        let attempts = max(Int(self.value("CODEX_PROFILE_LAUNCH_ATTEMPTS") ?? "120") ?? 120, 1)
+        let sleepSeconds = max(Double(self.value("CODEX_PROFILE_LAUNCH_SLEEP") ?? "1") ?? 1, 0.01)
         for _ in 0 ..< attempts {
-            if self.isDesktopRunning() { return true }
+            if self.isDesktopRunning(for: installation) { return nil }
+            guard launcher.isRunning else { break }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }
-        return self.isDesktopRunning()
+        if self.isDesktopRunning(for: installation) { return nil }
+        guard !launcher.isRunning else {
+            return "did not start within " + String(Int(Double(attempts) * sleepSeconds)) + " seconds"
+        }
+        guard launcher.terminationStatus == 0 else {
+            return "exited with status " + String(launcher.terminationStatus)
+        }
+        let handoffAttempts = max(Int(self.value("CODEX_PROFILE_LAUNCH_HANDOFF_ATTEMPTS") ?? "10") ?? 10, 1)
+        let handoffSleep = max(Double(self.value("CODEX_PROFILE_LAUNCH_HANDOFF_SLEEP") ?? "0.5") ?? 0.5, 0.01)
+        for _ in 0 ..< handoffAttempts {
+            if self.isDesktopRunning(for: installation) { return nil }
+            Thread.sleep(forTimeInterval: handoffSleep)
+        }
+        return "exited successfully but GUI did not start"
+    }
+
+    private func isDesktopRunning(for installation: CodexDesktopInstallation) -> Bool {
+        if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
+           let pid = self.readPID(from: pidFile),
+           self.process(pid, belongsTo: installation, includeBundledCLI: false) {
+            return true
+        }
+        return !self.ownedPIDs(for: [installation], includeBundledCLI: false).isEmpty
+    }
+
+    private func ownedProcessIsRunning() -> Bool {
+        if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" { return false }
+        let installations = self.resolveInstallations()
+        if let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
+           let pid = self.readPID(from: pidFile),
+           installations.contains(where: { self.process(pid, belongsTo: $0, includeBundledCLI: true) }) {
+            return true
+        }
+        return !self.ownedPIDs(for: installations, includeBundledCLI: true).isEmpty
     }
 
     private func value(_ key: String) -> String? {
@@ -289,32 +380,44 @@ public struct CodexDesktopLifecycle {
     private func validatedTestPID() throws -> Int32 {
         guard let pidFile = self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE"),
               let pid = self.readPID(from: pidFile),
-              self.resolveInstallations().contains(where: { self.process(pid, belongsTo: $0) }) else {
+              self.resolveInstallations().contains(where: {
+                  self.process(pid, belongsTo: $0, includeBundledCLI: true)
+              }) else {
             throw CodexDesktopLifecycleError.unsafeTestBoundary
         }
         return pid
     }
 
-    private func ownedPIDs(for installations: [CodexDesktopInstallation]) -> [Int32] {
+    private func ownedPIDs(
+        for installations: [CodexDesktopInstallation],
+        includeBundledCLI: Bool
+    ) -> [Int32] {
         let rows = self.runAndRead("/bin/ps", arguments: ["-axo", "pid="])
         return rows.split(whereSeparator: \.isNewline).compactMap { row in
             guard let pid = Int32(row.trimmingCharacters(in: .whitespaces)) else { return nil }
-            return installations.contains { self.process(pid, belongsTo: $0) } ? pid : nil
+            return installations.contains {
+                self.process(pid, belongsTo: $0, includeBundledCLI: includeBundledCLI)
+            } ? pid : nil
         }
     }
 
-    private func process(_ pid: Int32, belongsTo installation: CodexDesktopInstallation) -> Bool {
+    private func process(
+        _ pid: Int32,
+        belongsTo installation: CodexDesktopInstallation,
+        includeBundledCLI: Bool
+    ) -> Bool {
         guard let identity = self.processIdentity(pid) else { return false }
         if let executable = installation.executablePath,
-           self.normalizePath(identity.executablePath) == self.normalizePath(executable) {
+           self.canonicalPath(identity.executablePath) == self.canonicalPath(executable) {
             return true
         }
         if self.value("CODEX_PROFILE_TEST_DESKTOP_PID_FILE") != nil,
            let executable = installation.executablePath,
-           identity.arguments.contains(where: { self.normalizePath($0) == self.normalizePath(executable) }) {
+           identity.arguments.contains(where: { self.canonicalPath($0) == self.canonicalPath(executable) }) {
             return true
         }
-        guard self.normalizePath(identity.executablePath) == self.normalizePath(installation.bundledCLIPath) else {
+        guard includeBundledCLI,
+              self.canonicalPath(identity.executablePath) == self.canonicalPath(installation.bundledCLIPath) else {
             return false
         }
         return identity.arguments.contains("app-server")
@@ -339,23 +442,20 @@ public struct CodexDesktopLifecycle {
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
         var data = [UInt8](repeating: 0, count: size)
         guard sysctl(&mib, 3, &data, &size, nil, 0) == 0 else { return [] }
-        let argumentCount = data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argumentCount > 0 else { return [] }
-        let values = data.dropFirst(4).split(separator: 0).compactMap {
+        guard data.count >= MemoryLayout<Int32>.size else { return [] }
+        let argc = data.withUnsafeBytes { rawBuffer in
+            rawBuffer.loadUnaligned(as: Int32.self)
+        }
+        guard argc >= 0 else { return [] }
+        let fields = data.dropFirst(MemoryLayout<Int32>.size).split(separator: 0)
+        guard fields.count >= Int(argc) + 1 else { return [] }
+        return fields.dropFirst().prefix(Int(argc)).compactMap {
             String(bytes: $0, encoding: .utf8)
         }
-        return Array(values.dropFirst().prefix(Int(argumentCount)))
     }
 
-    private func normalizePath(_ path: String) -> String {
-        var normalized = path
-        while normalized.contains("//") {
-            normalized = normalized.replacingOccurrences(of: "//", with: "/")
-        }
-        if normalized.hasPrefix("/private/") {
-            normalized = String(normalized.dropFirst("/private".count))
-        }
-        return normalized
+    private func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     @discardableResult

@@ -1,5 +1,6 @@
 import Foundation
 import Cocoa
+import CodexProfileCore
 import Security
 
 enum StartupIdentityGate {
@@ -17,12 +18,41 @@ enum StartupIdentityGate {
         case invalidCandidate
     }
 
+    struct RecoveryNoticeStore {
+        private let defaults: UserDefaults
+
+        init(suiteName: String = "com.4lau.codex-profile-switcher.recovery-handoff") {
+            guard let defaults = UserDefaults(suiteName: suiteName) else {
+                preconditionFailure("Unable to open recovery notice defaults suite")
+            }
+            self.defaults = defaults
+        }
+
+        var isPending: Bool {
+            _ = self.defaults.synchronize()
+            return self.defaults.bool(forKey: StartupIdentityGate.recoveryNoticePendingKey)
+        }
+
+        func markPending() {
+            self.defaults.set(true, forKey: StartupIdentityGate.recoveryNoticePendingKey)
+            _ = self.defaults.synchronize()
+        }
+
+        func acknowledge() {
+            self.defaults.removeObject(forKey: StartupIdentityGate.recoveryNoticePendingKey)
+            _ = self.defaults.synchronize()
+        }
+    }
+
     static let installedBundleURL = URL(fileURLWithPath: "/Applications/CodexProfileSwitcher.app")
     static let recoveryLaunchArgument = "--codex-profile-switcher-recovery"
     static let recoveryNoticeName =
         Notification.Name("com.4lau.codex-profile-switcher.startup-repaired")
 
     private static let expectedBundleIdentifier = "com.4lau.codex-profile-switcher"
+    private static let recoveryNoticePendingKey =
+        "com.4lau.codex-profile-switcher.startup-repaired.pending"
+    private static let recoveryNoticeStore = RecoveryNoticeStore()
     private static let expectedTeamIdentifier = "W3ZHLSH96F"
     private static let expectedKeychainAccessGroup =
         "W3ZHLSH96F.com.4lau.codex-profile-switcher.auth-v2"
@@ -36,14 +66,26 @@ enum StartupIdentityGate {
     ) -> Decision {
         let canonicalRealHome = Self.canonicalURL(realHome)
         if let overrideURL = Self.profileHomeOverride(in: environment) {
-            return Self.canonicalURL(overrideURL) == canonicalRealHome ? .recovery : .isolated
+            guard Self.canonicalURL(overrideURL) == canonicalRealHome else { return .isolated }
+            return hasDataProtectionKeychainAccess
+                && Self.isLiteralInstalledURL(bundleURL, expected: installedBundleURL)
+                ? .production
+                : .recovery
         }
 
         guard hasDataProtectionKeychainAccess,
-              Self.canonicalURL(bundleURL) == Self.canonicalURL(installedBundleURL) else {
+              Self.isLiteralInstalledURL(bundleURL, expected: installedBundleURL) else {
             return .recovery
         }
         return .production
+    }
+
+    static func makeIsolatedAuthVault(environment: [String: String]) -> FileAuthVault {
+        FileAuthVault(root: AppPaths(environment: environment).devAuthStoreURL)
+    }
+
+    static func canHandleRecoveryNotice(decision: Decision) -> Bool {
+        decision == .production
     }
 
     @MainActor
@@ -60,7 +102,12 @@ enum StartupIdentityGate {
             return .continued
         }
 
-        let candidate = Self.canonicalURL(installedBundleURL)
+        let candidate = Self.standardizedURL(installedBundleURL)
+        guard Self.isLiteralInstalledURL(candidate, expected: installedBundleURL) else {
+            presentInvalidCandidate()
+            scheduleTermination()
+            return .invalidCandidate
+        }
         guard validateInstalledBundle(candidate) else {
             presentInvalidCandidate()
             scheduleTermination()
@@ -82,14 +129,14 @@ enum StartupIdentityGate {
     }
 
     static func validateInstalledBundle(_ candidate: URL) -> Bool {
-        let canonicalCandidate = Self.canonicalURL(candidate)
-        guard canonicalCandidate == Self.canonicalURL(Self.installedBundleURL),
-              FileManager.default.fileExists(atPath: canonicalCandidate.path) else {
+        let standardizedCandidate = Self.standardizedURL(candidate)
+        guard Self.isLiteralInstalledURL(standardizedCandidate, expected: Self.installedBundleURL),
+              FileManager.default.fileExists(atPath: standardizedCandidate.path) else {
             return false
         }
 
         var staticCode: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(canonicalCandidate as CFURL, [], &staticCode) == errSecSuccess,
+        guard SecStaticCodeCreateWithPath(standardizedCandidate as CFURL, [], &staticCode) == errSecSuccess,
               let staticCode,
               SecStaticCodeCheckValidity(
                   staticCode,
@@ -117,12 +164,16 @@ enum StartupIdentityGate {
     static func handoffToInstalledApp(
         _ validatedURL: URL,
         completion: @escaping HandoffCompletion) {
-        let canonicalInstalledURL = Self.canonicalURL(validatedURL)
+        let canonicalInstalledURL = Self.standardizedURL(validatedURL)
+        guard Self.isLiteralInstalledURL(canonicalInstalledURL, expected: Self.installedBundleURL) else {
+            completion(false)
+            return
+        }
         let running = NSRunningApplication.runningApplications(
             withBundleIdentifier: Self.expectedBundleIdentifier)
             .first { application in
                 guard let url = application.bundleURL else { return false }
-                return Self.canonicalURL(url) == canonicalInstalledURL
+                return Self.isLiteralInstalledURL(url, expected: canonicalInstalledURL)
         }
         if let running {
             let activated = Self.activateValidatedRunningInstance(
@@ -151,18 +202,28 @@ enum StartupIdentityGate {
         postNotice: () -> Void,
         activate: () -> Bool) -> Bool {
         guard let runningBundleURL,
-              Self.canonicalURL(runningBundleURL) == Self.canonicalURL(validatedURL) else {
+              Self.isLiteralInstalledURL(runningBundleURL, expected: validatedURL) else {
             return false
         }
+        guard activate() else { return false }
         postNotice()
-        return activate()
+        return true
     }
 
     static func postRecoveryNotice() {
+        Self.recoveryNoticeStore.markPending()
         DistributedNotificationCenter.default().post(
             name: Self.recoveryNoticeName,
             object: nil,
             userInfo: nil)
+    }
+
+    static var hasPendingRecoveryNotice: Bool {
+        Self.recoveryNoticeStore.isPending
+    }
+
+    static func acknowledgeRecoveryNotice() {
+        Self.recoveryNoticeStore.acknowledge()
     }
 
     private static func profileHomeOverride(in environment: [String: String]) -> URL? {
@@ -176,5 +237,15 @@ enum StartupIdentityGate {
 
     private static func canonicalURL(_ url: URL) -> URL {
         url.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private static func standardizedURL(_ url: URL) -> URL {
+        url.standardizedFileURL
+    }
+
+    private static func isLiteralInstalledURL(_ url: URL, expected: URL) -> Bool {
+        let standardizedURL = Self.standardizedURL(url)
+        return standardizedURL == Self.standardizedURL(expected)
+            && Self.canonicalURL(standardizedURL) == standardizedURL
     }
 }
