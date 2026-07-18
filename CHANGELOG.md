@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.14 -- 2026-07-17
+
+### Fixed
+
+- Profile switching now waits for the ChatGPT or Codex desktop process to reopen. A background app-server no longer counts as a successful relaunch.
+- Loose or stale builds validate and hand off to the signed app in `/Applications` before reading saved profiles. This prevents intact accounts from appearing to need login again.
+
 ## 0.5.13 -- 2026-07-17
 
 ### Changed
@@ -14,7 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- Profile switching now finds Codex Desktop by its `com.openai.codex` bundle identity, including the current ChatGPT.app layout. It stops the running desktop and app-server before changing authentication, preserves the last workspace on relaunch, validates the bundled CLI first, and reports the actual launch error when relaunching fails. A background app-server no longer counts as a successful relaunch; switching waits for the ChatGPT or Codex desktop app process.
+- Profile switching now finds Codex Desktop by its `com.openai.codex` bundle identity, including the current ChatGPT.app layout. It stops the running desktop and app-server before changing authentication, preserves the last workspace on relaunch, validates the bundled CLI first, and reports the actual launch error when relaunching fails.
 - Unsigned development builds can no longer open production profile data. If an old login item starts one, it hands control to the signed app without changing saved profiles, preventing repeated crash alerts and misleading re-login warnings.
 
 ## 0.5.7 -- 2026-07-15
