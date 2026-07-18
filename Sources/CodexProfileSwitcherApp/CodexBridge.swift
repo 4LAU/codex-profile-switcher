@@ -138,11 +138,48 @@ enum CodexBridge {
     /// its own; passing it explicitly removes the dependency on the app bundle
     /// and the resolved `codex-profile` binary sharing a signing identity, so a
     /// mismatch can't split auth across the Keychain and the file dev vault.
-    private static func helperAuthEnvironment() -> [String: String] {
+    static func helperAuthEnvironment(for environment: [String: String]) -> [String: String] {
+        if let override = Self.profileHomeOverride(in: environment),
+           Self.canonicalURL(override) != Self.canonicalURL(
+               FileManager.default.homeDirectoryForCurrentUser) {
+            return [
+                "CODEX_PROFILE_FILE_AUTH_STORE_DIR":
+                    AppPaths(environment: environment).devAuthStoreURL.path,
+            ]
+        }
         if ProcessSigningIdentity.isStable {
             return ["CODEX_PROFILE_FORCE_KEYCHAIN": "1"]
         }
-        return ["CODEX_PROFILE_FILE_AUTH_STORE_DIR": AppPaths().devAuthStoreURL.path]
+        return ["CODEX_PROFILE_FILE_AUTH_STORE_DIR": AppPaths(environment: environment).devAuthStoreURL.path]
+    }
+
+    static func helperProcessEnvironment(for environment: [String: String]) -> [String: String] {
+        let backendSelectors = [
+            "CODEX_PROFILE_TEST_AUTH_STORE_DIR",
+            "CODEX_PROFILE_FILE_AUTH_STORE_DIR",
+            "CODEX_PROFILE_FORCE_KEYCHAIN",
+        ]
+        var childEnvironment = environment
+        for key in backendSelectors {
+            childEnvironment.removeValue(forKey: key)
+        }
+        for (key, value) in Self.helperAuthEnvironment(for: environment) {
+            childEnvironment[key] = value
+        }
+        return childEnvironment
+    }
+
+    private static func profileHomeOverride(in environment: [String: String]) -> URL? {
+        for key in ["CODEX_PROFILE_HOME", "CODEX_PROFILE_TEST_HOME"] {
+            if let path = environment[key], !path.isEmpty {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.resolvingSymlinksInPath().standardizedFileURL
     }
 
     static func isLoginRunning(profileId: String) -> Bool {
@@ -325,11 +362,7 @@ enum CodexBridge {
         proc.standardOutput = pipe
         proc.standardError = pipe
 
-        var childEnv = ProcessInfo.processInfo.environment
-        for (key, value) in Self.helperAuthEnvironment() {
-            childEnv[key] = value
-        }
-        proc.environment = childEnv
+        proc.environment = Self.helperProcessEnvironment(for: ProcessInfo.processInfo.environment)
 
         let active = ActiveLogin(process: proc)
         Self.activeLogins[profileId] = active

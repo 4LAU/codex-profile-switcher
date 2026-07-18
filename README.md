@@ -58,8 +58,8 @@ cd codex-profile-switcher
 
 ./build.sh
 
-# Start the app
-codex-profile-switcher
+# Start the loose app with an isolated home
+CODEX_PROFILE_HOME="$HOME/.codex-profile-dev" codex-profile-switcher
 ```
 
 The menu bar app is installed to `~/.local/bin/codex-profile-switcher`, and the
@@ -68,10 +68,14 @@ matching Swift CLI helper is installed to `~/.local/bin/codex-profile`.
 **No Keychain prompts for source builds.** Released app bundles use the macOS
 Data Protection Keychain, which lets the signed app and its bundled helper read
 their shared saved profiles without per-account access-control prompts. Self-built
-binaries never touch the real Keychain. They automatically use a separate
-file-based vault at `~/.codex-switcher/dev-auth-store` (0600 files, the same
-protection Codex itself uses for `~/.codex/auth.json`). No Apple account or
-certificate is needed, and no prompts appear. To build a CLI that shares the
+binaries never touch the real Keychain. When launching the loose menu app, set
+`CODEX_PROFILE_HOME` or `CODEX_PROFILE_TEST_HOME` to a separate directory, as
+shown above. The app stores its config and Codex data under that directory and
+uses a file-based vault at `<home>/.codex-switcher/dev-auth-store` (0600 files,
+the same protection Codex itself uses for `~/.codex/auth.json`). Without an
+isolated home, the loose app hands startup to the signed app in `/Applications`
+instead of opening production profile data. No Apple account or certificate is
+needed, and no prompts appear. To build a CLI that shares the
 real Keychain profiles, sign it with any Apple certificate:
 
 ```bash

@@ -22,6 +22,67 @@ struct StartupIdentityGateTests {
     }
 
     @Test
+    func installedProductionBuildWithRealHomeOverrideKeepsProductionIdentity() throws {
+        let result = StartupIdentityGate.classify(
+            bundleURL: self.installedBundle,
+            environment: ["CODEX_PROFILE_HOME": self.realHome.path],
+            realHome: self.realHome,
+            hasDataProtectionKeychainAccess: true)
+
+        try envExpect(result == .production,
+                      "The installed entitled app must keep production identity when its override is the real home")
+    }
+
+    @Test
+    func isolatedIdentityPinsFileVaultAndDelegatedHelperToIsolatedHome() throws {
+        let isolatedHome = URL(fileURLWithPath: "/tmp/codex-profile-isolated")
+        let environment = ["CODEX_PROFILE_HOME": isolatedHome.path]
+        let decision = StartupIdentityGate.classify(
+            bundleURL: self.installedBundle,
+            environment: environment,
+            realHome: self.realHome,
+            hasDataProtectionKeychainAccess: true)
+
+        try envExpect(decision == .isolated,
+                      "A distinct profile home must remain isolated even for an entitled installed app")
+        let vault = StartupIdentityGate.makeIsolatedAuthVault(environment: environment)
+        try envExpect(vault.diagnostics().activeBackend == .file,
+                      "An isolated startup selected a non-file auth vault")
+        let expectedRoot = isolatedHome.appendingPathComponent(
+            ".codex-switcher/dev-auth-store", isDirectory: true)
+        try envExpect(vault.root == expectedRoot,
+                      "The isolated auth vault was not rooted under the isolated home")
+
+        let helperEnvironment = CodexBridge.helperAuthEnvironment(for: environment)
+        try envExpect(
+            helperEnvironment["CODEX_PROFILE_FILE_AUTH_STORE_DIR"] == expectedRoot.path,
+            "The delegated helper was not pinned to the isolated file vault")
+        try envExpect(helperEnvironment["CODEX_PROFILE_FORCE_KEYCHAIN"] == nil,
+                      "The delegated helper was allowed to select the production Keychain")
+    }
+
+    @Test
+    func delegatedHelperRemovesConflictingInheritedBackendSelectors() throws {
+        let isolatedHome = URL(fileURLWithPath: "/tmp/codex-profile-isolated-conflict")
+        let environment = [
+            "CODEX_PROFILE_HOME": isolatedHome.path,
+            "CODEX_PROFILE_TEST_AUTH_STORE_DIR": "/tmp/wrong-test-vault",
+            "CODEX_PROFILE_FILE_AUTH_STORE_DIR": "/tmp/wrong-file-vault",
+            "CODEX_PROFILE_FORCE_KEYCHAIN": "1",
+        ]
+        let childEnvironment = CodexBridge.helperProcessEnvironment(for: environment)
+        let expectedRoot = isolatedHome.appendingPathComponent(
+            ".codex-switcher/dev-auth-store", isDirectory: true)
+
+        try envExpect(childEnvironment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"] == nil,
+                      "The delegated helper inherited a test auth vault override")
+        try envExpect(childEnvironment["CODEX_PROFILE_FORCE_KEYCHAIN"] == nil,
+                      "The isolated delegated helper inherited forced Keychain mode")
+        try envExpect(childEnvironment["CODEX_PROFILE_FILE_AUTH_STORE_DIR"] == expectedRoot.path,
+                      "The isolated delegated helper did not receive the authoritative file vault")
+    }
+
+    @Test
     func installedBuildWithoutProductionCapabilityRequiresRecovery() throws {
         let result = StartupIdentityGate.classify(
             bundleURL: self.installedBundle,
@@ -153,10 +214,12 @@ struct StartupIdentityGateTests {
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("startup-recovery-canonical-" + UUID().uuidString, isDirectory: true)
         let target = root.appendingPathComponent("Applications/CodexProfileSwitcher.app", isDirectory: true)
-        let alias = root.appendingPathComponent("alias.app", isDirectory: true)
+        let alias = root
+            .appendingPathComponent("Applications/temporary", isDirectory: true)
+            .appendingPathComponent("..", isDirectory: true)
+            .appendingPathComponent("CodexProfileSwitcher.app", isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
         try fileManager.createDirectory(at: target, withIntermediateDirectories: true)
-        try fileManager.createSymbolicLink(atPath: alias.path, withDestinationPath: target.path)
 
         var validatedURL: URL?
         var handedOffURL: URL?
@@ -179,6 +242,52 @@ struct StartupIdentityGateTests {
                       "Recovery validation received a non-canonical installed URL")
         try envExpect(handedOffURL == canonicalTarget,
                       "Recovery handoff received a non-canonical installed URL")
+    }
+
+    @Test @MainActor
+    func symlinkedInstalledBundleRequiresRecoveryAndIsNotValidated() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("startup-identity-symlink-" + UUID().uuidString, isDirectory: true)
+        let outsideBundle = root.appendingPathComponent("outside/CodexProfileSwitcher.app", isDirectory: true)
+        let installedBundle = root.appendingPathComponent("Applications/CodexProfileSwitcher.app", isDirectory: true)
+        let realHome = root.appendingPathComponent("home", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        try fileManager.createDirectory(at: outsideBundle, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: installedBundle.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: realHome, withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: installedBundle.path, withDestinationPath: outsideBundle.path)
+
+        let decision = StartupIdentityGate.classify(
+            bundleURL: installedBundle,
+            environment: [:],
+            realHome: realHome,
+            hasDataProtectionKeychainAccess: true,
+            installedBundleURL: installedBundle)
+        try envExpect(decision == .recovery,
+                      "A symlinked installed bundle must not receive production identity")
+
+        var validated = false
+        var handedOff = false
+        let outcome = StartupIdentityGate.resolveRecovery(
+            decision: decision,
+            installedBundleURL: installedBundle,
+            validateInstalledBundle: { _ in
+                validated = true
+                return true
+            },
+            handoff: { _, completion in
+                handedOff = true
+                completion(true)
+            },
+            scheduleTermination: {},
+            continueStartup: {})
+
+        try envExpect(outcome == .invalidCandidate,
+                      "A symlinked installed bundle must be rejected during recovery")
+        try envExpect(!validated && !handedOff,
+                      "Recovery must reject a symlinked bundle before validation or handoff")
     }
 
     @Test @MainActor
@@ -214,20 +323,6 @@ struct StartupIdentityGateTests {
         try envExpect(outcome == .invalidCandidate, "Invalid recovery candidate was accepted")
         try envExpect(events == ["present", "terminate"],
                       "Invalid recovery reached handoff or continuation")
-    }
-
-    @Test
-    func runningInstalledInstanceGetsNoticeBeforeActivation() throws {
-        var events: [String] = []
-        let activated = StartupIdentityGate.activateValidatedRunningInstance(
-            runningBundleURL: URL(fileURLWithPath: "/tmp/alias.app"),
-            validatedURL: URL(fileURLWithPath: "/tmp/alias.app"),
-            postNotice: { events.append("notice") },
-            activate: { events.append("activate"); return true })
-
-        try envExpect(activated, "Validated running app was not activated")
-        try envExpect(events == ["notice", "activate"],
-                      "Running-app recovery notice was not sent before activation")
     }
 
     @Test @MainActor

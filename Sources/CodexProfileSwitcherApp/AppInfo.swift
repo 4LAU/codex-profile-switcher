@@ -4,6 +4,6 @@ import Foundation
 
 enum AppInfo {
     static let name = "CodexProfileSwitcher"
-    static let version = "0.5.13"
+    static let version = "0.5.14"
     static let issueURL = URL(string: "https://github.com/4LAU/codex-profile-switcher/issues/new")!
 }

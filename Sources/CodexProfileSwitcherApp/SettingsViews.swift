@@ -1,5 +1,6 @@
 import Cocoa
 import CodexProfileCore
+import ServiceManagement
 import SwiftUI
 
 struct SettingsActions {
@@ -532,7 +533,7 @@ struct GeneralTab: View {
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
-    @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var launchAtLoginState = LaunchAtLogin.state
     @State private var migrationSheet: KeychainMigrationSheet?
     @State private var migrationError: String?
     @State private var isReviewingMigration = false
@@ -545,12 +546,17 @@ struct GeneralTab: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                Toggle("Launch at Login", isOn: self.$launchAtLogin)
-                    .onChange(of: self.launchAtLogin) { _, _ in LaunchAtLogin.toggle() }
+                Toggle(
+                    "Launch at Login",
+                    isOn: Binding(
+                        get: {
+                            self.launchAtLoginState == .enabled || self.launchAtLoginState == .requiresApproval
+                        },
+                        set: self.setLaunchAtLogin))
+                    .disabled(self.launchAtLoginState == .unavailable)
+                    .accessibilityValue(self.launchAtLoginAccessibilityValue)
 
-                Text("Opens automatically when your Mac starts.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                self.launchAtLoginDescription
             }
 
             Divider()
@@ -639,6 +645,10 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { self.refreshLaunchAtLoginState() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            self.refreshLaunchAtLoginState()
+        }
         .onDisappear { self.cancelLegacyKeychainMigrationReview() }
         .sheet(item: self.migrationSheetBinding) { sheet in
             KeychainMigrationConfirmationSheet(
@@ -744,6 +754,64 @@ struct GeneralTab: View {
         case .twoMinutes: return "2 min"
         case .fiveMinutes: return "5 min"
         case .fifteenMinutes: return "15 min"
+        }
+    }
+
+    @ViewBuilder
+    private var launchAtLoginDescription: some View {
+        switch self.launchAtLoginState {
+        case .enabled:
+            Text("Opens automatically when your Mac starts.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        case .disabled:
+            Text("Does not open automatically when your Mac starts.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        case .requiresApproval:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("macOS is waiting for approval.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("Open Login Items") {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+                .buttonStyle(.link)
+            }
+        case .unavailable:
+            Text("The signed app in /Applications owns Launch at Login. Isolated development builds cannot change it.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var launchAtLoginAccessibilityValue: String {
+        switch self.launchAtLoginState {
+        case .enabled: return "On"
+        case .disabled: return "Off"
+        case .requiresApproval: return "On, waiting for approval"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private func refreshLaunchAtLoginState() {
+        self.launchAtLoginState = LaunchAtLogin.state
+    }
+
+    private func setLaunchAtLogin(_ isOn: Bool) {
+        let previousState = self.launchAtLoginState
+        self.launchAtLoginState = isOn ? .enabled : .disabled
+
+        do {
+            if isOn {
+                try LaunchAtLogin.enable()
+            } else {
+                try LaunchAtLogin.disable()
+            }
+            self.refreshLaunchAtLoginState()
+        } catch {
+            self.launchAtLoginState = previousState
+            self.toast.show(error.localizedDescription, style: .error)
         }
     }
 }
