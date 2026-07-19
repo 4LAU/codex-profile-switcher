@@ -105,9 +105,24 @@ public struct CodexDesktopLifecycle {
         let target = try self.resolveLaunchTarget()
         let cli = target.bundledCLIPath
         let installation = target.installation
+        let launchPath: String
+        let launchArguments: [String]
+        if !self.isolatedTestMode, let appPath = installation?.appPath {
+            launchPath = "/usr/bin/open"
+            let workspaceURL = try workspacePath.map { path in
+                guard let url = self.workspaceURL(for: path) else {
+                    throw CodexDesktopLifecycleError.launchFailed("invalid workspace path")
+                }
+                return url.absoluteString
+            }
+            launchArguments = ["-n", "-a", appPath] + (workspaceURL.map { [$0] } ?? [])
+        } else {
+            launchPath = cli
+            launchArguments = ["app"] + (workspacePath.map { [$0] } ?? [])
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cli)
-        process.arguments = ["app"] + (workspacePath.map { [$0] } ?? [])
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = launchArguments
         var handle: FileHandle?
         if let logURL {
             self.fileManager.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -130,6 +145,19 @@ public struct CodexDesktopLifecycle {
             return
         }
         throw CodexDesktopLifecycleError.launchFailed(failure)
+    }
+
+    private func workspaceURL(for path: String) -> URL? {
+        let allowedCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        guard let encodedPath = path.addingPercentEncoding(withAllowedCharacters: allowedCharacters) else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = "codex"
+        components.host = "threads"
+        components.path = "/new"
+        components.percentEncodedQuery = "path=" + encodedPath
+        return components.url
     }
 
     private struct LaunchTarget {
@@ -325,23 +353,16 @@ public struct CodexDesktopLifecycle {
         let sleepSeconds = max(Double(self.value("CODEX_PROFILE_LAUNCH_SLEEP") ?? "1") ?? 1, 0.01)
         for _ in 0 ..< attempts {
             if self.isDesktopRunning(for: installation) { return nil }
-            guard launcher.isRunning else { break }
+            if !launcher.isRunning, launcher.terminationStatus != 0 {
+                return "exited with status " + String(launcher.terminationStatus)
+            }
             Thread.sleep(forTimeInterval: sleepSeconds)
         }
         if self.isDesktopRunning(for: installation) { return nil }
-        guard !launcher.isRunning else {
-            return "did not start within " + String(Int(Double(attempts) * sleepSeconds)) + " seconds"
-        }
-        guard launcher.terminationStatus == 0 else {
+        if !launcher.isRunning, launcher.terminationStatus != 0 {
             return "exited with status " + String(launcher.terminationStatus)
         }
-        let handoffAttempts = max(Int(self.value("CODEX_PROFILE_LAUNCH_HANDOFF_ATTEMPTS") ?? "10") ?? 10, 1)
-        let handoffSleep = max(Double(self.value("CODEX_PROFILE_LAUNCH_HANDOFF_SLEEP") ?? "0.5") ?? 0.5, 0.01)
-        for _ in 0 ..< handoffAttempts {
-            if self.isDesktopRunning(for: installation) { return nil }
-            Thread.sleep(forTimeInterval: handoffSleep)
-        }
-        return "exited successfully but GUI did not start"
+        return "did not start within " + String(Int(Double(attempts) * sleepSeconds)) + " seconds"
     }
 
     private func isDesktopRunning(for installation: CodexDesktopInstallation) -> Bool {

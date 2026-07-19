@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.15 -- 2026-07-18
+
+### Fixed
+
+- ChatGPT relaunch now opens the exact selected app path, preventing an obsolete Codex.app with the same identity from intercepting launch or causing a false failure.
+
 ## 0.5.14 -- 2026-07-17
 
 ### Fixed
