@@ -75,12 +75,20 @@ uses a file-based vault at `<home>/.codex-switcher/dev-auth-store` (0600 files,
 the same protection Codex itself uses for `~/.codex/auth.json`). Without an
 isolated home, the loose app hands startup to the signed app in `/Applications`
 instead of opening production profile data. No Apple account or certificate is
-needed, and no prompts appear. To build a CLI that shares the
-real Keychain profiles, sign it with any Apple certificate:
+needed, and no prompts appear.
 
-```bash
-make install-cli APP_IDENTITY="Apple Development: you@example.com (TEAMID)"
+Self-built CLIs are file-vault-only no matter how they are signed: reading the
+shared Keychain profiles requires the Keychain Sharing entitlement, which only
+the packaged app's bundled helper carries. Automation that needs the real
+profiles should call that helper directly:
+
 ```
+/Applications/CodexProfileSwitcher.app/Contents/Helpers/CodexProfileHelper.app/Contents/MacOS/codex-profile
+```
+
+`make install-cli APP_IDENTITY="..."` still has a use: it signs the loose CLI
+with a stable identity so rebuilds keep the same signature instead of appearing
+to macOS as a brand-new binary each time.
 
 The helper finds the installed Codex Desktop bundle by its `com.openai.codex`
 bundle identifier. This supports the current ChatGPT.app layout and the legacy
