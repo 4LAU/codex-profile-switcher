@@ -318,12 +318,20 @@ if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
   warn "SPARKLE_ED_PUBLIC_KEY is not set; Sparkle update verification will not work."
 fi
 
+# CODEX_PROFILE_ARCHS: optional space-separated target list (e.g. "arm64 x86_64")
+# for a universal build; unset builds the host arch only, as before.
+ARCH_ARGS=()
+for arch in ${CODEX_PROFILE_ARCHS:-}; do
+  ARCH_ARGS+=(--arch "$arch")
+done
+
 log "Building CodexProfileSwitcher..."
 swift build \
   --package-path "$ROOT_DIR" \
   -c release \
   --product CodexProfileSwitcher \
   --scratch-path "$PACKAGE_SCRATCH" \
+  ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} \
   -Xswiftc -F -Xswiftc "$SPARKLE_DIR" \
   -Xlinker -F -Xlinker "$SPARKLE_DIR" \
   -Xlinker -framework -Xlinker Sparkle \
@@ -334,8 +342,9 @@ swift build \
   --package-path "$ROOT_DIR" \
   -c release \
   --product codex-profile \
-  --scratch-path "$PACKAGE_SCRATCH"
-BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c release --scratch-path "$PACKAGE_SCRATCH" --show-bin-path)"
+  --scratch-path "$PACKAGE_SCRATCH" \
+  ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}
+BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c release --scratch-path "$PACKAGE_SCRATCH" ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --show-bin-path)"
 APP_BINARY="$BIN_DIR/CodexProfileSwitcher"
 HELPER_BINARY="$BIN_DIR/codex-profile"
 HELPER_APP_BUNDLE="$APP_BUNDLE/Contents/Helpers/CodexProfileHelper.app"
