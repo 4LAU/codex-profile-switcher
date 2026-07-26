@@ -116,7 +116,7 @@ final class SettingsMigrationLifecycle {
 }
 
 struct SettingsView: View {
-    let store: ProfileStore
+    @ObservedObject var store: ProfileStore
     @ObservedObject var refreshPreferences: RefreshPreferences
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
@@ -158,7 +158,7 @@ struct SettingsView: View {
 }
 
 struct ProfilesTab: View {
-    let store: ProfileStore
+    @ObservedObject var store: ProfileStore
     let actions: SettingsActions
     @ObservedObject var toast: ToastState
     @State private var selectedId: String?

@@ -1,11 +1,12 @@
 import Foundation
 import CodexProfileCore
+import Combine
 import CryptoKit
 
 // MARK: - ProfileStore
 
 @MainActor
-final class ProfileStore {
+final class ProfileStore: ObservableObject {
     private static let keychainAuthStorageVersion = 2
 
     typealias KeychainMigrationCoordinatorFactory = (
@@ -35,7 +36,7 @@ final class ProfileStore {
 
     private(set) var config: AppConfig
     private(set) var cache: UsageCache
-    private(set) var statuses: [String: ProfileStatus] = [:]
+    @Published private(set) var statuses: [String: ProfileStatus] = [:]
     private(set) var refreshDiagnostics: [String: ProfileRefreshDiagnostics] = [:]
     private(set) var liveProfileId: String?
     private(set) var shouldShowKeychainMigration = false

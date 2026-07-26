@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.16 -- 2026-07-25
+
+### Fixed
+
+- Account status now updates automatically in Settings after reauthentication finishes.
+
 ## 0.5.15 -- 2026-07-18
 
 ### Fixed
