@@ -3,6 +3,15 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.5.17</title>
+            <pubDate>Sat, 01 Aug 2026 22:11:13 -0400</pubDate>
+            <sparkle:version>36</sparkle:version>
+            <sparkle:shortVersionString>0.5.17</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.17/CodexProfileSwitcher-0.5.17.dmg" length="4374171" type="application/octet-stream" sparkle:edSignature="LTC1bvRpkiYe/JPW5pAeD71o36x9Tu3244Aex52ABiq7rjxGiLIHgVfEtseIsf/kXO1JxbIlW97JXrnPAOiYCA=="/>
+        </item>
+        <item>
             <title>0.5.16</title>
             <pubDate>Sat, 25 Jul 2026 19:50:34 -0700</pubDate>
             <sparkle:version>35</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.15/CodexProfileSwitcher-0.5.15.dmg" length="4368363" type="application/octet-stream" sparkle:edSignature="0ImmAa58ujmskhnXPWoDL8MRQqxJ3GVDXsSQR6ho0YQ30V7Pbls6mx8BRBt12IFx57B/CeoTKlAo7IHgT1ZbAg=="/>
-        </item>
-        <item>
-            <title>0.5.14</title>
-            <pubDate>Fri, 17 Jul 2026 17:58:36 -0700</pubDate>
-            <sparkle:version>33</sparkle:version>
-            <sparkle:shortVersionString>0.5.14</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.14/CodexProfileSwitcher-0.5.14.dmg" length="4367154" type="application/octet-stream" sparkle:edSignature="qF9x6f6R9jLUhYYL4vuo7sMcyf8IrklmehYIbSwhCBQhZcaTK0kDgvZqxAbbZOYDVWkVY+86VcD00eBK9ZAVBw=="/>
         </item>
     </channel>
 </rss>
