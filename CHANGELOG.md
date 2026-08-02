@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- `lease begin` now re-selects another account when a concurrent run claims the one it picked, instead of failing. Workers started at the same instant all read an empty lease map and chose the same best account, so every worker but one was rejected and callers fell back to a slower lane despite most accounts being free.
+
 ## 0.5.16 -- 2026-07-25
 
 ### Fixed

@@ -1510,6 +1510,13 @@ enum CodexProfileCLI {
 
     // MARK: - Lease reservation
 
+    /// A concurrent `begin` already holds the profile we selected. Not a lane
+    /// failure — another account is usually free — so `begin` re-selects with
+    /// this profile excluded instead of surfacing an error.
+    private struct LeaseClaimLost: Error {
+        let profileID: String
+    }
+
     /// Known root under the switcher home so `lease gc` can find and reclaim an
     /// orphaned home after a crash (unlike an untracked mktemp directory).
     private static var leasesRoot: URL {
@@ -1565,13 +1572,15 @@ enum CodexProfileCLI {
     /// `begin` runs an opportunistic `gc` first, so a cleanly-removable expired
     /// lease is already gone by the time we get here; anything left is protected.
     /// A lease already carrying our own token (a retry) or an absent slot is fine.
+    ///
+    /// Losing the claim throws `LeaseClaimLost` rather than `CLIError` so `begin`
+    /// can retry on a different account without swallowing unrelated failures.
     private static func claimLease(profileID: String, reservation: LeaseReservation) throws {
         try self.withCacheLock {
             var cache = self.reconciledCache()
             if let existing = cache.leases[profileID],
                existing.token != reservation.token {
-                throw CLIError.message(
-                    "lease begin: profile \(profileID) is reserved by another run (or holds a credential pending recovery); retry")
+                throw LeaseClaimLost(profileID: profileID)
             }
             cache.leases[profileID] = reservation
             try self.saveCache(cache)
@@ -1745,23 +1754,60 @@ enum CodexProfileCLI {
         // Everything from here until the reservation is committed seeds a LIVE
         // credential into `home`. Any failure before/including `upsertLease`
         // must remove that home so a live credential is never left untracked.
+        //
+        // The exclusion set above is a snapshot taken BEFORE the multi-second
+        // select+seed. Workers launched in the same instant all read an empty
+        // lease map and therefore all select the same best account; exactly one
+        // wins `claimLease` and the rest lose. Losing is not a lane failure —
+        // with N accounts configured there is almost always another one free —
+        // so re-select with the winner excluded rather than reporting the lane
+        // exhausted. Bounded by the configured profile count: each attempt
+        // permanently excludes one account, so the loop cannot outlive the
+        // account list, and once every account is excluded `performBestAuth`
+        // itself reports no eligible profile.
         let profile: String
         let reservation: LeaseReservation
         do {
-            let outcome = try self.performBestAuth(
-                dirURL: home,
-                excludeIDs: exclusion,
-                interactive: interactive)
-            profile = outcome.result.profileID
-            // Start the TTL clock AFTER the (multi-second) selection+seed, not
-            // from `now` above, so a tiny --ttl can't leave the lease born expired.
-            let sealedAt = Date()
-            reservation = LeaseReservation(
-                token: token,
-                home: home.path,
-                expiresAt: sealedAt.addingTimeInterval(options.ttl),
-                createdAt: now)
-            try self.claimLease(profileID: profile, reservation: reservation)
+            let maxAttempts = max(1, self.configStore.loadConfig()?.profiles.count ?? 1)
+            var claimed: (profile: String, reservation: LeaseReservation)?
+            var attempt = 0
+
+            while claimed == nil {
+                attempt += 1
+                let outcome = try self.performBestAuth(
+                    dirURL: home,
+                    excludeIDs: exclusion,
+                    interactive: interactive)
+                let candidate = outcome.result.profileID
+                // Start the TTL clock AFTER the (multi-second) selection+seed, not
+                // from `now` above, so a tiny --ttl can't leave the lease born expired.
+                let sealedAt = Date()
+                let candidateReservation = LeaseReservation(
+                    token: token,
+                    home: home.path,
+                    expiresAt: sealedAt.addingTimeInterval(options.ttl),
+                    createdAt: now)
+                do {
+                    try self.claimLease(profileID: candidate, reservation: candidateReservation)
+                    claimed = (candidate, candidateReservation)
+                } catch let lost as LeaseClaimLost {
+                    guard attempt < maxAttempts else {
+                        throw CLIError.message(
+                            "lease begin: profile \(lost.profileID) is reserved by another run (or holds a credential pending recovery); retry")
+                    }
+                    // Discard the credential seeded for the account we lost before
+                    // re-seeding, so `home` never holds two accounts' material.
+                    exclusion.insert(lost.profileID)
+                    try? self.fileManager.removeItem(at: home)
+                    try self.ensurePrivateDir(home)
+                }
+            }
+
+            guard let claimed else {
+                throw CLIError.message("lease begin: no profile could be claimed")
+            }
+            profile = claimed.profile
+            reservation = claimed.reservation
         } catch {
             try? self.fileManager.removeItem(at: home)
             throw error
