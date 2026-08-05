@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.5.18 -- 2026-08-05
+
+### Fixed
+
+- The account status row in Settings no longer shifts down on the profile that is currently active. The row aligned its contents by centre rather than by text baseline, so adding the smaller "(active)" label moved the baseline and pushed the row and everything below it out of line.
+
+### Removed
+
+- `AuthCredentials.needsRefresh` and the unused `refreshExpired`, `refreshReused` and `refreshRevoked` error cases. Nothing called them. The property carried an eight-day staleness constant that read as live policy while having no effect on anything.
+
 ## 0.5.17 -- 2026-08-01
 
 ### Fixed
