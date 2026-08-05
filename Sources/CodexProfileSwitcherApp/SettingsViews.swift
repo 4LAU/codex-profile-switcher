@@ -372,10 +372,20 @@ struct ProfilesTab: View {
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .frame(width: 60, alignment: .trailing)
-                        HStack(spacing: 6) {
+                        // Baseline-aligned, not centred: the enclosing row anchors
+                        // on this group's first baseline, and a centred group
+                        // reports a different baseline once the 12pt "(active)"
+                        // sits beside the 13pt label. That shifted the whole row
+                        // and everything below it on the active profile only.
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Circle()
                                 .fill(self.statusColor(for: status))
                                 .frame(width: 7, height: 7)
+                                // A shape has no baseline of its own; without a
+                                // guide it would hang from its bottom edge. Half
+                                // the 13pt label's x-height puts the dot's centre
+                                // on the centre of the lowercase text.
+                                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 3.5 }
                             Text(self.statusLabel(for: status))
                                 .font(.system(size: 13))
                             if isActive {
