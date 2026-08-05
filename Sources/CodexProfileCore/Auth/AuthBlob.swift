@@ -21,17 +21,10 @@ public struct AuthCredentials {
         self.accountId = accountId
         self.lastRefresh = lastRefresh
     }
-
-    public var needsRefresh: Bool {
-        guard let lastRefresh else { return true }
-        let eightDays: TimeInterval = 8 * 24 * 60 * 60
-        return Date().timeIntervalSince(lastRefresh) > eightDays
-    }
 }
 
 public enum AuthError: LocalizedError {
     case notFound, decodeFailed, missingTokens, writeFailed
-    case refreshExpired, refreshReused, refreshRevoked
     case networkError(Error), invalidResponse(String)
 
     public var errorDescription: String? {
@@ -40,9 +33,6 @@ public enum AuthError: LocalizedError {
         case .decodeFailed: return "Failed to decode auth.json"
         case .missingTokens: return "No tokens in auth.json"
         case .writeFailed: return "Failed to write auth.json"
-        case .refreshExpired: return "Refresh token expired"
-        case .refreshReused: return "Refresh token already used"
-        case .refreshRevoked: return "Refresh token revoked"
         case .networkError(let e): return "Network error: \(e.localizedDescription)"
         case .invalidResponse(let m): return "Invalid response: \(m)"
         }
