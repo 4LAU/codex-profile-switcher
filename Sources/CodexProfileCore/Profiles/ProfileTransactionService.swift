@@ -5,7 +5,6 @@ public struct PreparedProfileSwitch {
     public let outgoingProfileID: String?
     public let alreadyActive: Bool
 
-    private let targetData: Data
     private let outgoingLiveData: Data?
     private let vault: AuthVault
     private let paths: AppPaths
@@ -15,7 +14,6 @@ public struct PreparedProfileSwitch {
         profileID: String,
         outgoingProfileID: String?,
         alreadyActive: Bool,
-        targetData: Data,
         outgoingLiveData: Data?,
         vault: AuthVault,
         paths: AppPaths,
@@ -24,7 +22,6 @@ public struct PreparedProfileSwitch {
         self.profileID = profileID
         self.outgoingProfileID = outgoingProfileID
         self.alreadyActive = alreadyActive
-        self.targetData = targetData
         self.outgoingLiveData = outgoingLiveData
         self.vault = vault
         self.paths = paths
@@ -43,12 +40,26 @@ public struct PreparedProfileSwitch {
         if let outgoingProfileID, let outgoingLiveData {
             try self.vault.transact {
                 preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
-                try self.vault._saveAuthBlobUnlocked(outgoingLiveData, profileID: outgoingProfileID)
+                let existingLastRefresh = preSaveOutgoingVaultBlob
+                    .flatMap { (try? AuthBlob.load(from: $0))?.lastRefresh }
+                let outgoingLastRefresh = (try? AuthBlob.load(from: outgoingLiveData))?.lastRefresh
+                let canWriteBack: Bool
+                switch (existingLastRefresh, outgoingLastRefresh) {
+                case let (existing?, outgoing?): canWriteBack = outgoing >= existing
+                case (.some, .none): canWriteBack = false
+                default: canWriteBack = true
+                }
+                if canWriteBack {
+                    try self.vault._saveAuthBlobUnlocked(outgoingLiveData, profileID: outgoingProfileID)
+                }
             }
             didSaveOutgoingVaultBlob = true
         }
         do {
-            try AtomicFileWriter.write(self.targetData, to: self.paths.liveAuthURL, fileManager: self.fileManager)
+            guard let targetData = try self.vault.loadAuthBlob(profileID: self.profileID) else {
+                throw ProfileTransactionError.missingSavedAuth(self.profileID)
+            }
+            try AtomicFileWriter.write(targetData, to: self.paths.liveAuthURL, fileManager: self.fileManager)
         } catch {
             throw self.rollbackWriteFailure(
                 error,
@@ -81,7 +92,22 @@ public struct PreparedProfileSwitch {
         if didSaveOutgoingVaultBlob, let outgoingProfileID {
             do {
                 if let preSaveOutgoingVaultBlob {
-                    try self.vault.saveAuthBlob(preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
+                    try self.vault.transact {
+                        let currentData = try self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                        let currentLastRefresh = currentData
+                            .flatMap { (try? AuthBlob.load(from: $0))?.lastRefresh }
+                        let restoreLastRefresh = (try? AuthBlob.load(from: preSaveOutgoingVaultBlob))?.lastRefresh
+                        let canRestore: Bool
+                        switch (currentLastRefresh, restoreLastRefresh) {
+                        case let (current?, restore?): canRestore = restore >= current
+                        case (.some, .none): canRestore = false
+                        default: canRestore = true
+                        }
+                        if canRestore {
+                            try self.vault._saveAuthBlobUnlocked(
+                                preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
+                        }
+                    }
                 } else {
                     try self.vault.deleteAuthBlob(profileID: outgoingProfileID)
                 }
@@ -198,7 +224,7 @@ public struct ProfileTransactionService {
 
     public func prepareSwitch(to profileID: String) throws -> PreparedProfileSwitch {
         try ProfileValidator.validate(profileID)
-        guard var targetData = try self.vault.loadAuthBlob(profileID: profileID) else {
+        guard try self.vault.loadAuthBlob(profileID: profileID) != nil else {
             throw ProfileTransactionError.missingSavedAuth(profileID)
         }
 
@@ -206,16 +232,12 @@ public struct ProfileTransactionService {
 
         let liveData = try self.readLiveAuthIfPresent()
         let outgoingProfileID = try liveData.flatMap { try self.classifyOutgoingProfile(liveData: $0) }
-        if outgoingProfileID == profileID, let liveData {
-            targetData = liveData
-        }
         let alreadyActive = outgoingProfileID == profileID && self.isCodexDesktopRunning()
 
         return PreparedProfileSwitch(
             profileID: profileID,
             outgoingProfileID: outgoingProfileID,
             alreadyActive: alreadyActive,
-            targetData: targetData,
             outgoingLiveData: liveData,
             vault: self.vault,
             paths: self.paths,

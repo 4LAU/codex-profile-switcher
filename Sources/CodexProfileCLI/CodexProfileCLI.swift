@@ -583,6 +583,7 @@ enum CodexProfileCLI {
         guard let dir = options.dir else {
             throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]")
         }
+        fputs("Warning: best-auth --dir is deprecated; use lease begin instead; it will be removed in a future release.\n", stderr)
 
         // Non-interactive whenever stdin is not a TTY or the caller asked.
         let interactive = self.stdinIsTTY && !options.nonInteractive
@@ -594,10 +595,18 @@ enum CodexProfileCLI {
             diagnostic: "best-auth timed out after \(Int(options.timeout))s; the command was unable to complete")
 
         let dirURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL
+        let existingToken = self.loadCache().leases.values
+            .first(where: { $0.home == dirURL.path })?.token
+        let reservation = LeaseReservation(
+            token: existingToken ?? UUID().uuidString,
+            home: dirURL.path,
+            expiresAt: Date().addingTimeInterval(24 * 60 * 60),
+            createdAt: Date())
         let outcome = try self.performBestAuth(
             dirURL: dirURL,
             excludeIDs: self.parseExcludeIDs(options.excludeCSV),
-            interactive: interactive)
+            interactive: interactive,
+            reservation: reservation)
 
         if options.json {
             let report = self.makeBestAuthReport(
@@ -622,6 +631,7 @@ enum CodexProfileCLI {
 
     private struct BestAuthOutcome {
         let result: ProfileSelector.Result
+        let reservationProfileIDs: [String]
         let candidates: [ProfileCandidate]
         let cache: UsageCache
         let fetchedAny: Bool
@@ -635,7 +645,8 @@ enum CodexProfileCLI {
     private static func performBestAuth(
         dirURL: URL,
         excludeIDs: Set<String>,
-        interactive: Bool
+        interactive: Bool,
+        reservation: LeaseReservation? = nil
     ) throws -> BestAuthOutcome {
         let bestAuthVault = self.vault
 
@@ -689,10 +700,17 @@ enum CodexProfileCLI {
         }
 
         let now = Date()
+        var selectionExclusions = excludeIDs
+        let allowedReservationToken = reservation?.token
+        for (profileID, lease) in self.loadCache().leases
+            where (lease.isActive(now: now) || !lease.home.isEmpty)
+                && lease.token != allowedReservationToken {
+            selectionExclusions.insert(profileID)
+        }
         let candidates = ProfileSelector.candidates(
             profiles: eligibleProfiles,
             cache: cache,
-            excludeIDs: excludeIDs,
+            excludeIDs: selectionExclusions,
             now: now)
 
         guard let result = ProfileSelector.selectBest(from: candidates) else {
@@ -719,18 +737,46 @@ enum CodexProfileCLI {
             throw CLIError.exitStatus(1)
         }
 
-        try self.ensurePrivateDir(dirURL)
-        try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+        let selectedFingerprint = AuthBlob.identityFingerprint(from: authData)
+        let reservationProfileIDs = eligibleProfiles.compactMap { profile -> String? in
+            guard profile.id == result.profileID || selectedFingerprint != nil else { return nil }
+            guard let read = try? self.loadAuthBlobBounded(
+                bestAuthVault, profileID: profile.id, bound: readBound) else {
+                return profile.id == result.profileID ? result.profileID : nil
+            }
+            guard case let .data(data?) = read,
+                  AuthBlob.identityFingerprint(from: data) == selectedFingerprint else {
+                return profile.id == result.profileID ? result.profileID : nil
+            }
+            return profile.id
+        }
+        var didClaimReservation = false
+        do {
+            if let reservation {
+                try self.claimLease(profileIDs: reservationProfileIDs, reservation: reservation)
+                didClaimReservation = true
+            }
 
-        let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
-        let destination = dirURL.appendingPathComponent("config.toml")
-        try? self.fileManager.removeItem(at: destination)
-        if self.fileManager.fileExists(atPath: liveConfig.path) {
-            try self.fileManager.copyItem(at: liveConfig, to: destination)
+            try self.ensurePrivateDir(dirURL)
+            try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+
+            let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
+            let destination = dirURL.appendingPathComponent("config.toml")
+            try? self.fileManager.removeItem(at: destination)
+            if self.fileManager.fileExists(atPath: liveConfig.path) {
+                try self.fileManager.copyItem(at: liveConfig, to: destination)
+            }
+        } catch {
+            if didClaimReservation, let reservation {
+                try? self.removeLeases(
+                    profileIDs: reservationProfileIDs, expectedToken: reservation.token)
+            }
+            throw error
         }
 
         return BestAuthOutcome(
             result: result,
+            reservationProfileIDs: reservationProfileIDs,
             candidates: candidates,
             cache: cache,
             fetchedAny: fetchResult.fetchedAny,
@@ -742,6 +788,11 @@ enum CodexProfileCLI {
         var fetchedAny: Bool
         /// Description of the last per-profile fetch error, if any failed.
         var lastFetchError: String?
+    }
+
+    private struct UsageFetchGroup: Sendable {
+        let profileIDs: [String]
+        let authData: Data
     }
 
     /// Fetches live usage for each eligible profile (bounded concurrency 3) and
@@ -776,11 +827,13 @@ enum CodexProfileCLI {
             bound: readBound)
 
         let fetchOutcome = self.runBlocking { () -> (snapshots: [String: UsageSnapshot], lastError: String?) in
-            await withTaskGroup(of: (String, UsageSnapshot?, String?).self) { group in
-                var pending = profiles[...]
+            await withTaskGroup(of: ([String], UsageSnapshot?, String?).self) { group in
                 var inFlight = 0
                 var results: [String: UsageSnapshot] = [:]
                 var lastError: String?
+
+                var groupedProfiles: [String: [String]] = [:]
+                var groupedData: [String: Data] = [:]
 
                 func authData(for id: String) -> Data? {
                     if id == activeProfile,
@@ -794,31 +847,56 @@ enum CodexProfileCLI {
                     }
                 }
 
+                for profile in profiles {
+                    guard let data = authData(for: profile.id) else { continue }
+                    let key = AuthBlob.identityFingerprint(from: data) ?? "profile:\(profile.id)"
+                    groupedProfiles[key, default: []].append(profile.id)
+                    groupedData[key] = data
+                }
+                let groups = groupedProfiles.compactMap { key, profileIDs in
+                    groupedData[key].map { UsageFetchGroup(profileIDs: profileIDs, authData: $0) }
+                }
+                var pending = groups[...]
+
                 func enqueueNext() {
-                    guard let profile = pending.popFirst() else { return }
+                    guard let fetchGroup = pending.popFirst() else { return }
                     inFlight += 1
-                    let id = profile.id
-                    let data = authData(for: id)
                     group.addTask {
-                        guard let data else { return (id, nil, nil) }
+                        let reservation = LeaseReservation(
+                            token: UUID().uuidString,
+                            home: "",
+                            expiresAt: Date().addingTimeInterval(5 * 60),
+                            createdAt: Date())
+                        do {
+                            try self.claimLease(profileIDs: fetchGroup.profileIDs, reservation: reservation)
+                        } catch {
+                            return (fetchGroup.profileIDs, nil, error.localizedDescription)
+                        }
+                        defer {
+                            try? self.removeLeases(
+                                profileIDs: fetchGroup.profileIDs,
+                                expectedToken: reservation.token)
+                        }
                         do {
                             let snapshot = try await CLIUsageFetcher.fetch(
-                                profileId: id,
-                                authData: data,
+                                profileId: fetchGroup.profileIDs[0],
+                                authData: fetchGroup.authData,
                                 codexConfigURL: configURL,
                                 clientVersion: version)
-                            return (id, snapshot, nil)
+                            return (fetchGroup.profileIDs, snapshot, nil)
                         } catch {
-                            return (id, nil, error.localizedDescription)
+                            return (fetchGroup.profileIDs, nil, error.localizedDescription)
                         }
                     }
                 }
 
-                for _ in 0 ..< min(3, profiles.count) { enqueueNext() }
+                for _ in 0 ..< min(3, groups.count) { enqueueNext() }
                 while inFlight > 0 {
-                    if let (id, snapshot, fetchError) = await group.next() {
+                    if let (profileIDs, snapshot, fetchError) = await group.next() {
                         inFlight -= 1
-                        if let snapshot { results[id] = snapshot }
+                        if let snapshot {
+                            for profileID in profileIDs { results[profileID] = snapshot }
+                        }
                         if let fetchError { lastError = fetchError }
                         enqueueNext()
                     }
@@ -1077,8 +1155,11 @@ enum CodexProfileCLI {
                 throw CLIError.exitStatus(1)
             }
 
+            let existingCredentials: AuthCredentials
+            let updatedCredentials: AuthCredentials
             do {
-                _ = try AuthBlob.load(from: updatedData)
+                existingCredentials = try AuthBlob.load(from: existingData)
+                updatedCredentials = try AuthBlob.load(from: updatedData)
             } catch {
                 fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
                 throw CLIError.exitStatus(1)
@@ -1097,6 +1178,14 @@ enum CodexProfileCLI {
                 fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
                 throw CLIError.exitStatus(ExitCode.identityMismatch)
             }
+
+            let canWriteBack: Bool
+            switch (existingCredentials.lastRefresh, updatedCredentials.lastRefresh) {
+            case let (existing?, updated?): canWriteBack = updated >= existing
+            case (.some, .none): canWriteBack = false
+            default: canWriteBack = true
+            }
+            guard canWriteBack else { return }
 
             try vault._saveAuthBlobUnlocked(updatedData, profileID: profile)
         }
@@ -1173,10 +1262,18 @@ enum CodexProfileCLI {
         var attempt = 1
         while true {
             let tempHome = try self.makeTempHome(profile: "exec")
+            var reservedProfileIDs: [String] = []
+            var reservationToken: String?
             // Per-iteration defer: the temp home holds a live credential, so it
             // must be removed on EVERY exit from this iteration — success,
             // rotation, or any throw (including runChild failures).
-            defer { try? self.fileManager.removeItem(at: tempHome) }
+            defer {
+                if !reservedProfileIDs.isEmpty, let reservationToken {
+                    try? self.removeLeases(
+                        profileIDs: reservedProfileIDs, expectedToken: reservationToken)
+                }
+                try? self.fileManager.removeItem(at: tempHome)
+            }
             let profile: String
             do {
                 // The watchdog only covers profile selection; it is disarmed
@@ -1185,10 +1282,19 @@ enum CodexProfileCLI {
                     seconds: options.timeout,
                     diagnostic: "exec: profile selection timed out after \(Int(options.timeout))s")
                 defer { disarm() }
-                profile = try self.performBestAuth(
+                let reservation = LeaseReservation(
+                    token: UUID().uuidString,
+                    home: tempHome.path,
+                    expiresAt: Date().addingTimeInterval(24 * 60 * 60),
+                    createdAt: Date())
+                let outcome = try self.performBestAuth(
                     dirURL: tempHome,
                     excludeIDs: excludeIDs,
-                    interactive: interactive).result.profileID
+                    interactive: interactive,
+                    reservation: reservation)
+                profile = outcome.result.profileID
+                reservedProfileIDs = outcome.reservationProfileIDs
+                reservationToken = reservation.token
             } catch {
                 if attempt > 1 {
                     fputs("[codex-profile] no further profiles available after \(attempt - 1) usage-limited attempt(s)\n", stderr)
@@ -1578,13 +1684,24 @@ enum CodexProfileCLI {
     /// Losing the claim throws `LeaseClaimLost` rather than `CLIError` so `begin`
     /// can retry on a different account without swallowing unrelated failures.
     private static func claimLease(profileID: String, reservation: LeaseReservation) throws {
+        try self.claimLease(profileIDs: [profileID], reservation: reservation)
+    }
+
+    private static func claimLease(profileIDs: [String], reservation: LeaseReservation) throws {
         try self.withCacheLock {
             var cache = self.reconciledCache()
-            if let existing = cache.leases[profileID],
-               existing.token != reservation.token {
-                throw LeaseClaimLost(profileID: profileID)
+            for profileID in profileIDs {
+                if let existing = cache.leases[profileID], existing.token != reservation.token {
+                    guard existing.isActive() || !existing.home.isEmpty else {
+                        cache.leases.removeValue(forKey: profileID)
+                        continue
+                    }
+                    throw LeaseClaimLost(profileID: profileID)
+                }
             }
-            cache.leases[profileID] = reservation
+            for profileID in profileIDs {
+                cache.leases[profileID] = reservation
+            }
             try self.saveCache(cache)
         }
     }
@@ -1594,12 +1711,18 @@ enum CodexProfileCLI {
     /// deleting a FRESH lease that a concurrent `begin` placed on the same
     /// profile after the one we meant to remove. `nil` token = unconditional.
     private static func removeLease(profileID: String, expectedToken: String? = nil) throws {
+        try self.removeLeases(profileIDs: [profileID], expectedToken: expectedToken)
+    }
+
+    private static func removeLeases(profileIDs: [String], expectedToken: String? = nil) throws {
         try self.withCacheLock {
             var cache = self.reconciledCache()
-            if let expectedToken, cache.leases[profileID]?.token != expectedToken {
-                return  // a concurrent writer replaced this lease; leave theirs intact
+            for profileID in profileIDs {
+                if let expectedToken, cache.leases[profileID]?.token != expectedToken {
+                    continue  // a concurrent writer replaced this lease; leave theirs intact
+                }
+                cache.leases.removeValue(forKey: profileID)
             }
-            cache.leases.removeValue(forKey: profileID)
             try self.saveCache(cache)
         }
     }
@@ -1853,7 +1976,7 @@ enum CodexProfileCLI {
         let gcVault = self.vault
         for (profileID, lease) in self.loadCache().leases where !lease.isActive(now: now) {
             var writebackFailed = false
-            if self.isLeaseHome(lease.home, token: lease.token) {
+            if !lease.home.isEmpty {
                 do {
                     try self.importRefreshedAuth(
                         dirURL: URL(fileURLWithPath: lease.home),
@@ -1876,7 +1999,13 @@ enum CodexProfileCLI {
                     }
                 }
                 if !writebackFailed {
-                    try? self.fileManager.removeItem(atPath: lease.home)
+                    // isLeaseHome standardizes both paths before comparing, which
+                    // matters because /var and /private/var name the same directory.
+                    // It also already refuses anything outside leasesRoot, so an
+                    // exported --dir home is left for its owner.
+                    if self.isLeaseHome(lease.home, token: lease.token) {
+                        try? self.fileManager.removeItem(atPath: lease.home)
+                    }
                 }
             }
             if !writebackFailed {

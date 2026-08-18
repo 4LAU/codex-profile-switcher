@@ -48,26 +48,26 @@ final class UsageProvider {
 
         let profiles = self.store.config.profiles
         let liveId = self.store.liveProfileId ?? ""
-        let contexts: [(String, UsageSnapshot?)] = profiles.map { p in
-            (p.id, self.store.cache.snapshots[p.id])
+        let contexts = profiles.map { p in
+            RefreshContext(id: p.id, cached: self.store.cache.snapshots[p.id], isLive: p.id == liveId)
         }
+        let source = self.store.usageAuthSource()
 
         self.refreshTask = Task { @MainActor in
+            let groups = await Self.groupContexts(contexts, source: source)
             await withTaskGroup(of: Void.self) { group in
-                var pending = contexts[...]
+                var pending = groups[...]
                 let initialBatch = min(3, pending.count)
                 for _ in 0 ..< initialBatch {
-                    let (id, cached) = pending.removeFirst()
+                    let fetchGroup = pending.removeFirst()
                     group.addTask { @MainActor in
-                        await self.refreshProfile(
-                            id, activeProfileId: liveId, cached: cached, generation: generation)
+                        await self.refreshGroup(fetchGroup, generation: generation, source: source)
                     }
                 }
                 for await _ in group {
-                    if let (id, cached) = pending.popFirst() {
+                    if let fetchGroup = pending.popFirst() {
                         group.addTask { @MainActor in
-                            await self.refreshProfile(
-                                id, activeProfileId: liveId, cached: cached, generation: generation)
+                            await self.refreshGroup(fetchGroup, generation: generation, source: source)
                         }
                     }
                 }
@@ -82,20 +82,46 @@ final class UsageProvider {
         }
     }
 
-    private func refreshProfile(
-        _ id: String, activeProfileId: String, cached: UsageSnapshot?, generation: UUID
+    private struct RefreshContext {
+        let id: String
+        let cached: UsageSnapshot?
+        let isLive: Bool
+    }
+
+    private struct RefreshGroup {
+        var contexts: [RefreshContext]
+        let authData: Data?
+    }
+
+    private nonisolated static func groupContexts(
+        _ contexts: [RefreshContext], source: ProfileStore.UsageAuthSource
+    ) async -> [RefreshGroup] {
+        var groups: [String: RefreshGroup] = [:]
+        for context in contexts {
+            let authData = try? await Self.loadAuthData(
+                source: source, profileID: context.id, isLive: context.isLive)
+            let key = authData.flatMap { AuthBlob.identityFingerprint(from: $0) } ?? "profile:\(context.id)"
+            if var group = groups[key] {
+                group.contexts.append(context)
+                groups[key] = group
+            } else {
+                groups[key] = RefreshGroup(contexts: [context], authData: authData ?? nil)
+            }
+        }
+        return Array(groups.values)
+    }
+
+    private func refreshGroup(
+        _ fetchGroup: RefreshGroup, generation: UUID, source: ProfileStore.UsageAuthSource
     ) async {
         guard !self.store.isAuthMutationInProgress() else { return }
-        var diagnostics = ProfileRefreshDiagnostics(lastAttemptAt: Date())
+        var diagnostics = Dictionary(uniqueKeysWithValues: fetchGroup.contexts.map {
+            ($0.id, ProfileRefreshDiagnostics(lastAttemptAt: Date()))
+        })
 
-        // Snapshot the plain values the blocking reads need, on the main actor.
-        // `UsageAuthSource` carries only immutable value types (the vault is an
-        // immutable struct conformer), so the read can run off the main actor
-        // without touching ProfileStore's mutable state.
-        let source = self.store.usageAuthSource()
-        let isLive = id == activeProfileId
-
-        func finalize(_ status: ProfileStatus, decision: String) async {
+        func finalize(
+            _ context: RefreshContext, _ status: ProfileStatus, decision: String
+        ) async {
             // Bail if the refresh was cancelled (e.g. by cancelRefreshes() during
             // a profile switch). Prevents in-flight stale writes from landing.
             guard !Task.isCancelled, self.refreshGeneration == generation else { return }
@@ -105,66 +131,148 @@ final class UsageProvider {
             // profile changed mid-flight, this snapshot was read against the wrong
             // auth.json and must not be written under `id`. The post-switch forced
             // refreshAll will supply correct data, so we drop the result here.
-            let currentlyLive = id == (self.store.liveProfileId ?? "")
-            if isLive != currentlyLive { return }
+            let currentlyLive = context.id == (self.store.liveProfileId ?? "")
+            if context.isLive != currentlyLive { return }
 
-            diagnostics.lastDecision = decision
+            diagnostics[context.id]?.lastDecision = decision
             // Re-check whether auth was torn down while we fetched. Live profiles
             // use a cheap main-safe file stat; non-live profiles re-query the
             // vault, but off the main actor so a Keychain consent prompt cannot
             // block the menu bar.
             let stillAvailable = currentlyLive
                 ? self.store.liveAuthExists()
-                : await Self.loadAuthAvailability(source: source, profileID: id)
+                : await Self.loadAuthAvailability(source: source, profileID: context.id)
             guard !Task.isCancelled, self.refreshGeneration == generation else { return }
             if !stillAvailable {
-                let overrideDecision = cached != nil ? "relogin-needed" : "not-set-up"
-                diagnostics.lastDecision = overrideDecision
-                self.store.updateRefreshDiagnostics(id, diagnostics)
-                self.store.updateStatus(id, cached.map { .reloginNeeded($0) } ?? .notSetUp)
+                let overrideDecision = context.cached != nil ? "relogin-needed" : "not-set-up"
+                diagnostics[context.id]?.lastDecision = overrideDecision
+                self.store.updateRefreshDiagnostics(context.id, diagnostics[context.id]!)
+                self.store.updateStatus(context.id, context.cached.map { .reloginNeeded($0) } ?? .notSetUp)
                 return
             }
-            self.store.updateRefreshDiagnostics(id, diagnostics)
-            self.store.updateStatus(id, status)
+            self.store.updateRefreshDiagnostics(context.id, diagnostics[context.id]!)
+            self.store.updateStatus(context.id, status)
+        }
+
+        guard let authData = fetchGroup.authData else {
+            for context in fetchGroup.contexts {
+                await finalize(context, .notSetUp, decision: "not-set-up")
+            }
+            return
+        }
+
+        let reservation = LeaseReservation(
+            token: UUID().uuidString,
+            home: "",
+            expiresAt: Date().addingTimeInterval(5 * 60),
+            createdAt: Date())
+        guard Self.claimLease(
+            profileIDs: fetchGroup.contexts.map(\.id), reservation: reservation) else {
+            for context in fetchGroup.contexts {
+                await finalize(context, .stale(context.cached), decision: "reserved")
+            }
+            return
+        }
+        defer {
+            Self.removeLease(
+                profileIDs: fetchGroup.contexts.map(\.id), expectedToken: reservation.token)
         }
 
         do {
-            // Perform the potentially-blocking auth read off the main actor. A
-            // single read replaces the prior availability-check + load (two
-            // Keychain hits) while preserving the outcome: no auth -> notSetUp.
-            guard let authData = try await Self.loadAuthData(source: source, profileID: id, isLive: isLive) else {
-                await finalize(.notSetUp, decision: "not-set-up")
-                return
-            }
             let snapshot = try await CLIUsageFetcher.fetch(
-                profileId: id, authData: authData, codexConfigURL: self.store.codexConfigURL(),
+                profileId: fetchGroup.contexts[0].id, authData: authData, codexConfigURL: self.store.codexConfigURL(),
                 clientVersion: AppInfo.version)
-            diagnostics.lastError = nil
-            await finalize(.available(snapshot), decision: "available")
-            AppLogger.info("Usage refresh succeeded", metadata: ["profile": id])
+            for context in fetchGroup.contexts {
+                diagnostics[context.id]?.lastError = nil
+                await finalize(context, .available(snapshot), decision: "available")
+                AppLogger.info("Usage refresh succeeded", metadata: ["profile": context.id])
+            }
         } catch is CancellationError {
             return
         } catch let error as CodexRPCError where error.isAuthRequired {
-            diagnostics.lastError = error.localizedDescription
-            await finalize(.reloginNeeded(cached), decision: "relogin-needed")
-            AppLogger.warning("Usage refresh requires re-login",
-                              metadata: ["profile": id, "error": error.localizedDescription])
+            for context in fetchGroup.contexts {
+                diagnostics[context.id]?.lastError = error.localizedDescription
+                await finalize(context, .reloginNeeded(context.cached), decision: "relogin-needed")
+                AppLogger.warning("Usage refresh requires re-login",
+                                  metadata: ["profile": context.id, "error": error.localizedDescription])
+            }
         } catch let error as AuthError {
-            if case .notFound = error {
-                diagnostics.lastError = error.localizedDescription
-                await finalize(.notSetUp, decision: "not-set-up")
-            } else {
-                diagnostics.lastError = error.localizedDescription
-                await finalize(.stale(cached), decision: "stale")
-                AppLogger.warning("Usage refresh failed",
-                                  metadata: ["profile": id, "error": error.localizedDescription])
+            for context in fetchGroup.contexts {
+                diagnostics[context.id]?.lastError = error.localizedDescription
+                if case .notFound = error {
+                    await finalize(context, .notSetUp, decision: "not-set-up")
+                } else {
+                    await finalize(context, .stale(context.cached), decision: "stale")
+                    AppLogger.warning("Usage refresh failed",
+                                      metadata: ["profile": context.id, "error": error.localizedDescription])
+                }
             }
         } catch {
-            diagnostics.lastError = error.localizedDescription
-            await finalize(.stale(cached), decision: "stale")
-            AppLogger.warning("Usage refresh failed", metadata: ["profile": id, "error": error.localizedDescription])
+            for context in fetchGroup.contexts {
+                diagnostics[context.id]?.lastError = error.localizedDescription
+                await finalize(context, .stale(context.cached), decision: "stale")
+                AppLogger.warning("Usage refresh failed",
+                                  metadata: ["profile": context.id, "error": error.localizedDescription])
+            }
         }
     }
+
+    private nonisolated static func claimLease(
+        profileIDs: [String], reservation: LeaseReservation
+    ) -> Bool {
+        let paths = AppPaths()
+        do {
+            try CacheLock.withLock(at: paths.cacheLockURL) {
+                var cache = Self.loadCache(paths: paths)
+                for profileID in profileIDs {
+                    if let existing = cache.leases[profileID], existing.token != reservation.token {
+                        guard existing.isActive() || !existing.home.isEmpty else {
+                            cache.leases.removeValue(forKey: profileID)
+                            continue
+                        }
+                        throw LeaseClaimLost()
+                    }
+                }
+                for profileID in profileIDs {
+                    cache.leases[profileID] = reservation
+                }
+                try Self.saveCache(cache, paths: paths)
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private nonisolated static func removeLease(
+        profileIDs: [String], expectedToken: String
+    ) {
+        let paths = AppPaths()
+        try? CacheLock.withLock(at: paths.cacheLockURL) {
+            var cache = Self.loadCache(paths: paths)
+            for profileID in profileIDs where cache.leases[profileID]?.token == expectedToken {
+                cache.leases.removeValue(forKey: profileID)
+            }
+            try Self.saveCache(cache, paths: paths)
+        }
+    }
+
+    private nonisolated static func loadCache(paths: AppPaths) -> UsageCache {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? Data(contentsOf: paths.cacheURL))
+            .flatMap { try? decoder.decode(UsageCache.self, from: $0) }
+            ?? UsageCache(snapshots: [:])
+    }
+
+    private nonisolated static func saveCache(_ cache: UsageCache, paths: AppPaths) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try AtomicFileWriter.write(try encoder.encode(cache), to: paths.cacheURL)
+    }
+
+    private struct LeaseClaimLost: Error {}
 
     /// Loads the auth blob off the main actor. `nonisolated` so that awaiting it
     /// from the main actor runs the body on the global concurrent executor,
