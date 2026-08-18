@@ -37,6 +37,8 @@ private enum ExitCode {
     static let identityMismatch: Int32 = 5
     static let keychainInteractionRequired: Int32 = 6
     static let watchdogTimeout: Int32 = 7
+    static let renewalRejected: Int32 = 8
+    static let endpointUnreachable: Int32 = 9
     // 1 = generic failure (default in main()).
 }
 
@@ -74,6 +76,7 @@ enum CodexProfileCLI {
             case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
             case "import-auth": try self.commandImportAuth(args)
+            case "renew": try self.commandRenew(args)
             case "lease": try self.commandLease(args)
             case "help", "-h", "--help": self.usage()
             default: throw CLIError.message("Unknown command '\(command)'. See \(self.program) help.")
@@ -104,6 +107,7 @@ enum CodexProfileCLI {
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
           \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
           \(self.program) import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
+          \(self.program) renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]
           \(self.program) lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
           \(self.program) lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
           \(self.program) lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]
@@ -1217,6 +1221,655 @@ enum CodexProfileCLI {
             guard canWriteBack else { return }
 
             try vault._saveAuthBlobUnlocked(updatedData, profileID: profile)
+        }
+    }
+
+    private struct RenewalOptions {
+        var profile: String?
+        var force = false
+        var dryRun = false
+        var json = false
+        var timeout: TimeInterval = 120
+    }
+
+    private struct RenewalProfile {
+        let id: String
+        let data: Data?
+        let credentials: AuthCredentials?
+    }
+
+    private struct RenewalGroup {
+        let refreshToken: String
+        let profileIDs: [String]
+    }
+
+    private enum RenewalAction: String, Codable {
+        case renewed
+        case skipped
+        case rejected
+        case unreachable
+        case recovered
+    }
+
+    private struct RenewalRecord: Codable {
+        let id: String
+        let action: RenewalAction
+        let reason: String
+        let ageDays: Double?
+        let credential: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, action, reason
+            case ageDays = "age_days"
+            case credential
+        }
+    }
+
+    private struct RenewalReport: Codable {
+        let records: [RenewalRecord]
+        let requests: Int
+    }
+
+    private struct RenewalStash: Codable {
+        let blob: Data
+        let predecessorDigest: String
+
+        enum CodingKeys: String, CodingKey {
+            case blob
+            case predecessorDigest = "predecessor_digest"
+        }
+    }
+
+    private struct RenewalRequestResult: @unchecked Sendable {
+        let credentials: AuthCredentials?
+        let error: TokenRenewalError?
+    }
+
+    private struct RenewalInput: @unchecked Sendable {
+        let credentials: AuthCredentials
+    }
+
+    private struct RenewalReservationLost: Error {}
+    private struct RenewalCredentialChanged: Error {}
+    private struct RenewalIdentityMismatch: Error {}
+
+    private static func parseRenewalOptions(_ args: [String]) throws -> RenewalOptions {
+        var options = RenewalOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--profile":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--profile requires a profile ID")
+                }
+                i += 1
+                options.profile = args[i]
+            case "--force":
+                options.force = true
+            case "--dry-run":
+                options.dryRun = true
+            case "--json":
+                options.json = true
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            default:
+                throw CLIError.message(
+                    "Unknown argument: \(args[i]). Usage: \(self.program) renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]")
+            }
+            i += 1
+        }
+        if let profile = options.profile {
+            try self.validateProfile(profile)
+        }
+        return options
+    }
+
+    private static var renewalStashRoot: URL {
+        self.paths.switcherHome.appendingPathComponent("renew-stash", isDirectory: true)
+    }
+
+    private static func renewalCredentialDigest(_ refreshToken: String) -> String {
+        SHA256.hash(data: Data(refreshToken.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func renewalCredentialFingerprint(_ refreshToken: String) -> String {
+        String(self.renewalCredentialDigest(refreshToken).prefix(12))
+    }
+
+    private static func renewalStashURL(profileID: String) -> URL {
+        self.renewalStashRoot.appendingPathComponent(profileID + ".json")
+    }
+
+    private static func renewalRecord(
+        _ profile: RenewalProfile,
+        action: RenewalAction,
+        reason: String,
+        now: Date
+    ) -> RenewalRecord {
+        let ageDays = profile.credentials?.lastRefresh.map {
+            now.timeIntervalSince($0) / (24 * 60 * 60)
+        }
+        let credential = profile.credentials.flatMap {
+            $0.refreshToken.isEmpty ? nil : self.renewalCredentialFingerprint($0.refreshToken)
+        }
+        return RenewalRecord(
+            id: profile.id,
+            action: action,
+            reason: reason,
+            ageDays: ageDays,
+            credential: credential)
+    }
+
+    private static func commandRenew(_ args: [String]) throws {
+        let options = try self.parseRenewalOptions(args)
+        let now = Date()
+        let disarmWatchdog = self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "renew timed out after \(Int(options.timeout))s")
+        defer { disarmWatchdog() }
+
+        let configuredIDs = self.configStore.loadConfig()?.profiles.map(\.id) ?? []
+        let storedIDs = try self.vault.listProfileIDs().filter(ProfileValidator.isValid)
+        var allIDs = Set(configuredIDs.filter(ProfileValidator.isValid))
+        allIDs.formUnion(storedIDs)
+        if let selected = options.profile, !allIDs.contains(selected) {
+            throw CLIError.exitStatus(ExitCode.noEligibleProfile)
+        }
+
+        let readBound = min(options.timeout, 5)
+        var profiles: [String: RenewalProfile] = [:]
+        for id in allIDs.sorted() {
+            do {
+                let outcome = try self.loadAuthBlobBounded(
+                    self.vault, profileID: id, bound: readBound)
+                switch outcome {
+                case .data(let data):
+                    profiles[id] = RenewalProfile(
+                        id: id,
+                        data: data,
+                        credentials: data.flatMap { try? AuthBlob.load(from: $0) })
+                case .interactionRequired:
+                    throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+                }
+            } catch {
+                if self.isKeychainInteractionRequired(error) {
+                    throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+                }
+                throw error
+            }
+        }
+
+        let selectedIDs: Set<String>
+        if let selected = options.profile,
+           let selectedProfile = profiles[selected],
+           let credentials = selectedProfile.credentials,
+           !credentials.refreshToken.isEmpty {
+            let group = profiles.values.compactMap { profile -> String? in
+                guard let other = profile.credentials,
+                      other.refreshToken == credentials.refreshToken else { return nil }
+                return profile.id
+            }
+            selectedIDs = Set(group)
+        } else if let selected = options.profile {
+            selectedIDs = [selected]
+        } else {
+            selectedIDs = Set(profiles.keys)
+        }
+
+        var records = Dictionary(uniqueKeysWithValues: profiles.values.map {
+            profile in
+            let reason: String
+            if profile.data == nil {
+                reason = "no_stored_auth"
+            } else if profile.credentials == nil {
+                reason = "invalid_auth"
+            } else if profile.credentials?.refreshToken.isEmpty == true {
+                reason = "api_key"
+            } else {
+                reason = "pending"
+            }
+            return (
+                profile.id,
+                self.renewalRecord(profile, action: .skipped, reason: reason, now: now))
+        })
+        records = Dictionary(uniqueKeysWithValues: records.filter {
+            selectedIDs.contains($0.key)
+        })
+
+        var groupsByToken: [String: [String]] = [:]
+        for profileID in selectedIDs {
+            guard let profile = profiles[profileID],
+                  let credentials = profile.credentials,
+                  !credentials.refreshToken.isEmpty else { continue }
+            groupsByToken[credentials.refreshToken, default: []].append(profileID)
+        }
+        let groups = groupsByToken.map {
+            RenewalGroup(refreshToken: $0.key, profileIDs: $0.value.sorted())
+        }.sorted { lhs, rhs in
+            let leftDate = lhs.profileIDs.compactMap { profiles[$0]?.credentials?.lastRefresh }.min()
+            let rightDate = rhs.profileIDs.compactMap { profiles[$0]?.credentials?.lastRefresh }.min()
+            switch (leftDate, rightDate) {
+            case (nil, nil): return lhs.refreshToken < rhs.refreshToken
+            case (nil, _): return true
+            case (_, nil): return false
+            case let (left?, right?): return left < right
+            }
+        }
+
+        var terminalStatus = ExitCode.success
+        var sawRejected = false
+        var sawUnreachable = false
+        var requestCount = 0
+        for group in groups {
+            do {
+                let outcome = try self.renewGroup(
+                    group,
+                    profiles: profiles,
+                    options: options,
+                    now: now,
+                    requestCount: &requestCount)
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: outcome.action,
+                            reason: outcome.reason,
+                            now: now)
+                    }
+                }
+                if outcome.action == .rejected {
+                    sawRejected = true
+                } else if outcome.action == .unreachable {
+                    sawUnreachable = true
+                }
+            } catch is RenewalIdentityMismatch {
+                terminalStatus = ExitCode.identityMismatch
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: .skipped,
+                            reason: "identity_mismatch",
+                            now: now)
+                    }
+                }
+            } catch is RenewalCredentialChanged {
+                if terminalStatus == ExitCode.success { terminalStatus = 1 }
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: .skipped,
+                            reason: "credential_changed",
+                            now: now)
+                    }
+                }
+            } catch is RenewalReservationLost {
+                if terminalStatus == ExitCode.success { terminalStatus = 1 }
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: .skipped,
+                            reason: "reservation_lost",
+                            now: now)
+                    }
+                }
+            } catch CLIError.exitStatus(let status) where status == ExitCode.keychainInteractionRequired {
+                terminalStatus = status
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: .skipped,
+                            reason: "keychain_interaction_required",
+                            now: now)
+                    }
+                }
+            } catch {
+                throw error
+            }
+        }
+
+        if terminalStatus == ExitCode.success {
+            if sawRejected {
+                terminalStatus = ExitCode.renewalRejected
+            } else if sawUnreachable {
+                terminalStatus = ExitCode.endpointUnreachable
+            }
+        }
+
+        if !options.dryRun {
+            do {
+                try self.reconcileLiveAuth()
+            } catch {
+                if self.isKeychainInteractionRequired(error) {
+                    terminalStatus = ExitCode.keychainInteractionRequired
+                } else {
+                    throw error
+                }
+            }
+        }
+
+        let orderedRecords = records.values.sorted { $0.id < $1.id }
+        if options.json {
+            let report = RenewalReport(records: orderedRecords, requests: requestCount)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            for record in orderedRecords {
+                print("\(record.id): \(record.action.rawValue) (\(record.reason))")
+            }
+            let counts = Dictionary(grouping: orderedRecords, by: \.action)
+                .mapValues(\.count)
+            print(
+                "Summary: renewed \(counts[.renewed, default: 0]), recovered \(counts[.recovered, default: 0]), skipped \(counts[.skipped, default: 0]), rejected \(counts[.rejected, default: 0]), unreachable \(counts[.unreachable, default: 0]); requests \(requestCount)")
+        }
+
+        if terminalStatus != ExitCode.success {
+            throw CLIError.exitStatus(terminalStatus)
+        }
+    }
+
+    private struct RenewalGroupOutcome {
+        let action: RenewalAction
+        let reason: String
+    }
+
+    private static func renewGroup(
+        _ group: RenewalGroup,
+        profiles: [String: RenewalProfile],
+        options: RenewalOptions,
+        now: Date,
+        requestCount: inout Int
+    ) throws -> RenewalGroupOutcome {
+        var stashByProfile: [String: RenewalStash] = [:]
+        var discardedStash = false
+        for profileID in group.profileIDs {
+            let url = self.renewalStashURL(profileID: profileID)
+            guard self.fileManager.fileExists(atPath: url.path) else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let stash = try? JSONDecoder().decode(RenewalStash.self, from: data),
+                  let profile = profiles[profileID],
+                  let credentials = profile.credentials else {
+                discardedStash = true
+                if !options.dryRun { try? self.fileManager.removeItem(at: url) }
+                continue
+            }
+            let matches = stash.predecessorDigest
+                == self.renewalCredentialDigest(credentials.refreshToken)
+                && AuthBlob.isPlausibleAuthBlob(stash.blob)
+            if matches {
+                stashByProfile[profileID] = stash
+            } else {
+                discardedStash = true
+                if !options.dryRun { try? self.fileManager.removeItem(at: url) }
+            }
+        }
+
+        let hasRecovery = !stashByProfile.isEmpty
+        let reasonPrefix = discardedStash ? "stale_stash_discarded;" : ""
+        let cacheDecision = try self.reserveRenewal(
+            group: group,
+            profiles: profiles,
+            force: options.force || hasRecovery,
+            now: now,
+            timeout: options.timeout,
+            dryRun: options.dryRun)
+        guard let reservation = cacheDecision.reservation else {
+            return RenewalGroupOutcome(
+                action: .skipped,
+                reason: reasonPrefix + cacheDecision.reason)
+        }
+        if options.dryRun {
+            return RenewalGroupOutcome(
+                action: hasRecovery ? .recovered : .renewed,
+                reason: hasRecovery
+                    ? reasonPrefix + "recovery_available"
+                    : reasonPrefix + "would_renew")
+        }
+
+        var reservationOwned = true
+        defer {
+            if reservationOwned {
+                try? self.removeLeases(
+                    profileIDs: group.profileIDs, expectedToken: reservation.token)
+            }
+        }
+
+        try self.proveRenewalWritePath(group: group)
+
+        var updatedData: [String: Data] = [:]
+        let action: RenewalAction
+        let reason: String
+        if hasRecovery {
+            action = .recovered
+            reason = reasonPrefix + "recovered_stash"
+            updatedData = Dictionary(uniqueKeysWithValues: group.profileIDs.compactMap {
+                profileID in
+                guard let stash = stashByProfile[profileID]
+                    ?? stashByProfile.values.first else { return nil }
+                return (profileID, stash.blob)
+            })
+        } else {
+            let representative = profiles[group.profileIDs[0]]!
+            let input = RenewalInput(credentials: representative.credentials!)
+            let result = self.runBlocking { () -> RenewalRequestResult in
+                do {
+                    let credentials = try await TokenRenewal.renew(
+                        credentials: input.credentials,
+                        using: URLSessionTokenRefresher())
+                    return RenewalRequestResult(credentials: credentials, error: nil)
+                } catch let error as TokenRenewalError {
+                    return RenewalRequestResult(credentials: nil, error: error)
+                } catch {
+                    return RenewalRequestResult(
+                        credentials: nil,
+                        error: .unreachable(error.localizedDescription))
+                }
+            }
+            requestCount += 1
+            if let error = result.error {
+                switch error {
+                case .rejected(let message):
+                    return RenewalGroupOutcome(action: .rejected, reason: message)
+                case .unreachable(let message):
+                    return RenewalGroupOutcome(action: .unreachable, reason: message)
+                }
+            }
+            guard let renewed = result.credentials else {
+                return RenewalGroupOutcome(
+                    action: .unreachable, reason: "No renewal response")
+            }
+            for profileID in group.profileIDs {
+                guard let existingData = profiles[profileID]?.data else { continue }
+                updatedData[profileID] = try AuthBlob.updatedData(
+                    from: existingData, with: renewed)
+            }
+            action = .renewed
+            reason = reasonPrefix + "renewed"
+
+            try AtomicFileWriter.ensurePrivateDirectory(self.renewalStashRoot)
+            let encoder = JSONEncoder()
+            for profileID in group.profileIDs {
+                let stash = RenewalStash(
+                    blob: updatedData[profileID]!,
+                    predecessorDigest: self.renewalCredentialDigest(group.refreshToken))
+                try AtomicFileWriter.write(
+                    try encoder.encode(stash),
+                    to: self.renewalStashURL(profileID: profileID))
+            }
+        }
+
+        try self.commitRenewal(
+            group: group,
+            reservation: reservation,
+            expectedRefreshToken: group.refreshToken,
+            updatedData: updatedData)
+        reservationOwned = false
+        return RenewalGroupOutcome(action: action, reason: reason)
+    }
+
+    private static func proveRenewalWritePath(
+        group: RenewalGroup
+    ) throws {
+        do {
+            try self.vault.transact {
+                for profileID in group.profileIDs {
+                    guard let current = try self.vault.loadAuthBlob(profileID: profileID),
+                          let credentials = try? AuthBlob.load(from: current),
+                          credentials.refreshToken == group.refreshToken else {
+                        throw RenewalCredentialChanged()
+                    }
+                    try self.vault._saveAuthBlobUnlocked(current, profileID: profileID)
+                }
+            }
+        } catch {
+            if self.isKeychainInteractionRequired(error) {
+                throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+            }
+            throw error
+        }
+    }
+
+    private static func reserveRenewal(
+        group: RenewalGroup,
+        profiles: [String: RenewalProfile],
+        force: Bool,
+        now: Date,
+        timeout: TimeInterval,
+        dryRun: Bool
+    ) throws -> (reservation: LeaseReservation?, reason: String) {
+        if dryRun {
+            let cache = self.reconciledCache()
+            if group.profileIDs.contains(where: { cache.leases[$0] != nil }) {
+                return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
+            }
+            let due = force || group.profileIDs.contains {
+                guard let lastRefresh = profiles[$0]?.credentials?.lastRefresh else { return true }
+                return RenewalPolicy().isDue(lastRefresh: lastRefresh, now: now)
+            }
+            guard due else {
+                return (reservation: nil as LeaseReservation?, reason: "not_due")
+            }
+            return (
+                LeaseReservation(
+                    token: UUID().uuidString,
+                    home: "",
+                    expiresAt: now.addingTimeInterval(timeout + 60),
+                    createdAt: now),
+                "")
+        }
+
+        return try self.withCacheLock {
+            let cache = self.reconciledCache()
+            if group.profileIDs.contains(where: { cache.leases[$0] != nil }) {
+                return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
+            }
+            let policy = RenewalPolicy()
+            let due = force || group.profileIDs.contains {
+                guard let lastRefresh = profiles[$0]?.credentials?.lastRefresh else { return true }
+                return policy.isDue(lastRefresh: lastRefresh, now: now)
+            }
+            guard due else {
+                return (reservation: nil as LeaseReservation?, reason: "not_due")
+            }
+
+            let reservation = LeaseReservation(
+                token: UUID().uuidString,
+                home: "",
+                expiresAt: now.addingTimeInterval(timeout + 60),
+                createdAt: now)
+            var updated = cache
+            for profileID in group.profileIDs {
+                updated.leases[profileID] = reservation
+            }
+            try self.saveCache(updated)
+            return (reservation, "")
+        }
+    }
+
+    private static func commitRenewal(
+        group: RenewalGroup,
+        reservation: LeaseReservation,
+        expectedRefreshToken: String,
+        updatedData: [String: Data]
+    ) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            guard group.profileIDs.allSatisfy({
+                cache.leases[$0]?.token == reservation.token
+            }) else {
+                throw RenewalReservationLost()
+            }
+
+            try self.vault.transact {
+                for profileID in group.profileIDs {
+                    guard let current = try self.vault.loadAuthBlob(profileID: profileID),
+                          let currentCredentials = try? AuthBlob.load(from: current),
+                          currentCredentials.refreshToken == expectedRefreshToken else {
+                        throw RenewalCredentialChanged()
+                    }
+                    guard let replacement = updatedData[profileID],
+                          let currentFingerprint = AuthBlob.identityFingerprint(from: current),
+                          let replacementFingerprint = AuthBlob.identityFingerprint(from: replacement),
+                          currentFingerprint == replacementFingerprint else {
+                        throw RenewalIdentityMismatch()
+                    }
+                    try self.vault._saveAuthBlobUnlocked(replacement, profileID: profileID)
+                }
+            }
+
+            for profileID in group.profileIDs {
+                try? self.fileManager.removeItem(at: self.renewalStashURL(profileID: profileID))
+                cache.leases.removeValue(forKey: profileID)
+            }
+            try self.saveCache(cache)
+        }
+    }
+
+    private static func reconcileLiveAuth() throws {
+        try self.vault.transact {
+            guard let liveData = try? Data(contentsOf: self.paths.liveAuthURL),
+                  let liveCredentials = try? AuthBlob.load(from: liveData),
+                  let liveFingerprint = AuthBlob.identityFingerprint(from: liveData) else {
+                return
+            }
+
+            var newest: (data: Data, credentials: AuthCredentials)?
+            for profileID in try self.vault.listProfileIDs()
+                where ProfileValidator.isValid(profileID) {
+                guard let data = try self.vault.loadAuthBlob(profileID: profileID),
+                      let credentials = try? AuthBlob.load(from: data),
+                      AuthBlob.identityFingerprint(from: data) == liveFingerprint else {
+                    continue
+                }
+                if newest == nil
+                    || (credentials.lastRefresh ?? .distantPast)
+                    > (newest?.credentials.lastRefresh ?? .distantPast) {
+                    newest = (data, credentials)
+                }
+            }
+            guard let newest else { return }
+
+            let liveIsOlder: Bool
+            switch (liveCredentials.lastRefresh, newest.credentials.lastRefresh) {
+            case (nil, .some): liveIsOlder = true
+            case let (.some(live), .some(stored)): liveIsOlder = live < stored
+            default: liveIsOlder = false
+            }
+            if liveIsOlder {
+                try AtomicFileWriter.write(newest.data, to: self.paths.liveAuthURL)
+            }
         }
     }
 
