@@ -1654,11 +1654,25 @@ enum CodexProfileCLI {
         if hasRecovery {
             action = .recovered
             reason = reasonPrefix + "recovered_stash"
-            updatedData = Dictionary(uniqueKeysWithValues: group.profileIDs.compactMap {
-                profileID in
-                guard let stash = stashByProfile[profileID]
-                    ?? stashByProfile.values.first else { return nil }
-                return (profileID, stash.blob)
+            // A profile with its own stash gets that blob verbatim. One whose stash
+            // write never landed (a crash mid-loop) is rebuilt from the rotated
+            // CREDENTIALS in a sibling's stash applied to its OWN stored blob —
+            // never from the sibling's blob wholesale, which would carry that
+            // profile's other stored fields across. Sorting picks the donor
+            // deterministically; every stash in a group holds the same tokens.
+            let donorCredentials = stashByProfile
+                .sorted { $0.key < $1.key }
+                .lazy
+                .compactMap { try? AuthBlob.load(from: $0.value.blob) }
+                .first
+            updatedData = Dictionary(uniqueKeysWithValues: try group.profileIDs.compactMap {
+                profileID -> (String, Data)? in
+                if let stash = stashByProfile[profileID] {
+                    return (profileID, stash.blob)
+                }
+                guard let donorCredentials,
+                      let existingData = profiles[profileID]?.data else { return nil }
+                return (profileID, try AuthBlob.updatedData(from: existingData, with: donorCredentials))
             })
         } else {
             let representative = profiles[group.profileIDs[0]]!
@@ -1812,7 +1826,12 @@ enum CodexProfileCLI {
                 throw RenewalReservationLost()
             }
 
+            // Check EVERY profile before saving ANY. Interleaving check and save
+            // would leave a group half-rotated when a later profile fails: the
+            // saved ones carry the new token while the rest still store the one
+            // we just spent, which is the replay this command exists to prevent.
             try self.vault.transact {
+                var approved: [(profileID: String, replacement: Data)] = []
                 for profileID in group.profileIDs {
                     guard let current = try self.vault.loadAuthBlob(profileID: profileID),
                           let currentCredentials = try? AuthBlob.load(from: current),
@@ -1825,7 +1844,10 @@ enum CodexProfileCLI {
                           currentFingerprint == replacementFingerprint else {
                         throw RenewalIdentityMismatch()
                     }
-                    try self.vault._saveAuthBlobUnlocked(replacement, profileID: profileID)
+                    approved.append((profileID, replacement))
+                }
+                for entry in approved {
+                    try self.vault._saveAuthBlobUnlocked(entry.replacement, profileID: entry.profileID)
                 }
             }
 
