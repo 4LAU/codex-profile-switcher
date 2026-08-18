@@ -683,7 +683,8 @@ enum CodexProfileCLI {
             cache: cache,
             vault: bestAuthVault,
             readBound: readBound,
-            interactive: interactive)
+            interactive: interactive,
+            reservationToken: reservation?.token)
         cache = fetchResult.cache
         self.persistCacheMerge(cache)
 
@@ -707,71 +708,76 @@ enum CodexProfileCLI {
                 && lease.token != allowedReservationToken {
             selectionExclusions.insert(profileID)
         }
-        let candidates = ProfileSelector.candidates(
-            profiles: eligibleProfiles,
-            cache: cache,
-            excludeIDs: selectionExclusions,
-            now: now)
-
-        guard let result = ProfileSelector.selectBest(from: candidates) else {
-            fputs("No eligible profiles available\n", stderr)
-            throw CLIError.exitStatus(ExitCode.noEligibleProfile)
-        }
-
-        let authData: Data?
-        do {
-            switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
-            case .data(let data):
-                authData = data
-            case .interactionRequired:
-                self.exitKeychainInteractionRequired()
-            }
-        } catch {
-            if self.isKeychainInteractionRequired(error) {
-                self.exitKeychainInteractionRequired()
-            }
-            throw error
-        }
-        guard let authData else {
-            fputs("No auth data for profile '\(result.profileID)'\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
-
-        let selectedFingerprint = AuthBlob.identityFingerprint(from: authData)
-        let reservationProfileIDs = eligibleProfiles.compactMap { profile -> String? in
-            guard profile.id == result.profileID || selectedFingerprint != nil else { return nil }
-            guard let read = try? self.loadAuthBlobBounded(
-                bestAuthVault, profileID: profile.id, bound: readBound) else {
-                return profile.id == result.profileID ? result.profileID : nil
-            }
-            guard case let .data(data?) = read,
-                  AuthBlob.identityFingerprint(from: data) == selectedFingerprint else {
-                return profile.id == result.profileID ? result.profileID : nil
-            }
-            return profile.id
-        }
+        var candidates: [ProfileCandidate] = []
+        var result: ProfileSelector.Result
+        var authData: Data?
+        var reservationProfileIDs: [String]
         var didClaimReservation = false
-        do {
-            if let reservation {
-                try self.claimLease(profileIDs: reservationProfileIDs, reservation: reservation)
-                didClaimReservation = true
+        while true {
+            candidates = ProfileSelector.candidates(
+                profiles: eligibleProfiles,
+                cache: cache,
+                excludeIDs: selectionExclusions,
+                now: now)
+
+            guard let selected = ProfileSelector.selectBest(from: candidates) else {
+                fputs("No eligible profiles available\n", stderr)
+                throw CLIError.exitStatus(ExitCode.noEligibleProfile)
+            }
+            result = selected
+
+            do {
+                switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
+                case .data(let data):
+                    authData = data
+                case .interactionRequired:
+                    self.exitKeychainInteractionRequired()
+                }
+            } catch {
+                if self.isKeychainInteractionRequired(error) {
+                    self.exitKeychainInteractionRequired()
+                }
+                throw error
+            }
+            guard let authData else {
+                fputs("No auth data for profile '\(result.profileID)'\n", stderr)
+                throw CLIError.exitStatus(1)
             }
 
-            try self.ensurePrivateDir(dirURL)
-            try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+            reservationProfileIDs = fetchResult.credentialGroups.values.first {
+                $0.contains(result.profileID)
+            } ?? [result.profileID]
 
-            let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
-            let destination = dirURL.appendingPathComponent("config.toml")
-            try? self.fileManager.removeItem(at: destination)
-            if self.fileManager.fileExists(atPath: liveConfig.path) {
-                try self.fileManager.copyItem(at: liveConfig, to: destination)
+            do {
+                if let reservation {
+                    try self.claimLease(profileIDs: reservationProfileIDs, reservation: reservation)
+                    didClaimReservation = true
+                }
+
+                try self.ensurePrivateDir(dirURL)
+                try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+
+                let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
+                let destination = dirURL.appendingPathComponent("config.toml")
+                try? self.fileManager.removeItem(at: destination)
+                if self.fileManager.fileExists(atPath: liveConfig.path) {
+                    try self.fileManager.copyItem(at: liveConfig, to: destination)
+                }
+                break
+            } catch is LeaseClaimLost {
+                didClaimReservation = false
+                // Exclude the whole credential group, not just the profile that
+                // lost. The holder may be a sibling that selection would never
+                // have picked, in which case re-selecting would choose the same
+                // profile, claim the same group and lose again, forever.
+                selectionExclusions.formUnion(reservationProfileIDs)
+            } catch {
+                if didClaimReservation, let reservation {
+                    try? self.removeLeases(
+                        profileIDs: reservationProfileIDs, expectedToken: reservation.token)
+                }
+                throw error
             }
-        } catch {
-            if didClaimReservation, let reservation {
-                try? self.removeLeases(
-                    profileIDs: reservationProfileIDs, expectedToken: reservation.token)
-            }
-            throw error
         }
 
         return BestAuthOutcome(
@@ -786,6 +792,7 @@ enum CodexProfileCLI {
     private struct SelfFetchResult {
         var cache: UsageCache
         var fetchedAny: Bool
+        var credentialGroups: [String: [String]]
         /// Description of the last per-profile fetch error, if any failed.
         var lastFetchError: String?
     }
@@ -811,9 +818,12 @@ enum CodexProfileCLI {
         cache: UsageCache,
         vault: AuthVault,
         readBound: TimeInterval?,
-        interactive: Bool
+        interactive: Bool,
+        reservationToken: String?
     ) -> SelfFetchResult {
-        guard !profiles.isEmpty else { return SelfFetchResult(cache: cache, fetchedAny: false) }
+        guard !profiles.isEmpty else {
+            return SelfFetchResult(cache: cache, fetchedAny: false, credentialGroups: [:], lastFetchError: nil)
+        }
 
         let configURL = self.paths.liveCodexHome.appendingPathComponent("config.toml")
         let liveAuthURL = self.paths.liveAuthURL
@@ -826,7 +836,8 @@ enum CodexProfileCLI {
             vault: vault,
             bound: readBound)
 
-        let fetchOutcome = self.runBlocking { () -> (snapshots: [String: UsageSnapshot], lastError: String?) in
+        let fetchOutcome = self.runBlocking {
+            () -> (snapshots: [String: UsageSnapshot], lastError: String?, credentialGroups: [String: [String]]) in
             await withTaskGroup(of: ([String], UsageSnapshot?, String?).self) { group in
                 var inFlight = 0
                 var results: [String: UsageSnapshot] = [:]
@@ -862,20 +873,37 @@ enum CodexProfileCLI {
                     guard let fetchGroup = pending.popFirst() else { return }
                     inFlight += 1
                     group.addTask {
-                        let reservation = LeaseReservation(
-                            token: UUID().uuidString,
-                            home: "",
-                            expiresAt: Date().addingTimeInterval(5 * 60),
-                            createdAt: Date())
-                        do {
-                            try self.claimLease(profileIDs: fetchGroup.profileIDs, reservation: reservation)
-                        } catch {
-                            return (fetchGroup.profileIDs, nil, error.localizedDescription)
+                        var claimedReservation: LeaseReservation?
+                        let leases = self.loadCache().leases
+                        // Already ours only if the caller's token is actually
+                        // recorded on this group; a token that is on no profile
+                        // yet reserves nothing, and treating it as held would
+                        // leave every exec and first-run --dir unreserved.
+                        let alreadyReserved = reservationToken.map { token in
+                            fetchGroup.profileIDs.contains { leases[$0]?.token == token }
+                                && fetchGroup.profileIDs.allSatisfy { profileID in
+                                    leases[profileID]?.token == nil || leases[profileID]?.token == token
+                                }
+                        } ?? false
+                        if !alreadyReserved {
+                            let reservation = LeaseReservation(
+                                token: UUID().uuidString,
+                                home: "",
+                                expiresAt: Date().addingTimeInterval(5 * 60),
+                                createdAt: Date())
+                            do {
+                                try self.claimLease(profileIDs: fetchGroup.profileIDs, reservation: reservation)
+                                claimedReservation = reservation
+                            } catch {
+                                return (fetchGroup.profileIDs, nil, error.localizedDescription)
+                            }
                         }
                         defer {
-                            try? self.removeLeases(
-                                profileIDs: fetchGroup.profileIDs,
-                                expectedToken: reservation.token)
+                            if let claimedReservation {
+                                try? self.removeLeases(
+                                    profileIDs: fetchGroup.profileIDs,
+                                    expectedToken: claimedReservation.token)
+                            }
                         }
                         do {
                             let snapshot = try await CLIUsageFetcher.fetch(
@@ -901,7 +929,7 @@ enum CodexProfileCLI {
                         enqueueNext()
                     }
                 }
-                return (results, lastError)
+                return (results, lastError, groupedProfiles)
             }
         }
 
@@ -912,6 +940,7 @@ enum CodexProfileCLI {
         return SelfFetchResult(
             cache: merged,
             fetchedAny: !fetchOutcome.snapshots.isEmpty,
+            credentialGroups: fetchOutcome.credentialGroups,
             lastFetchError: fetchOutcome.lastError)
     }
 
@@ -1672,14 +1701,12 @@ enum CodexProfileCLI {
     /// re-checks UNDER the lock: if a DIFFERENT lease still HOLDS the profile,
     /// the claim loses and throws — the caller deletes its seeded home.
     ///
-    /// We refuse on ANY recorded different-token lease, not just an *active* one.
-    /// An expired-but-still-recorded lease means `gc` could not clear it — which
-    /// for a lease only happens when its write-back FAILED and `gc`/`end`
-    /// deliberately preserved its home pending credential recovery. Overwriting
-    /// that reservation would orphan the home and lose the preserved credential.
-    /// `begin` runs an opportunistic `gc` first, so a cleanly-removable expired
-    /// lease is already gone by the time we get here; anything left is protected.
-    /// A lease already carrying our own token (a retry) or an absent slot is fine.
+    /// We refuse active different-token leases and expired different-token leases
+    /// that carry a home, because those homes may hold the only refreshed copy of
+    /// a credential. An expired home-less lease must be stealable: it carries no
+    /// credential, and otherwise a killed usage fetch could block renewal forever
+    /// until the account dies at day 10. A lease already carrying our own token
+    /// (a retry) or an absent slot is fine.
     ///
     /// Losing the claim throws `LeaseClaimLost` rather than `CLIError` so `begin`
     /// can retry on a different account without swallowing unrelated failures.
@@ -1698,6 +1725,12 @@ enum CodexProfileCLI {
                     }
                     throw LeaseClaimLost(profileID: profileID)
                 }
+            }
+            let existingProfileIDs = cache.leases.compactMap { profileID, existing in
+                existing.token == reservation.token ? profileID : nil
+            }
+            for profileID in existingProfileIDs {
+                cache.leases.removeValue(forKey: profileID)
             }
             for profileID in profileIDs {
                 cache.leases[profileID] = reservation
