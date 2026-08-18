@@ -319,9 +319,9 @@ if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
 fi
 
 # CODEX_PROFILE_ARCHS: optional space-separated target list (e.g. "arm64 x86_64")
-# for a universal build; unset builds the host arch only, as before.
+# for a universal build; unset builds both supported macOS architectures.
 ARCH_ARGS=()
-for arch in ${CODEX_PROFILE_ARCHS:-}; do
+for arch in ${CODEX_PROFILE_ARCHS:-arm64 x86_64}; do
   ARCH_ARGS+=(--arch "$arch")
 done
 
