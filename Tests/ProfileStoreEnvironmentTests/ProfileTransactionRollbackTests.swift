@@ -19,11 +19,11 @@ private final class RollbackAuthVault: AuthVault, @unchecked Sendable {
         self.blobs[profileID]
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         self.blobs[profileID] = data
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    func _deleteAuthBlobUnlocked(profileID: String) throws {
         self.blobs.removeValue(forKey: profileID)
     }
 

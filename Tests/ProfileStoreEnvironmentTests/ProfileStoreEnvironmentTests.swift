@@ -17,10 +17,10 @@ enum ProfileStoreEnvironmentTestFailure: Error, CustomStringConvertible {
 private struct FailingSaveAuthVault: AuthVault {
     func listProfileIDs() throws -> [String] { [] }
     func loadAuthBlob(profileID: String) throws -> Data? { nil }
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         throw ProfileStoreEnvironmentTestFailure.failed("intentional save failure")
     }
-    func deleteAuthBlob(profileID: String) throws {}
+    func _deleteAuthBlobUnlocked(profileID: String) throws {}
     func hasAuthBlob(profileID: String) throws -> Bool { false }
 }
 
@@ -41,11 +41,11 @@ private final class MigrationTestVault: AuthVault, KeychainMigrationDestination,
         self.blobs[profileID]
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         self.blobs[profileID] = data
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    func _deleteAuthBlobUnlocked(profileID: String) throws {
         self.deleteCount += 1
         self.blobs.removeValue(forKey: profileID)
     }
@@ -68,6 +68,13 @@ private final class MigrationTestVault: AuthVault, KeychainMigrationDestination,
         }
         self.blobs[profileID] = data
         return .created
+    }
+
+    func _createAuthBlobIfAbsentForMigrationUnlocked(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult {
+        try self.createAuthBlobIfAbsentForMigration(data, profileID: profileID)
     }
 }
 

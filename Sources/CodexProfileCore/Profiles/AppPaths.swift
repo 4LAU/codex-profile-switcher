@@ -45,6 +45,11 @@ public struct AppPaths {
         self.switcherHome.appendingPathComponent("cache.lock")
     }
 
+    /// Advisory `flock` file guarding auth-vault read-modify-write transactions.
+    public var authLockURL: URL {
+        self.switcherHome.appendingPathComponent("auth.lock")
+    }
+
     public var legacyAuthDirectory: URL {
         self.switcherHome.appendingPathComponent("auth", isDirectory: true)
     }

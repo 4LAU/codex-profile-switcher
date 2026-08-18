@@ -25,14 +25,16 @@ public enum DuplicateAwareAuthSaver {
             throw DuplicateAwareAuthSaverError.missingFingerprint
         }
 
-        for profile in profiles where profile.id != targetProfileID {
-            guard let existingData = try vault.loadAuthBlob(profileID: profile.id),
-                  AuthBlob.identityFingerprint(from: existingData) == newFingerprint else {
-                continue
+        try vault.transact {
+            for profile in profiles where profile.id != targetProfileID {
+                guard let existingData = try vault.loadAuthBlob(profileID: profile.id),
+                      AuthBlob.identityFingerprint(from: existingData) == newFingerprint else {
+                    continue
+                }
+                throw DuplicateAwareAuthSaverError.duplicate(existingLabel: profile.label)
             }
-            throw DuplicateAwareAuthSaverError.duplicate(existingLabel: profile.label)
-        }
 
-        try vault.saveAuthBlob(data, profileID: targetProfileID)
+            try vault._saveAuthBlobUnlocked(data, profileID: targetProfileID)
+        }
     }
 }

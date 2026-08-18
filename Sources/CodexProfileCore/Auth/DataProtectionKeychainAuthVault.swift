@@ -51,7 +51,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDesti
         return data
     }
 
-    public func saveAuthBlob(_ data: Data, profileID: String) throws {
+    public func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         let update: [CFString: Any] = [
             kSecValueData: data,
             kSecAttrLabel: self.label(profileID: profileID),
@@ -91,7 +91,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDesti
             status: addStatus)
     }
 
-    public func deleteAuthBlob(profileID: String) throws {
+    public func _deleteAuthBlobUnlocked(profileID: String) throws {
         let status = SecItemDelete(self.itemQuery(profileID: profileID) as CFDictionary)
         if status == errSecSuccess || status == errSecItemNotFound {
             return
@@ -125,7 +125,7 @@ public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDesti
         AuthVaultDiagnostics(activeBackend: .dataProtectionKeychain)
     }
 
-    func createAuthBlobIfAbsentForMigration(
+    func _createAuthBlobIfAbsentForMigrationUnlocked(
         _ data: Data,
         profileID: String
     ) throws -> KeychainMigrationCreateResult {

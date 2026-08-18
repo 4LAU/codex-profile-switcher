@@ -41,8 +41,10 @@ public struct PreparedProfileSwitch {
         var didSaveOutgoingVaultBlob = false
         var preSaveOutgoingVaultBlob: Data?
         if let outgoingProfileID, let outgoingLiveData {
-            preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
-            try self.vault.saveAuthBlob(outgoingLiveData, profileID: outgoingProfileID)
+            try self.vault.transact {
+                preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                try self.vault._saveAuthBlobUnlocked(outgoingLiveData, profileID: outgoingProfileID)
+            }
             didSaveOutgoingVaultBlob = true
         }
         do {

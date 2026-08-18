@@ -1066,38 +1066,40 @@ enum CodexProfileCLI {
             fputs("No auth data found at \(authURL.path)\n", stderr)
             throw CLIError.exitStatus(1)
         }
-        guard let existingData = try vault.loadAuthBlob(profileID: profile) else {
-            fputs("No existing auth data for profile '\(profile)'\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
-        guard updatedData != existingData else { return }
-        guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
-            fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
+        try vault.transact {
+            guard let existingData = try vault.loadAuthBlob(profileID: profile) else {
+                fputs("No existing auth data for profile '\(profile)'\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
+            guard updatedData != existingData else { return }
+            guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
+                fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
 
-        do {
-            _ = try AuthBlob.load(from: updatedData)
-        } catch {
-            fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
+            do {
+                _ = try AuthBlob.load(from: updatedData)
+            } catch {
+                fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
 
-        let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
-        let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
-        guard let existingFingerprint, let updatedFingerprint else {
-            fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
-        if existingFingerprint != updatedFingerprint {
-            // Identity mismatch is the one case external rotation tooling must
-            // distinguish: the refreshed credential belongs to a different
-            // account. Exit 5 is reserved exclusively for this.
-            fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(ExitCode.identityMismatch)
-        }
+            let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
+            let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
+            guard let existingFingerprint, let updatedFingerprint else {
+                fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
+            if existingFingerprint != updatedFingerprint {
+                // Identity mismatch is the one case external rotation tooling must
+                // distinguish: the refreshed credential belongs to a different
+                // account. Exit 5 is reserved exclusively for this.
+                fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(ExitCode.identityMismatch)
+            }
 
-        try vault.saveAuthBlob(updatedData, profileID: profile)
+            try vault._saveAuthBlobUnlocked(updatedData, profileID: profile)
+        }
     }
 
     private struct ExecOptions {

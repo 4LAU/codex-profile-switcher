@@ -875,12 +875,12 @@ private final class MigrationDestination: KeychainMigrationDestination, @uncheck
         return self.authBlobs[profileID]
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         self.normalSaveProfileIDs.append(profileID)
         self.authBlobs[profileID] = data
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    func _deleteAuthBlobUnlocked(profileID: String) throws {
         self.authBlobs[profileID] = nil
     }
 
@@ -892,7 +892,7 @@ private final class MigrationDestination: KeychainMigrationDestination, @uncheck
         AuthVaultDiagnostics(activeBackend: .dataProtectionKeychain)
     }
 
-    func createAuthBlobIfAbsentForMigration(
+    func _createAuthBlobIfAbsentForMigrationUnlocked(
         _ data: Data,
         profileID: String
     ) throws -> KeychainMigrationCreateResult {

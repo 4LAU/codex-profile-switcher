@@ -85,12 +85,12 @@ private final class MemoryAuthVault: AuthVault {
         self.authBlobs[profileID]
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         self.savedProfileIDs.append(profileID)
         self.authBlobs[profileID] = data
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    func _deleteAuthBlobUnlocked(profileID: String) throws {
         self.authBlobs[profileID] = nil
     }
 

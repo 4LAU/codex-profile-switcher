@@ -58,8 +58,8 @@ public struct AuthVaultRepairResult: Equatable {
 public protocol AuthVault: Sendable {
     func listProfileIDs() throws -> [String]
     func loadAuthBlob(profileID: String) throws -> Data?
-    func saveAuthBlob(_ data: Data, profileID: String) throws
-    func deleteAuthBlob(profileID: String) throws
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws
+    func _deleteAuthBlobUnlocked(profileID: String) throws
     func hasAuthBlob(profileID: String) throws -> Bool
     func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability
     func repairStoredAuthAccess() throws -> AuthVaultRepairResult
@@ -67,6 +67,27 @@ public protocol AuthVault: Sendable {
 }
 
 public extension AuthVault {
+    /// Auth locking may be nested inside `CacheLock`, but must never enclose it.
+    /// Keep this transaction limited to bounded vault operations: it must not
+    /// include usage fetches, profile ranking, or Codex subprocesses.
+    func transact<T>(_ body: () throws -> T) throws -> T {
+        try CacheLock.withLock(at: AppPaths().authLockURL) {
+            try body()
+        }
+    }
+
+    func saveAuthBlob(_ data: Data, profileID: String) throws {
+        try self.transact {
+            try self._saveAuthBlobUnlocked(data, profileID: profileID)
+        }
+    }
+
+    func deleteAuthBlob(profileID: String) throws {
+        try self.transact {
+            try self._deleteAuthBlobUnlocked(profileID: profileID)
+        }
+    }
+
     func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability {
         try self.hasAuthBlob(profileID: profileID) ? .present : .missing
     }

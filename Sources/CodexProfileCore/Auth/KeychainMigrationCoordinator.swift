@@ -119,10 +119,26 @@ enum KeychainMigrationCreateResult: Equatable {
 }
 
 protocol KeychainMigrationDestination: AuthVault {
+    func _createAuthBlobIfAbsentForMigrationUnlocked(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult
+
     func createAuthBlobIfAbsentForMigration(
         _ data: Data,
         profileID: String
     ) throws -> KeychainMigrationCreateResult
+}
+
+extension KeychainMigrationDestination {
+    func createAuthBlobIfAbsentForMigration(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult {
+        try self.transact {
+            try self._createAuthBlobIfAbsentForMigrationUnlocked(data, profileID: profileID)
+        }
+    }
 }
 
 public final class KeychainMigrationCoordinator {
@@ -385,12 +401,22 @@ public final class KeychainMigrationCoordinator {
     }
 
     private func copyAndVerify(_ capture: LegacyKeychainAuthBlobCapture) throws -> Data {
-        let existing: Data?
+        let result: (existing: Data?, create: KeychainMigrationCreateResult?)
         do {
-            existing = try self.destination.loadAuthBlob(profileID: capture.profileID)
+            result = try self.destination.transact {
+                if let existing = try self.destination.loadAuthBlob(profileID: capture.profileID) {
+                    return (existing, nil)
+                }
+                return (
+                    nil,
+                    try self.destination._createAuthBlobIfAbsentForMigrationUnlocked(
+                        capture.authBlob,
+                        profileID: capture.profileID))
+            }
         } catch {
             throw KeychainMigrationError.destinationReadbackFailed
         }
+        let existing = result.existing
         if let existing {
             if existing != capture.authBlob {
                 guard self.migrationStates[capture.profileID] == .copiedCleanupPending else {
@@ -403,12 +429,7 @@ public final class KeychainMigrationCoordinator {
             return existing
         }
 
-        let createResult: KeychainMigrationCreateResult
-        do {
-            createResult = try self.destination.createAuthBlobIfAbsentForMigration(
-                capture.authBlob,
-                profileID: capture.profileID)
-        } catch {
+        guard let createResult = result.create else {
             throw KeychainMigrationError.destinationReadbackFailed
         }
         if createResult == .alreadyExists {
@@ -455,17 +476,13 @@ public final class KeychainMigrationCoordinator {
 
     private func restoreVerifiedDestinationCopy(_ data: Data, profileID: String) throws {
         do {
-            try self.destination.saveAuthBlob(data, profileID: profileID)
+            try self.destination.transact {
+                try self.destination._saveAuthBlobUnlocked(data, profileID: profileID)
+                guard try self.destination.loadAuthBlob(profileID: profileID) == data else {
+                    throw KeychainMigrationError.destinationReadbackFailed
+                }
+            }
         } catch {
-            throw KeychainMigrationError.destinationReadbackFailed
-        }
-        let restored: Data?
-        do {
-            restored = try self.destination.loadAuthBlob(profileID: profileID)
-        } catch {
-            throw KeychainMigrationError.destinationReadbackFailed
-        }
-        guard restored == data else {
             throw KeychainMigrationError.destinationReadbackFailed
         }
     }

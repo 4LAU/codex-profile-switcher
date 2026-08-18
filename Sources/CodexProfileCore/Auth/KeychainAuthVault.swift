@@ -166,7 +166,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         }
     }
 
-    public func saveAuthBlob(_ data: Data, profileID: String) throws {
+    public func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         throw KeychainAuthVaultError.legacyVaultIsReadOnly
     }
 
@@ -174,7 +174,7 @@ public struct LegacyKeychainAuthVault: AuthVault {
         throw KeychainAuthVaultError.legacyVaultIsReadOnly
     }
 
-    public func deleteAuthBlob(profileID: String) throws {
+    public func _deleteAuthBlobUnlocked(profileID: String) throws {
         throw KeychainAuthVaultError.legacyVaultIsReadOnly
     }
 

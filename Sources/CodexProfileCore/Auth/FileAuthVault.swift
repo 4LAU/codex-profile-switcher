@@ -37,7 +37,7 @@ public struct FileAuthVault: AuthVault {
         return try Data(contentsOf: url)
     }
 
-    public func saveAuthBlob(_ data: Data, profileID: String) throws {
+    public func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         try self.ensureRoot()
         let url = try self.authURL(profileID: profileID)
         let temp = self.root.appendingPathComponent(".\(profileID).json.tmp-\(UUID().uuidString)")
@@ -55,7 +55,7 @@ public struct FileAuthVault: AuthVault {
         }
     }
 
-    public func deleteAuthBlob(profileID: String) throws {
+    public func _deleteAuthBlobUnlocked(profileID: String) throws {
         let url = try self.authURL(profileID: profileID)
         if self.fileManager.fileExists(atPath: url.path) {
             try self.fileManager.removeItem(at: url)
