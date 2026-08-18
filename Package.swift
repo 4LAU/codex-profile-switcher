@@ -61,5 +61,9 @@ let package = Package(
             swiftSettings: [
                 .define("TESTING"),
             ]),
+        .testTarget(
+            name: "TokenRenewalTests",
+            dependencies: ["CodexProfileCore"],
+            path: "Tests/TokenRenewalTests"),
     ]
 )
