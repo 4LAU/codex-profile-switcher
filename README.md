@@ -172,6 +172,8 @@ Selects the profile with the most remaining quota and writes its credentials to 
 
 Fetches live usage via `codex app-server` (bounded concurrency of 3) before ranking. Falls back to each profile's cached snapshot when a live fetch fails. Stores fresh snapshots back to the cache.
 
+`best-auth --dir` is deprecated. It still behaves the same way, with the same exit codes and stdout, and now records a 24-hour lease for the exported credential. `lease gc` writes back a refreshed exported credential before reclaiming it. The command prints the deprecation notice on stderr so JSON callers can keep parsing stdout. Use `lease begin` for new scripts. This form will be removed in a future release. See [lease](#lease) below.
+
 **Non-interactive behavior.** When stdin is not a terminal (CI, command substitution, cron), or when `--non-interactive` is passed, Keychain reads that would show a modal consent prompt are skipped instead of blocking. A global watchdog exits the process after `--timeout` seconds (default 30) to guarantee termination.
 
 **Basic usage — bare profile ID on stdout:**
@@ -267,6 +269,68 @@ codex exec resume --last - < followup.md     # still warm, no repo re-read
 Reservations live in the shared usage cache, and any account holding one is skipped by `best-auth`, `exec`, and other `lease begin` calls. Every write to that cache goes through a cross-process lock, so two agents reserving and releasing accounts at the same moment cannot drop each other's reservations or strand a refreshed credential.
 
 `--non-interactive` and `--timeout` behave as they do for `best-auth`: skip Keychain prompts that would block a headless run, and guarantee the call exits. Selection exit codes match `best-auth` (2 no eligible profile, 3 no profiles configured, 4 usage unavailable, 6 keychain interaction required).
+
+### renew
+
+Codex can leave a credential unchanged while it is working and reach for its own refresh only after the credential is stale. Several refresh attempts can then carry the same single-use refresh token. A replay can revoke the token chain, leaving the account needing an interactive login. `renew` refreshes OAuth credentials ahead of that point, after three days of staleness.
+
+```bash
+codex-profile renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]
+```
+
+Renewal makes one request per credential. Profiles that share a refresh token are one credential group, so `--profile <id>` renews the whole group. A credential held by an active `exec`, `lease`, or `best-auth --dir` export is skipped. `--force` ignores the age threshold. `--dry-run` writes nothing.
+
+Exit code 0 means the command ran. It does not mean every profile was renewed. A profile can be skipped, so automation must inspect the per-profile record. With `--json`, stdout contains one object:
+
+```json
+{"records":[{"id":"work","action":"renewed","reason":"renewed","age_days":3.0,"credential":"f0f0f0f0f0f0"}],"requests":1}
+```
+
+Each record has `id`, `action`, `reason`, `age_days`, and `credential`. `action` is `renewed`, `skipped`, `rejected`, `unreachable`, or `recovered`. `credential` is a short fingerprint, not the token. `requests` counts HTTP requests and is per credential, not per profile. `--timeout` accepts positive seconds up to 3600 and defaults to 120.
+
+| Code | Meaning |
+|------|---------|
+| 0 | The command ran. Inspect records for skipped profiles. |
+| 1 | Generic failure, including an unknown flag, a missing or invalid value, or a credential that changed underneath the renewal. |
+| 2 | The profile named by `--profile` does not exist. |
+| 5 | A stored credential belongs to a different account than the one that was renewed. Nothing was written. |
+| 6 | Keychain interaction required. Run the command once from a terminal to grant access. |
+| 7 | Watchdog timeout. |
+| 8 | The server rejected a credential. An interactive login is required. |
+| 9 | The token endpoint was unreachable. |
+
+The signed app registers a background launchd agent through `SMAppService`. The agent launches `codex-profile renew` once a day and exits. It is not a resident process, and it runs while the menu bar app is closed. The bundled plist is at `Contents/Library/LaunchAgents/` and is named `com.4lau.codex-profile-switcher.renew.plist`. Its schedule is 03:00 every day.
+
+Open **Settings...** > **General** and check **Credential renewal**. It should say **Scheduled**. If it says **Not scheduled** because macOS is waiting for approval, open **System Settings** > **General** > **Login Items** and approve the background item. An unapproved agent does not run.
+
+For headless use, install the app and register a LaunchAgent of your own:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.codex-profile-renew</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/CodexProfileSwitcher.app/Contents/Helpers/CodexProfileHelper.app/Contents/MacOS/codex-profile</string>
+    <string>renew</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+```
+
+Use `StartCalendarInterval` for this daily job. If the calendar time arrives while the Mac sleeps, macOS runs the job when the Mac wakes. A Mac that stays powered off for more than ten days comes back with credentials that are already dead. Nothing running locally can prevent that; an interactive sign-in is required.
 
 ## How It Works
 
