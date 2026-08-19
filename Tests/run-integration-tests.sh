@@ -1863,9 +1863,15 @@ SCRIPT
   local app_dir_two="$WORK_DIR/state-app-app" helper_two="$WORK_DIR/state-app-app/codex-profile"
   mkdir -p "$app_dir_two"
   cp "$APP_BIN" "$app_dir_two/CodexProfileSwitcher"
+  # "3aef959d3f8a" is the real renewal-credential fingerprint (first 12 hex
+  # chars of SHA-256) of the "refresh-state" token this test's StateProfile
+  # credential carries — the same value the app independently computes when
+  # it checks whether the rejected credential has since been replaced. A
+  # placeholder that doesn't match would look, to that check, exactly like a
+  # credential rotation and clear the rejection this test is asserting on.
   cat > "$helper_two" <<'SCRIPT'
 #!/usr/bin/env bash
-printf '{"records":[{"id":"StateProfile","action":"rejected","reason":"HTTP 401: invalid_grant","age_days":1,"credential":"state"}],"requests":0}\n'
+printf '{"records":[{"id":"StateProfile","action":"rejected","reason":"HTTP 401: invalid_grant","age_days":1,"credential":"3aef959d3f8a"}],"requests":0}\n'
 exit 8
 SCRIPT
   chmod +x "$helper_two"
@@ -1876,6 +1882,17 @@ SCRIPT
   app_pid=$!
   for _ in {1..200}; do
     if plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" 2>/dev/null | grep -qx rejected; then break; fi
+    sleep 0.02
+  done
+  # The renewal completion also kicks off the app's own usage refresh, which
+  # briefly claims a lease on StateProfile around its live fetch. Wait for
+  # that fetch to actually start (evidence the claim landed), then for the
+  # lease to clear, before killing the app — otherwise the best-auth call
+  # below can collide with a still-active lease the killed process never got
+  # to release.
+  for _ in {1..200}; do [[ -s "$usage_count_two" ]] && break; sleep 0.02; done
+  for _ in {1..100}; do
+    has_lease StateProfile || break
     sleep 0.02
   done
   kill "$app_pid" 2>/dev/null || true

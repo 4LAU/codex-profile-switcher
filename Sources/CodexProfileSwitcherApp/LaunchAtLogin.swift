@@ -312,11 +312,24 @@ enum RenewalAgent {
     static func register() throws {
         guard Self.isEligible else { throw OperationError.unavailable }
         let service = SMAppService.agent(plistName: Self.plistName)
-        guard service.status == .notRegistered else { return }
-        do {
-            try service.register()
-        } catch {
-            throw OperationError.failed(error.localizedDescription)
+        switch service.status {
+        case .enabled, .requiresApproval:
+            return
+        case .notRegistered:
+            do {
+                try service.register()
+            } catch {
+                throw OperationError.failed(error.localizedDescription)
+            }
+        case .notFound:
+            // Only reachable in a genuinely installed signed build (isEligible
+            // already filters out isolated dev builds): the renewal LaunchAgent
+            // plist is missing from the app bundle. This is a real failure, not
+            // "nothing to do" — treating it as success left renewal silently
+            // unscheduled with no error ever logged.
+            throw OperationError.failed("The renewal LaunchAgent plist was not found in the app bundle.")
+        @unknown default:
+            throw OperationError.failed("Unexpected renewal LaunchAgent status.")
         }
     }
 

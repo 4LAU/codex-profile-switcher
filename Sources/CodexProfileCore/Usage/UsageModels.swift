@@ -54,11 +54,38 @@ public struct RenewalState: Codable, Equatable {
     public let action: String
     public let reason: String
     public let timestamp: Date
+    /// The renewed credential's fingerprint (the CLI's `renewalCredentialFingerprint`:
+    /// SHA-256(refresh token), first 12 hex chars) at the moment this state was
+    /// recorded. For a "rejected" state this is the fingerprint of the specific
+    /// credential that was condemned, so a later `codex-profile login` that
+    /// replaces the refresh token can be detected and the rejection cleared.
+    /// Nil for states written before this field existed.
+    public let credentialFingerprint: String?
 
-    public init(action: String, reason: String, timestamp: Date) {
+    public init(action: String, reason: String, timestamp: Date, credentialFingerprint: String? = nil) {
         self.action = action
         self.reason = reason
         self.timestamp = timestamp
+        self.credentialFingerprint = credentialFingerprint
+    }
+}
+
+/// Records the outcome of the most recent `codex-profile renew` invocation
+/// the app observed, so a nightly job that silently stops working looks
+/// different from a healthy one instead of looking identical to it.
+public struct LastRenewalRun: Codable, Equatable {
+    public let timestamp: Date
+    /// The process exit status. Nil means the helper could not even be
+    /// launched (e.g. `codex-profile` was not found).
+    public let exitStatus: Int32?
+    /// Number of per-profile records in the run's report. Nil when the
+    /// report could not be parsed.
+    public let recordCount: Int?
+
+    public init(timestamp: Date, exitStatus: Int32?, recordCount: Int?) {
+        self.timestamp = timestamp
+        self.exitStatus = exitStatus
+        self.recordCount = recordCount
     }
 }
 
@@ -91,17 +118,20 @@ public struct UsageCache: Codable, Equatable {
     public var exhaustionOverrides: [String: ExhaustionOverride]
     public var leases: [String: LeaseReservation]
     public var renewalStates: [String: RenewalState]
+    public var lastRenewalRun: LastRenewalRun?
 
     public init(
         snapshots: [String: UsageSnapshot],
         exhaustionOverrides: [String: ExhaustionOverride] = [:],
         leases: [String: LeaseReservation] = [:],
-        renewalStates: [String: RenewalState] = [:]
+        renewalStates: [String: RenewalState] = [:],
+        lastRenewalRun: LastRenewalRun? = nil
     ) {
         self.snapshots = snapshots
         self.exhaustionOverrides = exhaustionOverrides
         self.leases = leases
         self.renewalStates = renewalStates
+        self.lastRenewalRun = lastRenewalRun
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +146,9 @@ public struct UsageCache: Codable, Equatable {
         self.renewalStates = try container.decodeIfPresent(
             [String: RenewalState].self,
             forKey: .renewalStates) ?? [:]
+        self.lastRenewalRun = try container.decodeIfPresent(
+            LastRenewalRun.self,
+            forKey: .lastRenewalRun)
     }
 
     /// Returns a copy of this cache reconciled with on-disk state before a write.
@@ -137,6 +170,12 @@ public struct UsageCache: Codable, Equatable {
     /// changes one profile's state must re-apply that single-profile delta
     /// after this merge.
     ///
+    /// `lastRenewalRun` follows the same disk-authoritative rule as leases and
+    /// renewal states: it can be written by either the app (an app-launch
+    /// renewal) or the CLI (the nightly LaunchAgent renewal) as a separate
+    /// process, so an in-memory copy is never trusted over disk. A writer that
+    /// changes it must re-apply that delta after this merge.
+    ///
     /// `self` is never mutated.
     public func mergingDiskOverrides(
         fromCacheAt url: URL,
@@ -154,6 +193,7 @@ public struct UsageCache: Codable, Equatable {
         }
         merged.leases = diskCache.leases
         merged.renewalStates = diskCache.renewalStates
+        merged.lastRenewalRun = diskCache.lastRenewalRun
         return merged
     }
 }

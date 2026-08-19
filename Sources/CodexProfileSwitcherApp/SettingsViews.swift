@@ -545,6 +545,7 @@ struct GeneralTab: View {
     @ObservedObject var toast: ToastState
     @State private var launchAtLoginState = LaunchAtLogin.state
     @State private var renewalAgentState = RenewalAgent.state
+    @State private var lastRenewalRun: LastRenewalRun?
     @State private var migrationSheet: KeychainMigrationSheet?
     @State private var migrationError: String?
     @State private var isReviewingMigration = false
@@ -577,6 +578,11 @@ struct GeneralTab: View {
                 }
 
                 self.renewalAgentDescription
+                if let summary = self.lastRenewalRunSummary {
+                    Text(summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(self.lastRenewalRunIsHealthy ? Color.secondary : Palette.warning)
+                }
                 Text("A Mac that stays powered off for more than 10 days comes back needing a manual sign-in, and nothing local prevents that.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
@@ -671,10 +677,12 @@ struct GeneralTab: View {
         .onAppear {
             self.refreshLaunchAtLoginState()
             self.refreshRenewalAgentState()
+            self.refreshLastRenewalRun()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             self.refreshLaunchAtLoginState()
             self.refreshRenewalAgentState()
+            self.refreshLastRenewalRun()
         }
         .onDisappear { self.cancelLegacyKeychainMigrationReview() }
         .sheet(item: self.migrationSheetBinding) { sheet in
@@ -857,12 +865,44 @@ struct GeneralTab: View {
         }
     }
 
+    private static let lastRenewalRunFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
+    /// Whether the most recent renewal run this app observed is a non-failure
+    /// outcome (exit 0 "ok" or 3 "nothing to do"). Mirrors AppDelegate's
+    /// `renewalOkExitStatuses`.
+    private var lastRenewalRunIsHealthy: Bool {
+        guard let status = self.lastRenewalRun?.exitStatus else { return false }
+        return status == 0 || status == 3
+    }
+
+    private var lastRenewalRunSummary: String? {
+        guard let run = self.lastRenewalRun else { return nil }
+        let relative = Self.lastRenewalRunFormatter.localizedString(for: run.timestamp, relativeTo: Date())
+        let outcome: String
+        switch run.exitStatus {
+        case 0: outcome = "ok"
+        case 3: outcome = "nothing to do"
+        case nil: outcome = "could not start"
+        case let status?: outcome = "failed (exit \(status))"
+        }
+        return "Last renewal run \(relative) \u{2014} \(outcome)"
+    }
+
     private func refreshLaunchAtLoginState() {
         self.launchAtLoginState = LaunchAtLogin.state
     }
 
     private func refreshRenewalAgentState() {
         self.renewalAgentState = RenewalAgent.state
+    }
+
+    private func refreshLastRenewalRun() {
+        self.store.reloadLastRenewalRunFromDisk()
+        self.lastRenewalRun = self.store.cache.lastRenewalRun
     }
 
     private func setLaunchAtLogin(_ isOn: Bool) {

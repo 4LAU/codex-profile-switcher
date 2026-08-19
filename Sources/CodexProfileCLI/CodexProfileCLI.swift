@@ -1257,6 +1257,12 @@ enum CodexProfileCLI {
         case rejected
         case unreachable
         case recovered
+        /// The endpoint answered 200 but rotated nothing (empty response, or
+        /// an empty-string token field). Deliberately distinct from
+        /// `.rejected`: unlike a 400/401, this does not indicate the refresh
+        /// token itself is dead, so it must not feed the same "needs
+        /// re-login" cache entry that `.rejected` does.
+        case invalid
     }
 
     private struct RenewalRecord: Codable {
@@ -1396,6 +1402,42 @@ enum CodexProfileCLI {
             credential: credential)
     }
 
+    /// Precedence for `commandRenew`'s terminal exit status when a run
+    /// produces more than one candidate over its groups: the highest rank
+    /// here wins, and `raiseTerminalStatus` below only ever replaces the
+    /// current status with a STRICTLY higher-ranked one, so a later group's
+    /// status can never silently downgrade an earlier one.
+    ///
+    /// - `identityMismatch` (5) ranks highest: it signals a possible account
+    ///   mix-up, which must never be masked by a status that merely blocks
+    ///   completion or classifies a routine failure.
+    /// - `keychainInteractionRequired` (6) ranks next: it means the run
+    ///   could not even attempt the remaining work without a manual gesture.
+    /// - `renewalRejected` (8) ranks above `endpointUnreachable` (9): a dead
+    ///   refresh token is actionable (re-login) where "unreachable" is more
+    ///   likely transient.
+    /// - The generic failure code (1) — credential changed, reservation
+    ///   lost, an empty/invalid renewal response, or any other unclassified
+    ///   per-group error — ranks lowest among the non-success statuses:
+    ///   these are local races or malformed responses a retry alone can
+    ///   resolve.
+    private static func exitStatusRank(_ status: Int32) -> Int {
+        switch status {
+        case ExitCode.success: return 0
+        case ExitCode.identityMismatch: return 5
+        case ExitCode.keychainInteractionRequired: return 4
+        case ExitCode.renewalRejected: return 3
+        case ExitCode.endpointUnreachable: return 2
+        default: return 1
+        }
+    }
+
+    private static func raiseTerminalStatus(_ current: inout Int32, to candidate: Int32) {
+        if self.exitStatusRank(candidate) > self.exitStatusRank(current) {
+            current = candidate
+        }
+    }
+
     private static func commandRenew(_ args: [String]) throws {
         let options = try self.parseRenewalOptions(args)
         let now = Date()
@@ -1508,6 +1550,7 @@ enum CodexProfileCLI {
         var terminalStatus = ExitCode.success
         var sawRejected = false
         var sawUnreachable = false
+        var sawInvalid = false
         var requestCount = 0
         for group in groups {
             do {
@@ -1530,9 +1573,11 @@ enum CodexProfileCLI {
                     sawRejected = true
                 } else if outcome.action == .unreachable {
                     sawUnreachable = true
+                } else if outcome.action == .invalid {
+                    sawInvalid = true
                 }
             } catch is RenewalIdentityMismatch {
-                terminalStatus = ExitCode.identityMismatch
+                self.raiseTerminalStatus(&terminalStatus, to: ExitCode.identityMismatch)
                 for profileID in group.profileIDs {
                     if let profile = profiles[profileID] {
                         records[profileID] = self.renewalRecord(
@@ -1543,7 +1588,7 @@ enum CodexProfileCLI {
                     }
                 }
             } catch is RenewalCredentialChanged {
-                if terminalStatus == ExitCode.success { terminalStatus = 1 }
+                self.raiseTerminalStatus(&terminalStatus, to: 1)
                 for profileID in group.profileIDs {
                     if let profile = profiles[profileID] {
                         records[profileID] = self.renewalRecord(
@@ -1554,7 +1599,7 @@ enum CodexProfileCLI {
                     }
                 }
             } catch is RenewalReservationLost {
-                if terminalStatus == ExitCode.success { terminalStatus = 1 }
+                self.raiseTerminalStatus(&terminalStatus, to: 1)
                 for profileID in group.profileIDs {
                     if let profile = profiles[profileID] {
                         records[profileID] = self.renewalRecord(
@@ -1565,7 +1610,7 @@ enum CodexProfileCLI {
                     }
                 }
             } catch CLIError.exitStatus(let status) where status == ExitCode.keychainInteractionRequired {
-                terminalStatus = status
+                self.raiseTerminalStatus(&terminalStatus, to: status)
                 for profileID in group.profileIDs {
                     if let profile = profiles[profileID] {
                         records[profileID] = self.renewalRecord(
@@ -1576,16 +1621,38 @@ enum CodexProfileCLI {
                     }
                 }
             } catch {
-                throw error
+                // A group failing here (an unclassified error out of
+                // `renewGroup` — e.g. a filesystem or encoding failure) must
+                // not abort the whole run: the remaining groups still need
+                // their own outcomes, and this run still needs to reach
+                // `reconcileLiveAuth`, `recordRenewalStates` (the only place
+                // a rejection is persisted when the app is closed), and the
+                // final report below. Record the failure against this
+                // group's profiles and move on to the next group instead of
+                // rethrowing.
+                self.raiseTerminalStatus(&terminalStatus, to: 1)
+                let reason = "error: "
+                    + TokenRenewal.sanitizedExternalMessage(error.localizedDescription)
+                for profileID in group.profileIDs {
+                    if let profile = profiles[profileID] {
+                        records[profileID] = self.renewalRecord(
+                            profile,
+                            action: .skipped,
+                            reason: reason,
+                            now: now)
+                    }
+                }
             }
         }
 
-        if terminalStatus == ExitCode.success {
-            if sawRejected {
-                terminalStatus = ExitCode.renewalRejected
-            } else if sawUnreachable {
-                terminalStatus = ExitCode.endpointUnreachable
-            }
+        if sawRejected {
+            self.raiseTerminalStatus(&terminalStatus, to: ExitCode.renewalRejected)
+        }
+        if sawUnreachable {
+            self.raiseTerminalStatus(&terminalStatus, to: ExitCode.endpointUnreachable)
+        }
+        if sawInvalid {
+            self.raiseTerminalStatus(&terminalStatus, to: 1)
         }
 
         if !options.dryRun {
@@ -1593,9 +1660,17 @@ enum CodexProfileCLI {
                 try self.reconcileLiveAuth()
             } catch {
                 if self.isKeychainInteractionRequired(error) {
-                    terminalStatus = ExitCode.keychainInteractionRequired
+                    self.raiseTerminalStatus(&terminalStatus, to: ExitCode.keychainInteractionRequired)
                 } else {
-                    throw error
+                    // Same reasoning as the per-group catch above: rethrowing
+                    // here would skip `recordRenewalStates` and the report,
+                    // losing every outcome the groups just produced along with
+                    // the documented exit code.
+                    self.raiseTerminalStatus(&terminalStatus, to: 1)
+                    FileHandle.standardError.write(Data(
+                        ("reconcile live auth failed: "
+                            + TokenRenewal.sanitizedExternalMessage(error.localizedDescription)
+                            + "\n").utf8))
                 }
             }
         }
@@ -1620,7 +1695,25 @@ enum CodexProfileCLI {
             let counts = Dictionary(grouping: orderedRecords, by: \.action)
                 .mapValues(\.count)
             print(
-                "Summary: renewed \(counts[.renewed, default: 0]), recovered \(counts[.recovered, default: 0]), skipped \(counts[.skipped, default: 0]), rejected \(counts[.rejected, default: 0]), unreachable \(counts[.unreachable, default: 0]); requests \(requestCount)")
+                "Summary: renewed \(counts[.renewed, default: 0]), recovered \(counts[.recovered, default: 0]), skipped \(counts[.skipped, default: 0]), rejected \(counts[.rejected, default: 0]), unreachable \(counts[.unreachable, default: 0]), invalid \(counts[.invalid, default: 0]); requests \(requestCount)")
+        }
+
+        // Record the run itself, not just its per-profile outcomes. The app
+        // records this too for renewals it launches, but the nightly
+        // LaunchAgent run is the one this exists for: without a write here, a
+        // scheduled job failing every night for a month is indistinguishable
+        // from a healthy one. Never fatal — a run that succeeded must not be
+        // reported as failed because its bookkeeping write did not land.
+        if !options.dryRun {
+            let run = LastRenewalRun(
+                timestamp: Date(),
+                exitStatus: terminalStatus,
+                recordCount: orderedRecords.count)
+            try? self.withCacheLock {
+                var cache = self.reconciledCache()
+                cache.lastRenewalRun = run
+                try self.saveCache(cache)
+            }
         }
 
         if terminalStatus != ExitCode.success {
@@ -1746,6 +1839,8 @@ enum CodexProfileCLI {
                     return RenewalGroupOutcome(action: .rejected, reason: message)
                 case .unreachable(let message):
                     return RenewalGroupOutcome(action: .unreachable, reason: message)
+                case .emptyResponse(let message):
+                    return RenewalGroupOutcome(action: .invalid, reason: message)
                 }
             }
             guard let renewed = result.credentials else {
@@ -2438,13 +2533,20 @@ enum CodexProfileCLI {
         for record in records {
             switch record.action {
             case .rejected:
+                // Carry the condemned credential's fingerprint so the app can
+                // tell a stale rejection from a live one. Without it a
+                // rejection written by the nightly LaunchAgent — the path that
+                // exists precisely because the app is closed — can never be
+                // cleared, since a replacement credential is not due for
+                // renewal and so is never reported on again.
                 rejected[record.id] = RenewalState(
                     action: record.action.rawValue,
                     reason: record.reason,
-                    timestamp: now)
+                    timestamp: now,
+                    credentialFingerprint: record.credential)
             case .renewed, .recovered:
                 cleared.insert(record.id)
-            case .skipped, .unreachable:
+            case .skipped, .unreachable, .invalid:
                 break
             }
         }

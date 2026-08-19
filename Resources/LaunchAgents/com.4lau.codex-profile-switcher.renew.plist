@@ -19,6 +19,6 @@
     <integer>0</integer>
   </dict>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 </dict>
 </plist>

@@ -1,5 +1,6 @@
 import Foundation
 import CodexProfileCore
+import CryptoKit
 
 // MARK: - UsageProvider
 
@@ -10,6 +11,12 @@ final class UsageProvider {
     private var refreshGeneration: UUID?
     private var lastRefreshAll: Date = .distantPast
     private(set) var isRefreshing = false
+    /// Leases currently held by this refresh cycle, keyed by profile ID, so
+    /// `cancelRefreshes()` can release them immediately instead of waiting on
+    /// an in-flight task's own `defer` — cooperative cancellation means that
+    /// defer only runs once the task next checks `Task.isCancelled`, which can
+    /// lag a cancellation by a couple of seconds while a fetch is in flight.
+    private var activeLeases: [String: String] = [:]
     var onRefreshComplete: (() -> Void)?
 
     init(store: ProfileStore) {
@@ -22,6 +29,10 @@ final class UsageProvider {
         self.refreshTask = nil
         self.refreshGeneration = nil
         self.isRefreshing = false
+        for (profileID, token) in self.activeLeases {
+            Self.removeLease(profileIDs: [profileID], expectedToken: token)
+        }
+        self.activeLeases.removeAll()
         if cancelledActiveRefresh {
             self.store.flushCacheIfDirty()
         }
@@ -30,6 +41,11 @@ final class UsageProvider {
     func refreshAll(force: Bool = false) {
         guard !self.isRefreshing else { return }
         guard force || Date().timeIntervalSince(self.lastRefreshAll) > 60 else { return }
+
+        // The nightly renewal LaunchAgent writes rejections to the shared cache
+        // file from a separate process; re-read them at the start of every
+        // cycle so this run's statuses reflect the current on-disk state.
+        self.store.reloadRenewalStatesFromDisk()
 
         if !force,
            self.store.statuses.values.allSatisfy({
@@ -86,29 +102,56 @@ final class UsageProvider {
         let id: String
         let cached: UsageSnapshot?
         let isLive: Bool
+        /// This profile's own credential fingerprint (SHA-256(refresh token),
+        /// first 12 hex chars — matches the CLI's `renewalCredentialFingerprint`),
+        /// computed from its individually-loaded auth blob before batching by
+        /// identity. Used to detect that a persisted rejection's credential has
+        /// been replaced. Nil when the auth blob could not be loaded or parsed.
+        var credentialFingerprint: String? = nil
     }
 
     private struct RefreshGroup {
         var contexts: [RefreshContext]
         let authData: Data?
+        let loadError: (any Error)?
     }
 
     private nonisolated static func groupContexts(
         _ contexts: [RefreshContext], source: ProfileStore.UsageAuthSource
     ) async -> [RefreshGroup] {
         var groups: [String: RefreshGroup] = [:]
-        for context in contexts {
-            let authData = try? await Self.loadAuthData(
-                source: source, profileID: context.id, isLive: context.isLive)
+        for var context in contexts {
+            var loadError: (any Error)?
+            var authData: Data?
+            do {
+                authData = try await Self.loadAuthData(
+                    source: source, profileID: context.id, isLive: context.isLive)
+            } catch {
+                loadError = error
+            }
+            context.credentialFingerprint = authData.flatMap(Self.credentialFingerprint(from:))
             let key = authData.flatMap { AuthBlob.identityFingerprint(from: $0) } ?? "profile:\(context.id)"
             if var group = groups[key] {
                 group.contexts.append(context)
                 groups[key] = group
             } else {
-                groups[key] = RefreshGroup(contexts: [context], authData: authData ?? nil)
+                groups[key] = RefreshGroup(contexts: [context], authData: authData, loadError: loadError)
             }
         }
         return Array(groups.values)
+    }
+
+    /// Mirrors the CLI's `renewalCredentialFingerprint`: SHA-256 of the refresh
+    /// token, first 12 hex characters. Used to detect when a profile's stored
+    /// credential has moved past the one a persisted rejection condemned.
+    private nonisolated static func credentialFingerprint(from authData: Data) -> String? {
+        guard let credentials = try? AuthBlob.load(from: authData), !credentials.refreshToken.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(credentials.refreshToken.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return String(digest.prefix(12))
     }
 
     private func refreshGroup(
@@ -125,6 +168,9 @@ final class UsageProvider {
             // Bail if the refresh was cancelled (e.g. by cancelRefreshes() during
             // a profile switch). Prevents in-flight stale writes from landing.
             guard !Task.isCancelled, self.refreshGeneration == generation else { return }
+
+            self.store.clearRenewalStateIfCredentialMoved(
+                for: context.id, currentCredentialFingerprint: context.credentialFingerprint)
 
             // Re-derive liveness at finalize time. The snapshot was fetched under
             // whichever credentials were live at refresh START; if the live
@@ -156,7 +202,23 @@ final class UsageProvider {
 
         guard let authData = fetchGroup.authData else {
             for context in fetchGroup.contexts {
-                await finalize(context, .notSetUp, decision: "not-set-up")
+                if let error = fetchGroup.loadError {
+                    // Loading the auth blob threw. `.notFound` means genuinely no
+                    // credential; any other error (e.g. a Keychain read failure)
+                    // must not be reported as "not set up" — fall back to the
+                    // last-known snapshot and surface the error, matching the
+                    // pre-batching behavior this replaced.
+                    diagnostics[context.id]?.lastError = error.localizedDescription
+                    if let authError = error as? AuthError, case .notFound = authError {
+                        await finalize(context, .notSetUp, decision: "not-set-up")
+                    } else {
+                        await finalize(context, .stale(context.cached), decision: "stale")
+                        AppLogger.warning("Usage refresh failed",
+                                          metadata: ["profile": context.id, "error": error.localizedDescription])
+                    }
+                } else {
+                    await finalize(context, .notSetUp, decision: "not-set-up")
+                }
             }
             return
         }
@@ -164,7 +226,7 @@ final class UsageProvider {
         let reservation = LeaseReservation(
             token: UUID().uuidString,
             home: "",
-            expiresAt: Date().addingTimeInterval(5 * 60),
+            expiresAt: Date().addingTimeInterval(60),
             createdAt: Date())
         guard Self.claimLease(
             profileIDs: fetchGroup.contexts.map(\.id), reservation: reservation) else {
@@ -173,9 +235,15 @@ final class UsageProvider {
             }
             return
         }
+        for context in fetchGroup.contexts {
+            self.activeLeases[context.id] = reservation.token
+        }
         defer {
-            Self.removeLease(
-                profileIDs: fetchGroup.contexts.map(\.id), expectedToken: reservation.token)
+            let profileIDs = fetchGroup.contexts.map(\.id)
+            Self.removeLease(profileIDs: profileIDs, expectedToken: reservation.token)
+            for id in profileIDs where self.activeLeases[id] == reservation.token {
+                self.activeLeases.removeValue(forKey: id)
+            }
         }
 
         do {

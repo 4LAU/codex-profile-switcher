@@ -359,8 +359,19 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// A persisted rejection only overrides a status that itself implies a
+    /// credential is present (available/stale/reloginNeeded/loading). `.notSetUp`
+    /// means there is no credential to relogin to, so it must pass through
+    /// unchanged — otherwise a profile that was rejected and then had its saved
+    /// auth cleared would show a permanent, un-actionable "re-login needed"
+    /// banner instead of "not set up".
+    private static func statusImpliesCredentialPresent(_ status: ProfileStatus) -> Bool {
+        if case .notSetUp = status { return false }
+        return true
+    }
+
     func updateStatus(_ id: String, _ status: ProfileStatus) {
-        if self.cache.renewalStates[id]?.action == "rejected" {
+        if self.cache.renewalStates[id]?.action == "rejected", Self.statusImpliesCredentialPresent(status) {
             self.statuses[id] = .reloginNeeded(status.snapshot)
         } else {
             self.statuses[id] = status
@@ -386,6 +397,52 @@ final class ProfileStore: ObservableObject {
     func clearRenewalState(for id: String) {
         self.cache.renewalStates.removeValue(forKey: id)
         self.saveCache(renewalStateChange: .remove(id))
+    }
+
+    /// Clears a persisted rejection once the credential it condemned has been
+    /// replaced (e.g. by a terminal `codex-profile login`). A fresh credential
+    /// is not due for renewal, so `renew` reports nothing for this profile and
+    /// nothing else would ever clear the old rejection — it would otherwise be
+    /// sticky forever. Only clears when both fingerprints are known and they
+    /// differ; an unknown current fingerprint (auth unreadable this cycle)
+    /// leaves the rejection in place rather than guessing.
+    func clearRenewalStateIfCredentialMoved(for id: String, currentCredentialFingerprint: String?) {
+        guard let renewal = self.cache.renewalStates[id], renewal.action == "rejected" else { return }
+        guard let condemned = renewal.credentialFingerprint,
+              let current = currentCredentialFingerprint,
+              current != condemned else { return }
+        self.clearRenewalState(for: id)
+    }
+
+    /// Re-reads renewal states from the on-disk cache. `self.cache` is
+    /// otherwise loaded once at init and never mutated by `saveCache` (see its
+    /// doc comment); the nightly renewal LaunchAgent writes rejections to the
+    /// cache file from a separate process, so without this the app would never
+    /// observe them. Call at the start of a refresh cycle.
+    func reloadRenewalStatesFromDisk() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: self.cacheURL),
+              let diskCache = try? decoder.decode(UsageCache.self, from: data) else { return }
+        self.cache.renewalStates = diskCache.renewalStates
+        self.cache.lastRenewalRun = diskCache.lastRenewalRun
+    }
+
+    /// Re-reads only the last-renewal-run record from disk. Settings needs this
+    /// on its own: the nightly LaunchAgent writes the record from a separate
+    /// process, and `self.cache` would otherwise only ever show a run this app
+    /// launched itself.
+    func reloadLastRenewalRunFromDisk() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: self.cacheURL),
+              let diskCache = try? decoder.decode(UsageCache.self, from: data) else { return }
+        self.cache.lastRenewalRun = diskCache.lastRenewalRun
+    }
+
+    func recordRenewalRun(_ run: LastRenewalRun) {
+        self.cache.lastRenewalRun = run
+        self.saveCache(lastRenewalRunChange: run)
     }
 
     func updateRefreshDiagnostics(_ id: String, _ diagnostics: ProfileRefreshDiagnostics) {
@@ -707,7 +764,8 @@ final class ProfileStore: ObservableObject {
     /// every OTHER profile.
     private func saveCache(
         excludingOverridesFor excludedID: String? = nil,
-        renewalStateChange: RenewalStateChange? = nil
+        renewalStateChange: RenewalStateChange? = nil,
+        lastRenewalRunChange: LastRenewalRun? = nil
     ) {
         do {
             // Hold the cross-process cache lock across the disk re-read
@@ -731,6 +789,9 @@ final class ProfileStore: ObservableObject {
                     case .remove(let id):
                         toWrite.renewalStates.removeValue(forKey: id)
                     }
+                }
+                if let lastRenewalRunChange {
+                    toWrite.lastRenewalRun = lastRenewalRunChange
                 }
                 let data = try Self.cacheEncoder.encode(toWrite)
                 try data.write(to: self.cacheURL, options: .atomic)
