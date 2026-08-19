@@ -52,7 +52,22 @@ public enum TokenRenewalError: LocalizedError, Equatable {
 }
 
 public struct URLSessionTokenRefresher: TokenRefreshing {
-    private static let endpoint = URL(string: "https://auth.openai.com/oauth/token")!
+    private static var endpoint: URL {
+        let environment = ProcessInfo.processInfo.environment
+        let override = environment["CODEX_PROFILE_TEST_TOKEN_ENDPOINT"]
+        let store = environment["CODEX_PROFILE_TEST_AUTH_STORE_DIR"]
+        if let override,
+           !override.isEmpty,
+           let store,
+           !store.isEmpty,
+           let url = URL(string: override),
+           let host = url.host?.lowercased(),
+           ["127.0.0.1", "::1", "localhost"].contains(host) {
+            // Tests may use only loopback so refresh credentials cannot be redirected remotely.
+            return url
+        }
+        return URL(string: "https://auth.openai.com/oauth/token")!
+    }
     private static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     // Matches the request measured working against this endpoint on 2026-08-17.
     // A rejected refresh here costs the credential, so the shape does not vary.
