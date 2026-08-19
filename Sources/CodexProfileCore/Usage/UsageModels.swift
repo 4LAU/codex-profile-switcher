@@ -50,6 +50,18 @@ public struct ExhaustionOverride: Codable, Equatable {
     }
 }
 
+public struct RenewalState: Codable, Equatable {
+    public let action: String
+    public let reason: String
+    public let timestamp: Date
+
+    public init(action: String, reason: String, timestamp: Date) {
+        self.action = action
+        self.reason = reason
+        self.timestamp = timestamp
+    }
+}
+
 /// A short-lived reservation of a profile by a warm `codex-profile lease`
 /// session, recorded in the cache (keyed by profile ID) so concurrent runs
 /// never select the same account. Mirrors the ExhaustionOverride TTL pattern.
@@ -78,15 +90,18 @@ public struct UsageCache: Codable, Equatable {
     public var snapshots: [String: UsageSnapshot]
     public var exhaustionOverrides: [String: ExhaustionOverride]
     public var leases: [String: LeaseReservation]
+    public var renewalStates: [String: RenewalState]
 
     public init(
         snapshots: [String: UsageSnapshot],
         exhaustionOverrides: [String: ExhaustionOverride] = [:],
-        leases: [String: LeaseReservation] = [:]
+        leases: [String: LeaseReservation] = [:],
+        renewalStates: [String: RenewalState] = [:]
     ) {
         self.snapshots = snapshots
         self.exhaustionOverrides = exhaustionOverrides
         self.leases = leases
+        self.renewalStates = renewalStates
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +113,9 @@ public struct UsageCache: Codable, Equatable {
         self.leases = try container.decodeIfPresent(
             [String: LeaseReservation].self,
             forKey: .leases) ?? [:]
+        self.renewalStates = try container.decodeIfPresent(
+            [String: RenewalState].self,
+            forKey: .renewalStates) ?? [:]
     }
 
     /// Returns a copy of this cache reconciled with on-disk state before a write.
@@ -115,6 +133,10 @@ public struct UsageCache: Codable, Equatable {
     /// writers get disk leases unchanged, and the lease commands re-apply their
     /// single add/remove delta on top of this reconciled copy.
     ///
+    /// Renewal states follow the same disk-authoritative rule. A writer that
+    /// changes one profile's state must re-apply that single-profile delta
+    /// after this merge.
+    ///
     /// `self` is never mutated.
     public func mergingDiskOverrides(
         fromCacheAt url: URL,
@@ -131,6 +153,7 @@ public struct UsageCache: Codable, Equatable {
             merged.exhaustionOverrides[id] = override
         }
         merged.leases = diskCache.leases
+        merged.renewalStates = diskCache.renewalStates
         return merged
     }
 }

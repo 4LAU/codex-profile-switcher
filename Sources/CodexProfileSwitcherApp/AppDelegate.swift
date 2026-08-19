@@ -754,6 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch result {
             case .success:
                 AppLogger.info("Login succeeded", metadata: ["profile": profileId])
+                self.store.clearRenewalState(for: profileId)
                 if self.store.liveProfileId == profileId {
                     do {
                         try self.store.syncSavedAuthToLive(for: profileId)

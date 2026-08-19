@@ -207,8 +207,9 @@ final class ProfileStore: ObservableObject {
         self.refreshDiagnostics.removeValue(forKey: id)
         self.cache.snapshots.removeValue(forKey: id)
         self.cache.exhaustionOverrides.removeValue(forKey: id)
+        self.cache.renewalStates.removeValue(forKey: id)
         self.saveConfig()
-        self.saveCache(excludingOverridesFor: id)
+        self.saveCache(excludingOverridesFor: id, renewalStateChange: .remove(id))
     }
 
     func authStoreExists(for profileId: String) -> Bool {
@@ -358,11 +359,32 @@ final class ProfileStore: ObservableObject {
     }
 
     func updateStatus(_ id: String, _ status: ProfileStatus) {
-        self.statuses[id] = status
+        if self.cache.renewalStates[id]?.action == "rejected" {
+            self.statuses[id] = .reloginNeeded(status.snapshot)
+        } else {
+            self.statuses[id] = status
+        }
         if case let .available(snapshot) = status {
             self.cache.snapshots[id] = snapshot
             self.cacheDirty = true
         }
+    }
+
+    func recordRenewalState(_ state: RenewalState, for id: String) {
+        switch state.action {
+        case "renewed", "recovered":
+            self.clearRenewalState(for: id)
+        case "rejected":
+            self.cache.renewalStates[id] = state
+            self.saveCache(renewalStateChange: .set(id, state))
+        default:
+            break
+        }
+    }
+
+    func clearRenewalState(for id: String) {
+        self.cache.renewalStates.removeValue(forKey: id)
+        self.saveCache(renewalStateChange: .remove(id))
     }
 
     func updateRefreshDiagnostics(_ id: String, _ diagnostics: ProfileRefreshDiagnostics) {
@@ -400,9 +422,10 @@ final class ProfileStore: ObservableObject {
         try self.authVault.deleteAuthBlob(profileID: id)
         self.cache.snapshots.removeValue(forKey: id)
         self.cache.exhaustionOverrides.removeValue(forKey: id)
+        self.cache.renewalStates.removeValue(forKey: id)
         self.refreshDiagnostics.removeValue(forKey: id)
         self.statuses[id] = .notSetUp
-        self.saveCache(excludingOverridesFor: id)
+        self.saveCache(excludingOverridesFor: id, renewalStateChange: .remove(id))
     }
 
     func reviewLegacyKeychainMigration() throws -> KeychainMigrationPreview {
@@ -663,6 +686,11 @@ final class ProfileStore: ObservableObject {
         self.saveCache(excludingOverridesFor: nil)
     }
 
+    private enum RenewalStateChange {
+        case set(String, RenewalState)
+        case remove(String)
+    }
+
     /// Persists the in-memory cache to disk.
     ///
     /// Concurrent-merge semantics: a CLI process (`mark-exhausted`) may write
@@ -676,7 +704,10 @@ final class ProfileStore: ObservableObject {
     /// so the disk override for that id is NOT merged back. This makes the
     /// removal stick on disk while still preserving concurrent overrides for
     /// every OTHER profile.
-    private func saveCache(excludingOverridesFor excludedID: String?) {
+    private func saveCache(
+        excludingOverridesFor excludedID: String? = nil,
+        renewalStateChange: RenewalStateChange? = nil
+    ) {
         do {
             // Hold the cross-process cache lock across the disk re-read
             // (mergingDiskOverrides) and the atomic write so this whole-cache
@@ -688,10 +719,18 @@ final class ProfileStore: ObservableObject {
             try CacheLock.withLock(at: self.paths.cacheLockURL) {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
-                let toWrite = self.cache.mergingDiskOverrides(
+                var toWrite = self.cache.mergingDiskOverrides(
                     fromCacheAt: self.cacheURL,
                     excluding: excludedID,
                     decoder: decoder)
+                if let renewalStateChange {
+                    switch renewalStateChange {
+                    case .set(let id, let state):
+                        toWrite.renewalStates[id] = state
+                    case .remove(let id):
+                        toWrite.renewalStates.removeValue(forKey: id)
+                    }
+                }
                 let data = try Self.cacheEncoder.encode(toWrite)
                 try data.write(to: self.cacheURL, options: .atomic)
             }
@@ -706,12 +745,14 @@ final class ProfileStore: ObservableObject {
             switch self.authStoreAvailability(for: profile.id) {
             case .present:
                 if let cached = self.cache.snapshots[profile.id] {
-                    self.statuses[profile.id] = .stale(cached)
+                    self.updateStatus(profile.id, .stale(cached))
                 } else {
-                    self.statuses[profile.id] = .loading
+                    self.updateStatus(profile.id, .loading)
                 }
             case .missing:
-                self.statuses[profile.id] = self.missingAuthStatus(cached: self.cache.snapshots[profile.id])
+                self.updateStatus(
+                    profile.id,
+                    self.missingAuthStatus(cached: self.cache.snapshots[profile.id]))
             }
         }
     }

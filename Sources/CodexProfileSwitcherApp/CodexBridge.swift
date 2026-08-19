@@ -72,6 +72,12 @@ enum CodexBridgeError: LocalizedError {
 }
 
 enum CodexBridge {
+    private struct CommandResult {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
     private final class ActiveLogin {
         let process: Process
         let startedAt = Date()
@@ -201,40 +207,49 @@ enum CodexBridge {
     private static func runCommand(
         path: String,
         arguments: [String],
-        completion: @escaping (Result<Void, CodexBridgeError>) -> Void
+        completion: @escaping (Result<CommandResult, CodexBridgeError>) -> Void
     ) {
         AppLogger.info("Running helper command",
                        metadata: ["path": path, "arguments": arguments.joined(separator: " ")])
         let proc = Process()
-        let pipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = arguments
-        proc.standardOutput = pipe
-        proc.standardError = pipe
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
 
-        let drain = self.pipeDrain(for: pipe)
+        let stdoutDrain = self.pipeDrain(for: stdoutPipe)
+        let stderrDrain = self.pipeDrain(for: stderrPipe)
 
         proc.terminationHandler = { p in
-            let output = drain.awaitOutput()
+            let stdout = stdoutDrain.awaitOutput()
+            let stderr = stderrDrain.awaitOutput()
 
             if p.terminationStatus == 0 {
                 AppLogger.info("Helper command succeeded",
                                metadata: ["arguments": arguments.joined(separator: " ")])
-                completion(.success(()))
             } else {
                 AppLogger.error("Helper command failed",
                                 metadata: [
                                     "arguments": arguments.joined(separator: " "),
                                     "status": "\(p.terminationStatus)",
-                                    "output": output,
+                                    "output": stderr,
                                 ])
-                completion(.failure(.commandFailed(p.terminationStatus, output)))
             }
+            // A non-zero exit is a result, not a launch failure: `renew` reports
+            // a rejected credential as exit 8 with the per-profile records on
+            // stdout, and folding that into an error would throw away the very
+            // thing the caller needs. Only a process that never ran fails here.
+            completion(.success(CommandResult(status: p.terminationStatus,
+                                              stdout: stdout,
+                                              stderr: stderr)))
         }
 
         do {
             try proc.run()
-            drain.start()
+            stdoutDrain.start()
+            stderrDrain.start()
         } catch {
             AppLogger.error("Failed to launch helper command",
                             metadata: [
