@@ -27,6 +27,7 @@ cleanup() {
     kill "$TOKEN_STUB_PID" 2>/dev/null || true
     wait "$TOKEN_STUB_PID" 2>/dev/null || true
   fi
+  chmod 700 "$AUTH_STORE" 2>/dev/null || true
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -139,7 +140,7 @@ run_helper() {
     CODEX_PROFILE_TEST_TOKEN_ENDPOINT="${TOKEN_STUB_ENDPOINT:-http://127.0.0.1:1}" \
     CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
     CODEX_BUNDLED_CLI="$FAKE_APP" \
-    CODEX_CLI="${CODEX_CLI:-$FAKE_CODEX}" \
+    CODEX_CLI="${TEST_CODEX_CLI:-$FAKE_CODEX}" \
     FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
     "$HELPER" "$@"
 }
@@ -1543,8 +1544,8 @@ test_renew_writes_rotated_credential_and_last_refresh() {
   [[ "$(auth_refresh Renew)" == refresh-new ]] || fail "renew did not write the rotated refresh token"
   [[ "$(plutil -extract tokens.access_token raw -o - "$AUTH_STORE/Renew.json")" == access-new ]] \
     || fail "renew did not write the rotated access token"
-  plutil -extract last_refresh raw -o - "$AUTH_STORE/Renew.json" >/dev/null \
-    || fail "renew did not stamp last_refresh"
+  [[ "$(plutil -extract last_refresh raw -o - "$AUTH_STORE/Renew.json")" != "2026-01-01T00:00:00Z" ]] \
+    || fail "renew did not advance last_refresh"
   [[ "$(request_count)" == 1 ]] || fail "renew made the wrong number of token requests"
   stop_token_stub
 }
@@ -1660,6 +1661,15 @@ test_renew_reconciles_live_auth_forward() {
     || fail "renew did not reconcile the live auth forward"
   [[ "$(plutil -extract last_refresh raw -o - "$live")" != "2026-01-01T00:00:00Z" ]] \
     || fail "live auth retained its older last_refresh"
+  make_oauth_auth_with_refresh_date "$live" access-live-stale refresh-live-stale acct-live "2026-01-01T00:00:00Z"
+  local second_report="$WORK_DIR/live-not-due-report.json"
+  run_helper renew --profile Live --json > "$second_report"
+  grep -Fq '"reason":"not_due"' "$second_report" \
+    || fail "not-due renewal did not report not_due"
+  grep -Fq '"requests":0' "$second_report" \
+    || fail "not-due renewal made a token request"
+  [[ "$(plutil -extract tokens.refresh_token raw -o - "$live")" == refresh-live-new ]] \
+    || fail "not-due renewal did not reconcile the live auth forward"
   stop_token_stub
 }
 
@@ -1714,7 +1724,7 @@ test_self_fetch_usage_groups_shared_credentials() {
   save_auth UsageB "$b"
   write_profiles_config UsageA UsageA UsageB
   make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count"
-  USAGE_RPC_COUNT="$usage_count" CODEX_CLI="$FAKE_USAGE_CODEX" \
+  USAGE_RPC_COUNT="$usage_count" TEST_CODEX_CLI="$FAKE_USAGE_CODEX" \
     run_helper best-auth --dir "$WORK_DIR/self-usage-out" >/dev/null
   [[ "$(wc -l < "$usage_count" | tr -d ' ')" == 1 ]] \
     || fail "selfFetchUsage made more than one RPC for one credential"
@@ -1731,9 +1741,17 @@ test_usage_provider_groups_shared_credentials() {
   cp "$auth" "$dev_store/ProviderB.json"
   write_profiles_config ProviderA ProviderA ProviderB
   make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count"
+  local app_dir="$WORK_DIR/provider-app" app_helper="$WORK_DIR/provider-app/codex-profile"
+  mkdir -p "$app_dir"
+  cp "$APP_BIN" "$app_dir/CodexProfileSwitcher"
+  cat > "$app_helper" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '{"records":[],"requests":0}\n'
+SCRIPT
+  chmod +x "$app_helper"
   USAGE_RPC_COUNT="$usage_count" CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" CODEX_CLI="$FAKE_USAGE_CODEX" \
-    "$APP_BIN" > "$WORK_DIR/provider-app.log" 2>&1 &
+    "$app_dir/CodexProfileSwitcher" > "$WORK_DIR/provider-app.log" 2>&1 &
   local app_pid=$!
   for _ in {1..200}; do
     [[ -s "$usage_count" ]] && break
@@ -1864,7 +1882,7 @@ SCRIPT
   wait "$app_pid" 2>/dev/null || true
   plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
     | grep -qx rejected || fail "app renewal state was not recorded"
-  USAGE_RPC_COUNT="$usage_count_two" CODEX_CLI="$FAKE_USAGE_CODEX" \
+  USAGE_RPC_COUNT="$usage_count_two" TEST_CODEX_CLI="$FAKE_USAGE_CODEX" \
     run_helper best-auth --dir "$WORK_DIR/state-best-auth" >/dev/null
   plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
     | grep -qx rejected || fail "CLI whole-cache write clobbered app renewal state"
