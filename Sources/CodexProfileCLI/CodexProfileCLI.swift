@@ -1560,6 +1560,13 @@ enum CodexProfileCLI {
         }
 
         let orderedRecords = records.values.sorted { $0.id < $1.id }
+        // The app reads these out of the usage cache to show a dead profile as
+        // needing re-login. Recording them here is what makes the scheduled
+        // agent worth running: when it fires with the app closed, this write is
+        // the only trace of a rejection that survives to the next launch.
+        if !options.dryRun {
+            try self.recordRenewalStates(orderedRecords)
+        }
         if options.json {
             let report = RenewalReport(records: orderedRecords, requests: requestCount)
             let encoder = JSONEncoder()
@@ -2356,6 +2363,37 @@ enum CodexProfileCLI {
         self.loadCache().mergingDiskOverrides(
             fromCacheAt: self.paths.cacheURL,
             decoder: JSONDecoder.iso8601Decoder())
+    }
+
+    /// Persists what renewal just learned about each profile, on top of the
+    /// disk-authoritative map so a concurrent writer's states are not lost.
+    /// Only a rejection and its clearance are recorded: `skipped` says nothing
+    /// happened and `unreachable` says we never reached the server, and neither
+    /// is evidence that an earlier rejection is resolved.
+    private static func recordRenewalStates(_ records: [RenewalRecord]) throws {
+        let now = Date()
+        var rejected: [String: RenewalState] = [:]
+        var cleared: Set<String> = []
+        for record in records {
+            switch record.action {
+            case .rejected:
+                rejected[record.id] = RenewalState(
+                    action: record.action.rawValue,
+                    reason: record.reason,
+                    timestamp: now)
+            case .renewed, .recovered:
+                cleared.insert(record.id)
+            case .skipped, .unreachable:
+                break
+            }
+        }
+        guard !rejected.isEmpty || !cleared.isEmpty else { return }
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            for (profileID, state) in rejected { cache.renewalStates[profileID] = state }
+            for profileID in cleared { cache.renewalStates.removeValue(forKey: profileID) }
+            try self.saveCache(cache)
+        }
     }
 
     /// Records (or replaces) the reservation for `profileID` on top of the
