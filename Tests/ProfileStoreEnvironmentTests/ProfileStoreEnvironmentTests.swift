@@ -247,7 +247,9 @@ final class ProfileStoreEnvironmentTests {
 
         // A file-backed vault stands in for the unsigned dev build's file vault.
         _ = ProfileStore(
-            authVault: FileAuthVault(root: vaultRoot),
+            authVault: FileAuthVault(
+                root: vaultRoot,
+                authLockURL: AppPaths(environment: ["CODEX_PROFILE_HOME": home.path]).authLockURL),
             environment: ["CODEX_PROFILE_HOME": home.path])
 
         let configURL = home.appendingPathComponent(".codex-switcher/config.json")
@@ -282,7 +284,9 @@ final class ProfileStoreEnvironmentTests {
 
         // Two profiles with saved auth so both are discovered. Profile "1" is the
         // default active (live) profile; we clear non-live profile "2".
-        let vault = FileAuthVault(root: vaultRoot)
+        let vault = FileAuthVault(
+            root: vaultRoot,
+            authLockURL: AppPaths(environment: ["CODEX_PROFILE_HOME": home.path]).authLockURL)
         try vault.saveAuthBlob(Data(#"{"OPENAI_API_KEY":"sk-test-profile-1-1111111111"}"#.utf8), profileID: "1")
         try vault.saveAuthBlob(Data(#"{"OPENAI_API_KEY":"sk-test-profile-2-2222222222"}"#.utf8), profileID: "2")
 

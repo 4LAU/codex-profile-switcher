@@ -36,11 +36,12 @@ public struct AuthVaultDiagnostics: Equatable {
 public enum PrimaryAuthVaultSelector {
     public static func makeVault(
         hasDataProtectionKeychainAccess: Bool,
-        fileVaultRoot: URL
+        fileVaultRoot: URL,
+        authLockURL: URL = AppPaths().authLockURL
     ) -> AuthVault {
         hasDataProtectionKeychainAccess
-            ? DataProtectionKeychainAuthVault()
-            : FileAuthVault(root: fileVaultRoot)
+            ? DataProtectionKeychainAuthVault(authLockURL: authLockURL)
+            : FileAuthVault(root: fileVaultRoot, authLockURL: authLockURL)
     }
 }
 
@@ -56,6 +57,11 @@ public struct AuthVaultRepairResult: Equatable {
 }
 
 public protocol AuthVault: Sendable {
+    /// The lock guarding this instance's own read-modify-write transactions.
+    /// Must be threaded from the SAME `AppPaths` (or equivalent environment)
+    /// the instance stores its data under — see `transact`.
+    var authLockURL: URL { get }
+
     func listProfileIDs() throws -> [String]
     func loadAuthBlob(profileID: String) throws -> Data?
     func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws
@@ -67,11 +73,18 @@ public protocol AuthVault: Sendable {
 }
 
 public extension AuthVault {
+    /// Default: the real environment's auth lock. A vault built with an
+    /// injected (non-ambient) environment — e.g. a test or dev instance
+    /// pointed at a scratch `CODEX_PROFILE_HOME` — MUST override this with the
+    /// same `AppPaths` it used to resolve where it stores data, or this default
+    /// silently locks a different file than the one it reads/writes.
+    var authLockURL: URL { AppPaths().authLockURL }
+
     /// Auth locking may be nested inside `CacheLock`, but must never enclose it.
     /// Keep this transaction limited to bounded vault operations: it must not
     /// include usage fetches, profile ranking, or Codex subprocesses.
     func transact<T>(_ body: () throws -> T) throws -> T {
-        try CacheLock.withLock(at: AppPaths().authLockURL) {
+        try CacheLock.withLock(at: self.authLockURL) {
             try body()
         }
     }

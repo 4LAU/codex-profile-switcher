@@ -6,7 +6,11 @@ public struct DataProtectionKeychainAuthVault: AuthVault, KeychainMigrationDesti
     public static let defaultService = "com.4lau.codex-profile-switcher.auth"
     private static let manualSmokeServicePrefix = "com.4lau.codex-profile-switcher.auth.smoke."
 
-    public init() {}
+    public let authLockURL: URL
+
+    public init(authLockURL: URL = AppPaths().authLockURL) {
+        self.authLockURL = authLockURL
+    }
 
     public func listProfileIDs() throws -> [String] {
         var result: CFTypeRef?

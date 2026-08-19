@@ -88,7 +88,8 @@ final class ProfileStore: ObservableObject {
             let hasDataProtectionKeychainAccess = ProcessSigningIdentity.hasDataProtectionKeychainAccess
             self.authVault = PrimaryAuthVaultSelector.makeVault(
                 hasDataProtectionKeychainAccess: hasDataProtectionKeychainAccess,
-                fileVaultRoot: paths.devAuthStoreURL)
+                fileVaultRoot: paths.devAuthStoreURL,
+                authLockURL: paths.authLockURL)
             if hasDataProtectionKeychainAccess {
                 self.authStorageDescription = "data-protection Keychain auth vault"
                 AppLogger.info("Auth vault selected",

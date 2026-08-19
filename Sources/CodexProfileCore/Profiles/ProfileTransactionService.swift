@@ -37,9 +37,19 @@ public struct PreparedProfileSwitch {
         // rollback will best-effort delete the entry we are about to write.
         var didSaveOutgoingVaultBlob = false
         var preSaveOutgoingVaultBlob: Data?
+        // Distinguishes "the read threw" from "the read succeeded and found
+        // nothing" — `try?` used to collapse both into the same nil, and a
+        // rollback that saw nil then unconditionally DELETED the vault entry,
+        // destroying a real credential whenever the pre-switch read merely
+        // failed transiently rather than confirming absence.
+        var priorVaultReadFailed = false
         if let outgoingProfileID, let outgoingLiveData {
             try self.vault.transact {
-                preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                do {
+                    preSaveOutgoingVaultBlob = try self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                } catch {
+                    priorVaultReadFailed = true
+                }
                 let existingLastRefresh = preSaveOutgoingVaultBlob
                     .flatMap { (try? AuthBlob.load(from: $0))?.lastRefresh }
                 let outgoingLastRefresh = (try? AuthBlob.load(from: outgoingLiveData))?.lastRefresh
@@ -66,7 +76,8 @@ public struct PreparedProfileSwitch {
                 path: self.paths.liveAuthURL,
                 snapshots: snapshots,
                 didSaveOutgoingVaultBlob: didSaveOutgoingVaultBlob,
-                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob)
+                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob,
+                priorVaultReadFailed: priorVaultReadFailed)
         }
         do {
             try ProfileConfigStore(paths: self.paths, fileManager: self.fileManager).saveActiveProfile(self.profileID)
@@ -76,7 +87,8 @@ public struct PreparedProfileSwitch {
                 path: self.paths.configURL,
                 snapshots: snapshots,
                 didSaveOutgoingVaultBlob: didSaveOutgoingVaultBlob,
-                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob)
+                preSaveOutgoingVaultBlob: preSaveOutgoingVaultBlob,
+                priorVaultReadFailed: priorVaultReadFailed)
         }
         return .committed
     }
@@ -86,7 +98,8 @@ public struct PreparedProfileSwitch {
         path: URL,
         snapshots: ProfileSwitchFileSnapshots,
         didSaveOutgoingVaultBlob: Bool,
-        preSaveOutgoingVaultBlob: Data?
+        preSaveOutgoingVaultBlob: Data?,
+        priorVaultReadFailed: Bool
     ) -> ProfileSwitchCommitError {
         snapshots.restore(fileManager: self.fileManager)
         if didSaveOutgoingVaultBlob, let outgoingProfileID {
@@ -108,6 +121,16 @@ public struct PreparedProfileSwitch {
                                 preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
                         }
                     }
+                } else if priorVaultReadFailed {
+                    // We never confirmed the outgoing profile's vault entry was
+                    // absent before the switch — the read that would have told
+                    // us THREW instead. Deleting here could destroy a real
+                    // credential we simply failed to read; leave the vault
+                    // entry exactly as it stands and surface the ambiguity.
+                    CoreLogger.error(
+                        "Skipping vault rollback for outgoing profile: prior state unknown "
+                            + "(the pre-switch read failed rather than confirming no entry existed)",
+                        metadata: ["profile": outgoingProfileID])
                 } else {
                     try self.vault.deleteAuthBlob(profileID: outgoingProfileID)
                 }

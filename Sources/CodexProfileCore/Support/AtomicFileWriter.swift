@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum AtomicFileWriter {
@@ -12,9 +13,8 @@ public enum AtomicFileWriter {
         try self.ensurePrivateDirectory(destination.deletingLastPathComponent(), fileManager: fileManager)
         let temp = destination.deletingLastPathComponent()
             .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
-        try data.write(to: temp, options: .withoutOverwriting)
+        try self.createFilePrivately(at: temp, contents: data)
         do {
-            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
             if fileManager.fileExists(atPath: destination.path) {
                 _ = try fileManager.replaceItemAt(destination, withItemAt: temp)
             } else {
@@ -24,5 +24,21 @@ public enum AtomicFileWriter {
             try? fileManager.removeItem(at: temp)
             throw error
         }
+    }
+
+    /// Creates `url` at mode 0600 from the moment it exists, instead of writing
+    /// with the process's default permissions (0644 under a typical umask) and
+    /// narrowing afterward. A crash between those two steps would otherwise
+    /// leave a live credential briefly world-readable on disk. `O_EXCL`
+    /// preserves the no-overwrite guarantee the caller relies on for its
+    /// randomly-named temp file.
+    private static func createFilePrivately(at url: URL, contents: Data) throws {
+        let fd = url.path.withCString { open($0, O_WRONLY | O_CREAT | O_EXCL, 0o600) }
+        guard fd >= 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        try handle.write(contentsOf: contents)
+        try handle.close()
     }
 }

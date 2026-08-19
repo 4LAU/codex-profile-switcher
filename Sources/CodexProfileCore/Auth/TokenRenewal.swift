@@ -63,7 +63,11 @@ public struct URLSessionTokenRefresher: TokenRefreshing {
            let url = URL(string: override),
            let host = url.host?.lowercased(),
            ["127.0.0.1", "::1", "localhost"].contains(host) {
-            // Tests may use only loopback so refresh credentials cannot be redirected remotely.
+            // Tests may use only loopback for the override itself. That alone
+            // does not stop a loopback server from answering with an HTTP
+            // redirect to a remote host — `session` refuses every redirect (see
+            // `RedirectRefusingDelegate` below), which is what actually keeps
+            // the refresh token, sent in the POST body, from following one.
             return url
         }
         return URL(string: "https://auth.openai.com/oauth/token")!
@@ -76,7 +80,14 @@ public struct URLSessionTokenRefresher: TokenRefreshing {
     private let session: URLSession
 
     public init(session: URLSession = .shared) {
-        self.session = session
+        // Wrap the given session's configuration in one that refuses redirects,
+        // rather than using `session` directly: a redirect response otherwise
+        // makes URLSession silently re-send the POST body — refresh token
+        // included — to whatever host the redirect names.
+        self.session = URLSession(
+            configuration: session.configuration,
+            delegate: RedirectRefusingDelegate(),
+            delegateQueue: session.delegateQueue)
     }
 
     public func refresh(refreshToken: String) async throws -> TokenRefreshResponse {
@@ -124,6 +135,24 @@ public struct URLSessionTokenRefresher: TokenRefreshing {
         }
         let detail = (json["error_description"] as? String) ?? (json["error"] as? String)
         return detail.map { "HTTP \(statusCode): \($0)" } ?? "Token endpoint returned HTTP \(statusCode)"
+    }
+}
+
+/// Refuses every HTTP redirect the token endpoint sends back. Without this,
+/// `URLSession`'s default behavior re-sends the refresh POST — body and all —
+/// to the redirect target, so a 3xx response silently hands the refresh token
+/// (and, on success, reports the redirect target's response as a renewal) to
+/// whatever host the redirect names. `completionHandler(nil)` makes the
+/// original 3xx response terminate the task in place of following it.
+private final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 

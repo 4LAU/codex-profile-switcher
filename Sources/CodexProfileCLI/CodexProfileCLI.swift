@@ -589,6 +589,14 @@ enum CodexProfileCLI {
         }
         fputs("Warning: best-auth --dir is deprecated; use lease begin instead; it will be removed in a future release.\n", stderr)
 
+        // Opportunistic cleanup of expired homes — same reclaim path `lease
+        // begin` runs. `best-auth --dir` has no `lease end` counterpart, so its
+        // 24h reservation below is only ever released by gc; without this call
+        // here too, a caller who only ever uses `best-auth` (never `lease
+        // begin`) could leave that reservation permanently unreclaimed.
+        // Best-effort; never fail best-auth.
+        try? self.commandLeaseGC([])
+
         // Non-interactive whenever stdin is not a TTY or the caller asked.
         let interactive = self.stdinIsTTY && !options.nonInteractive
 
@@ -1348,6 +1356,26 @@ enum CodexProfileCLI {
         self.renewalStashRoot.appendingPathComponent(profileID + ".json")
     }
 
+    /// Stash files are keyed by profile ID and outlive the profile they were
+    /// written for: removing a profile from both the config and the vault
+    /// leaves its stash on disk forever, since nothing else ever visits
+    /// `renewalStashRoot` for a profile that is no longer in either place.
+    /// A stash holds a rotated credential in cleartext, so this durable
+    /// leftover is a real exposure, not just clutter — sweep it here where
+    /// `commandRenew` already has the authoritative set of live profile IDs.
+    private static func sweepOrphanedRenewalStashes(knownProfileIDs: Set<String>) {
+        guard let entries = try? self.fileManager.contentsOfDirectory(
+            at: self.renewalStashRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]) else { return }
+        for entry in entries {
+            guard entry.pathExtension == "json" else { continue }
+            let profileID = entry.deletingPathExtension().lastPathComponent
+            guard !knownProfileIDs.contains(profileID) else { continue }
+            try? self.fileManager.removeItem(at: entry)
+        }
+    }
+
     private static func renewalRecord(
         _ profile: RenewalProfile,
         action: RenewalAction,
@@ -1376,10 +1404,23 @@ enum CodexProfileCLI {
             diagnostic: "renew timed out after \(Int(options.timeout))s")
         defer { disarmWatchdog() }
 
+        // Reclaim home-less expired leases (e.g. left behind by a killed or
+        // timed-out `renew`) before evaluating groups: the `defer` that would
+        // release a lease this command reserves never fires on the watchdog
+        // path (armWatchdog calls exit()), and `lease gc` otherwise only runs
+        // opportunistically from `lease begin` — so without this, a dead lease
+        // blocks every future renew, including --force, until it happens to be
+        // gc'd elsewhere. Deliberately narrower than `commandLeaseGC`: a lease
+        // that still carries a home may hold the only copy of a refreshed
+        // credential, and reserveRenewal (below) correctly keeps treating such
+        // a lease as reserved rather than due for renewal.
+        self.reclaimHomelessExpiredLeases()
+
         let configuredIDs = self.configStore.loadConfig()?.profiles.map(\.id) ?? []
         let storedIDs = try self.vault.listProfileIDs().filter(ProfileValidator.isValid)
         var allIDs = Set(configuredIDs.filter(ProfileValidator.isValid))
         allIDs.formUnion(storedIDs)
+        self.sweepOrphanedRenewalStashes(knownProfileIDs: allIDs)
         if let selected = options.profile, !allIDs.contains(selected) {
             throw CLIError.exitStatus(ExitCode.noEligibleProfile)
         }
@@ -1762,6 +1803,28 @@ enum CodexProfileCLI {
         }
     }
 
+    /// Same liveness rule `claimLease` and `performBestAuth` use: a lease only
+    /// blocks renewal while it is active, or while it is expired but still
+    /// carries a home (which may hold the only refreshed copy of a credential).
+    /// A homeless, expired lease (e.g. left behind by a timed-out `renew`) is
+    /// dead weight, not a reservation, so it must not block renewal forever.
+    private static func isLeaseBlocking(_ lease: LeaseReservation?, now: Date) -> Bool {
+        guard let lease else { return false }
+        return lease.isActive(now: now) || !lease.home.isEmpty
+    }
+
+    /// Compare-and-delete every expired lease that carries no home. A lease
+    /// with a home is left untouched here even once expired — it may be the
+    /// only copy of a refreshed credential, and reclaiming that safely is
+    /// `commandLeaseGC`'s job (write-back-or-preserve), not this one's.
+    private static func reclaimHomelessExpiredLeases() {
+        let now = Date()
+        for (profileID, lease) in self.loadCache().leases
+            where lease.home.isEmpty && !lease.isActive(now: now) {
+            try? self.removeLease(profileID: profileID, expectedToken: lease.token)
+        }
+    }
+
     private static func reserveRenewal(
         group: RenewalGroup,
         profiles: [String: RenewalProfile],
@@ -1772,7 +1835,7 @@ enum CodexProfileCLI {
     ) throws -> (reservation: LeaseReservation?, reason: String) {
         if dryRun {
             let cache = self.reconciledCache()
-            if group.profileIDs.contains(where: { cache.leases[$0] != nil }) {
+            if group.profileIDs.contains(where: { self.isLeaseBlocking(cache.leases[$0], now: now) }) {
                 return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
             }
             let due = force || group.profileIDs.contains {
@@ -1793,7 +1856,7 @@ enum CodexProfileCLI {
 
         return try self.withCacheLock {
             let cache = self.reconciledCache()
-            if group.profileIDs.contains(where: { cache.leases[$0] != nil }) {
+            if group.profileIDs.contains(where: { self.isLeaseBlocking(cache.leases[$0], now: now) }) {
                 return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
             }
             let policy = RenewalPolicy()
@@ -1846,9 +1909,7 @@ enum CodexProfileCLI {
                         throw RenewalCredentialChanged()
                     }
                     guard let replacement = updatedData[profileID],
-                          let currentFingerprint = AuthBlob.identityFingerprint(from: current),
-                          let replacementFingerprint = AuthBlob.identityFingerprint(from: replacement),
-                          currentFingerprint == replacementFingerprint else {
+                          AuthBlob.identityMatches(current, replacement) else {
                         throw RenewalIdentityMismatch()
                     }
                     approved.append((profileID, replacement))
@@ -3164,11 +3225,13 @@ enum CodexProfileCLI {
             }
             return PrimaryAuthVaultSelector.makeVault(
                 hasDataProtectionKeychainAccess: false,
-                fileVaultRoot: root)
+                fileVaultRoot: root,
+                authLockURL: Self.paths.authLockURL)
         case .dataProtectionKeychain:
             return PrimaryAuthVaultSelector.makeVault(
                 hasDataProtectionKeychainAccess: true,
-                fileVaultRoot: Self.paths.devAuthStoreURL)
+                fileVaultRoot: Self.paths.devAuthStoreURL,
+                authLockURL: Self.paths.authLockURL)
         }
     }
 
