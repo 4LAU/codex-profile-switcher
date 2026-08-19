@@ -544,7 +544,11 @@ struct GeneralTab: View {
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
     @State private var launchAtLoginState = LaunchAtLogin.state
-    @State private var renewalAgentState = RenewalAgent.state
+    /// Nil until `.onAppear` runs the `SMAppService` query. Deliberately not
+    /// seeded with `.disabled`: that renders "Renewal is not scheduled" on the
+    /// first paint for a user whose renewal IS scheduled, and a security-relevant
+    /// background job is the last thing to be wrong about, even briefly.
+    @State private var renewalAgentState: RenewalAgent.State?
     @State private var lastRenewalRun: LastRenewalRun?
     @State private var migrationSheet: KeychainMigrationSheet?
     @State private var migrationError: String?
@@ -576,6 +580,9 @@ struct GeneralTab: View {
                     Text(self.renewalAgentStatus)
                         .foregroundStyle(.secondary)
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Credential renewal")
+                .accessibilityValue(self.renewalAgentStatus)
 
                 self.renewalAgentDescription
                 if let summary = self.lastRenewalRunSummary {
@@ -583,7 +590,7 @@ struct GeneralTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(self.lastRenewalRunIsHealthy ? Color.secondary : Palette.warning)
                 }
-                Text("A Mac that stays powered off for more than 10 days comes back needing a manual sign-in, and nothing local prevents that.")
+                Text("Renewal refreshes credentials before they're 3 days old. A Mac that stays powered off long enough to miss that window can come back needing a manual sign-in, and nothing local prevents that.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -854,6 +861,8 @@ struct GeneralTab: View {
             Text("The signed app in /Applications owns renewal scheduling. Isolated development builds cannot change it.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+        case nil:
+            EmptyView()
         }
     }
 
@@ -862,6 +871,7 @@ struct GeneralTab: View {
         case .enabled: return "Scheduled"
         case .disabled, .requiresApproval: return "Not scheduled"
         case .unavailable: return "Unavailable"
+        case nil: return "Checking\u{2026}"
         }
     }
 

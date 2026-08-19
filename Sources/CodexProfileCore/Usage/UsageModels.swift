@@ -50,6 +50,26 @@ public struct ExhaustionOverride: Codable, Equatable {
     }
 }
 
+/// The outcome of one profile's renewal attempt. Defined here in Core rather
+/// than privately in the CLI because it crosses a process boundary twice: the
+/// CLI writes it into the renewal report the app parses, and into the
+/// `renewalStates` cache the app reads on a later launch. Two private copies
+/// of these strings would let the two sides drift silently — a case added on
+/// one side would land in the other's `default` branch and do nothing, with
+/// no compile error to catch it.
+public enum RenewalAction: String, Codable, Sendable, CaseIterable {
+    case renewed
+    case skipped
+    case rejected
+    case unreachable
+    case recovered
+    /// The endpoint answered 200 but rotated nothing (empty response, or an
+    /// empty-string token field). Deliberately distinct from `rejected`:
+    /// unlike a 400/401 this does not indicate the refresh token itself is
+    /// dead, so it must not feed the same "needs re-login" cache entry.
+    case invalid
+}
+
 public struct RenewalState: Codable, Equatable {
     public let action: String
     public let reason: String
@@ -67,6 +87,30 @@ public struct RenewalState: Codable, Equatable {
         self.reason = reason
         self.timestamp = timestamp
         self.credentialFingerprint = credentialFingerprint
+    }
+
+    /// `action` is stored as a raw string so a state written by a newer helper
+    /// round-trips through an older app build intact. Nil means this build does
+    /// not recognise the action.
+    public var renewalAction: RenewalAction? {
+        RenewalAction(rawValue: self.action)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action, reason, timestamp, credentialFingerprint
+    }
+
+    /// Custom decode so a malformed `credentialFingerprint` (the only field
+    /// added after this type's first release) doesn't condemn the whole
+    /// `UsageCache` file to a failed decode. `action`, `reason`, and
+    /// `timestamp` stay strictly required; `credentialFingerprint` tolerates
+    /// being absent OR present-but-wrong-type, decoding to nil either way.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.action = try container.decode(String.self, forKey: .action)
+        self.reason = try container.decode(String.self, forKey: .reason)
+        self.timestamp = try container.decode(Date.self, forKey: .timestamp)
+        self.credentialFingerprint = (try? container.decodeIfPresent(String.self, forKey: .credentialFingerprint)) ?? nil
     }
 }
 

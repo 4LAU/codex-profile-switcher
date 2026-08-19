@@ -539,9 +539,17 @@ final class ProfileStoreEnvironmentTests {
             keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
                 source: source,
                 counter: MigrationFactoryCounter()))
-        try expectMigrationError(.destinationReadbackFailed) {
-            _ = try replacementStore.reviewLegacyKeychainMigration()
-        }
+        // A destination copy that no longer matches its checkpoint is expected once a
+        // credential renewal legitimately rewrites the item, so review no longer aborts.
+        // The profile is excluded from completion and reported instead, which preserves
+        // the property this test is named for: completion still requires the recorded copy.
+        let replacementPreview = try replacementStore.reviewLegacyKeychainMigration()
+        try envExpect(replacementPreview.pendingCompletionCount == 0,
+                      "A changed destination copy was offered for completion")
+        try envExpect(
+            replacementPreview.pendingCompletionVerificationFailures["1"] == .stalePendingCompletionCheckpoint,
+            "A changed destination copy was dropped without being reported")
+        replacementStore.cancelLegacyKeychainMigrationReview(replacementPreview)
 
         try vault.saveAuthBlob(auth, profileID: "1")
         let store = ProfileStore(

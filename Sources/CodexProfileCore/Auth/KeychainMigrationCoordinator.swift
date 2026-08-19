@@ -35,6 +35,10 @@ public struct KeychainMigrationPreview: Equatable, Sendable {
     public let candidates: [KeychainMigrationCandidate]
     /// Pending records whose legacy source was already deleted and only need an explicit completion checkpoint.
     public let pendingCompletionCandidates: [KeychainMigrationCandidate]
+    /// Pending records excluded from `pendingCompletionCandidates` because their checkpoint fingerprint no
+    /// longer matches the saved destination copy. Surfaced rather than silently dropped so a stale checkpoint
+    /// for one profile (e.g. a concurrent credential renewal) never aborts review for every other profile.
+    public let pendingCompletionVerificationFailures: [String: KeychainMigrationError]
 
     public var candidateCount: Int {
         self.candidates.count
@@ -49,10 +53,12 @@ public struct KeychainMigrationPreview: Equatable, Sendable {
     init(
         candidates: [KeychainMigrationCandidate],
         pendingCompletionCandidates: [KeychainMigrationCandidate],
+        pendingCompletionVerificationFailures: [String: KeychainMigrationError] = [:],
         sessionID: UUID
     ) {
         self.candidates = candidates
         self.pendingCompletionCandidates = pendingCompletionCandidates
+        self.pendingCompletionVerificationFailures = pendingCompletionVerificationFailures
         self.sessionID = sessionID
     }
 }
@@ -74,6 +80,7 @@ public enum KeychainMigrationError: LocalizedError, Equatable {
     case staleOrConsumedPreview
     case candidateCountMismatch
     case pendingCompletionCountMismatch
+    case stalePendingCompletionCheckpoint
 
     public var errorDescription: String? {
         switch self {
@@ -109,6 +116,8 @@ public enum KeychainMigrationError: LocalizedError, Equatable {
             return "The approved legacy Keychain copy count does not match the review."
         case .pendingCompletionCountMismatch:
             return "The approved pending migration count does not match the review."
+        case .stalePendingCompletionCheckpoint:
+            return "A saved copy changed before its pending migration checkpoint could be verified."
         }
     }
 }
@@ -242,7 +251,8 @@ public final class KeychainMigrationCoordinator {
             legacyProfileIDs = captures.map(\.profileID)
         }
 
-        let pendingCompletionProfileIDs = try self.pendingCompletionProfileIDs(excluding: legacyProfileIDs)
+        let (pendingCompletionProfileIDs, pendingCompletionVerificationFailures) =
+            try self.pendingCompletionProfileIDs(excluding: legacyProfileIDs)
         let candidates = legacyProfileIDs
             .sorted()
             .map { capture in
@@ -265,6 +275,7 @@ public final class KeychainMigrationCoordinator {
         let preview = KeychainMigrationPreview(
             candidates: candidates,
             pendingCompletionCandidates: pendingCompletionCandidates,
+            pendingCompletionVerificationFailures: pendingCompletionVerificationFailures,
             sessionID: sessionID)
         self.activeSession = Session(
             id: sessionID,
@@ -530,18 +541,32 @@ public final class KeychainMigrationCoordinator {
         }
     }
 
-    private func pendingCompletionProfileIDs(excluding legacyProfileIDs: [String]) throws -> [String] {
+    /// Verifies every pending-completion candidate independently: a stale checkpoint fingerprint on one
+    /// profile (expected when a concurrent renewal legitimately rewrites that profile's destination copy)
+    /// excludes only that profile and is reported in `failures`, rather than aborting review for the rest.
+    /// A destination read failure or an implausible/missing copy is a genuine integrity problem and still
+    /// aborts, matching existing behavior.
+    private func pendingCompletionProfileIDs(
+        excluding legacyProfileIDs: [String]
+    ) throws -> (profileIDs: [String], failures: [String: KeychainMigrationError]) {
         let sourceProfileIDs = Set(legacyProfileIDs)
         let profileIDs = self.migrationStates.compactMap { profileID, state in
             state == .copiedCleanupPending
                 && !sourceProfileIDs.contains(profileID)
                 && self.pendingFingerprints[profileID] != nil ? profileID : nil
         }
+        var verifiedProfileIDs: [String] = []
+        var failures: [String: KeychainMigrationError] = [:]
         for profileID in profileIDs {
             guard let fingerprint = self.pendingFingerprints[profileID] else { continue }
-            try self.verifyPendingCompletionCopy(profileID: profileID, fingerprint: fingerprint)
+            do {
+                try self.verifyPendingCompletionCopy(profileID: profileID, fingerprint: fingerprint)
+                verifiedProfileIDs.append(profileID)
+            } catch KeychainMigrationError.stalePendingCompletionCheckpoint {
+                failures[profileID] = .stalePendingCompletionCheckpoint
+            }
         }
-        return profileIDs.sorted()
+        return (verifiedProfileIDs.sorted(), failures)
     }
 
     private func verifyPendingCompletionCopy(profileID: String, fingerprint: String) throws {
@@ -554,10 +579,11 @@ public final class KeychainMigrationCoordinator {
         } catch {
             throw KeychainMigrationError.destinationReadbackFailed
         }
-        guard let data,
-              AuthBlob.isPlausibleAuthBlob(data),
-              self.integrityFingerprint(data) == fingerprint else {
+        guard let data, AuthBlob.isPlausibleAuthBlob(data) else {
             throw KeychainMigrationError.destinationReadbackFailed
+        }
+        guard self.integrityFingerprint(data) == fingerprint else {
+            throw KeychainMigrationError.stalePendingCompletionCheckpoint
         }
     }
 

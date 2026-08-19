@@ -46,30 +46,33 @@ struct TokenRenewalTests {
             idToken: "old-id",
             accountId: "acct",
             lastRefresh: nil)
-        let rotated = try await TokenRenewal.renew(
-            credentials: existing,
-            using: StubRefresher(response: TokenRefreshResponse(
-                accessToken: "new-access", refreshToken: "new-refresh")))
-        let unchanged = try await TokenRenewal.renew(
-            credentials: existing,
-            using: StubRefresher(response: TokenRefreshResponse(accessToken: "new-access")))
+        let rotatingRefresher = StubRefresher(response: TokenRefreshResponse(
+            accessToken: "new-access", refreshToken: "new-refresh"))
+        let rotated = try await TokenRenewal.renew(credentials: existing, using: rotatingRefresher)
+        let preservingRefresher = StubRefresher(response: TokenRefreshResponse(accessToken: "new-access"))
+        let unchanged = try await TokenRenewal.renew(credentials: existing, using: preservingRefresher)
 
         #expect(rotated.refreshToken == "new-refresh")
         #expect(unchanged.refreshToken == "old-refresh")
+        // Renewal must send the account's own refresh token, not its access
+        // token — substituting one for the other would keep every assertion
+        // above green while sending the wrong credential to the token endpoint.
+        #expect(rotatingRefresher.receivedRefreshToken == existing.refreshToken)
+        #expect(preservingRefresher.receivedRefreshToken == existing.refreshToken)
     }
 
     @Test
     func omittedIdentityFieldsPreserveFingerprint() async throws {
         let existingData = Data(#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","id_token":"old-id","account_id":"acct"}}"#.utf8)
         let existing = try AuthBlob.load(from: existingData)
-        let renewed = try await TokenRenewal.renew(
-            credentials: existing,
-            using: StubRefresher(response: TokenRefreshResponse(accessToken: "new-access", refreshToken: "new-refresh")))
+        let refresher = StubRefresher(response: TokenRefreshResponse(accessToken: "new-access", refreshToken: "new-refresh"))
+        let renewed = try await TokenRenewal.renew(credentials: existing, using: refresher)
         let updatedData = try AuthBlob.updatedData(from: existingData, with: renewed, lastRefresh: Date())
 
         #expect(renewed.idToken == existing.idToken)
         #expect(renewed.accountId == existing.accountId)
         #expect(AuthBlob.identityFingerprint(from: updatedData) == AuthBlob.identityFingerprint(from: existingData))
+        #expect(refresher.receivedRefreshToken == existing.refreshToken)
     }
 
     @Test
@@ -121,11 +124,24 @@ struct TokenRenewalTests {
     }
 }
 
-private struct StubRefresher: TokenRefreshing {
+/// Records the refresh token it was called with so tests can assert renewal
+/// sends the account's refresh token, not some other credential field. A
+/// class (not a struct) so the recorded value survives past the `refresh`
+/// call for the caller to inspect; `@unchecked Sendable` is safe because each
+/// test uses its own instance and inspects it only after `await`-ing the
+/// single `TokenRenewal.renew` call that touches it, matching the existing
+/// `TestURLProtocol` pattern in this file.
+private final class StubRefresher: TokenRefreshing, @unchecked Sendable {
     let response: TokenRefreshResponse
+    private(set) var receivedRefreshToken: String?
+
+    init(response: TokenRefreshResponse) {
+        self.response = response
+    }
 
     func refresh(refreshToken: String) async throws -> TokenRefreshResponse {
-        response
+        self.receivedRefreshToken = refreshToken
+        return self.response
     }
 }
 

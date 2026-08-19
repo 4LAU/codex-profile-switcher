@@ -371,7 +371,7 @@ final class ProfileStore: ObservableObject {
     }
 
     func updateStatus(_ id: String, _ status: ProfileStatus) {
-        if self.cache.renewalStates[id]?.action == "rejected", Self.statusImpliesCredentialPresent(status) {
+        if self.cache.renewalStates[id]?.renewalAction == .rejected, Self.statusImpliesCredentialPresent(status) {
             self.statuses[id] = .reloginNeeded(status.snapshot)
         } else {
             self.statuses[id] = status
@@ -383,13 +383,22 @@ final class ProfileStore: ObservableObject {
     }
 
     func recordRenewalState(_ state: RenewalState, for id: String) {
-        switch state.action {
-        case "renewed", "recovered":
+        // Exhaustive on purpose: a new action added to `RenewalAction` must be
+        // classified here, not fall silently into a default branch.
+        switch state.renewalAction {
+        case .renewed, .recovered:
             self.clearRenewalState(for: id)
-        case "rejected":
+        case .rejected:
             self.cache.renewalStates[id] = state
             self.saveCache(renewalStateChange: .set(id, state))
-        default:
+        case .skipped, .unreachable, .invalid:
+            // None of these condemn the credential — `invalid` and `unreachable`
+            // are endpoint-side problems and `skipped` means nothing was due —
+            // so they neither record a rejection nor clear an existing one.
+            break
+        case nil:
+            // An action string this build does not recognise, written by a newer
+            // helper. Leave any existing state alone rather than guessing.
             break
         }
     }
@@ -407,7 +416,7 @@ final class ProfileStore: ObservableObject {
     /// differ; an unknown current fingerprint (auth unreadable this cycle)
     /// leaves the rejection in place rather than guessing.
     func clearRenewalStateIfCredentialMoved(for id: String, currentCredentialFingerprint: String?) {
-        guard let renewal = self.cache.renewalStates[id], renewal.action == "rejected" else { return }
+        guard let renewal = self.cache.renewalStates[id], renewal.renewalAction == .rejected else { return }
         guard let condemned = renewal.credentialFingerprint,
               let current = currentCredentialFingerprint,
               current != condemned else { return }

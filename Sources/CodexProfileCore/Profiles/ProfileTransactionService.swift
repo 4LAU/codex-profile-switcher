@@ -348,6 +348,35 @@ public struct ProfileConfigStore {
         }
     }
 
+    /// Refreshes the pending-migration integrity checkpoint for profiles whose
+    /// destination copy was just legitimately rewritten. The checkpoint records
+    /// the exact bytes copied during migration; a credential renewal rotates
+    /// those bytes, which would otherwise leave a permanently stale checkpoint
+    /// and block completing that profile's migration forever.
+    ///
+    /// Deliberately narrow: it only updates profiles that are already in
+    /// `.copiedCleanupPending` and already carry a checkpoint. It never creates
+    /// a checkpoint, so it cannot manufacture provenance for a copy migration
+    /// did not make.
+    public func refreshPendingMigrationFingerprints(_ fingerprints: [String: String]) throws {
+        guard !fingerprints.isEmpty,
+              var config = self.loadConfig(),
+              var pending = config.authMigrationPendingFingerprints else { return }
+        var changed = false
+        for (profileID, fingerprint) in fingerprints
+        where config.authMigrationStates?[profileID] == .copiedCleanupPending
+            && pending[profileID] != nil
+            && pending[profileID] != fingerprint {
+            pending[profileID] = fingerprint
+            changed = true
+        }
+        guard changed else { return }
+        config.authMigrationPendingFingerprints = pending
+        try AtomicFileWriter.ensurePrivateDirectory(self.paths.switcherHome, fileManager: self.fileManager)
+        let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
+        try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
+    }
+
     public func saveActiveProfileIfMissing(_ profileID: String) throws {
         if self.loadConfig()?.activeProfile == nil {
             try self.saveActiveProfile(profileID)

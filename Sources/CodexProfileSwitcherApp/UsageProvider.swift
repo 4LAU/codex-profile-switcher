@@ -17,6 +17,13 @@ final class UsageProvider {
     /// defer only runs once the task next checks `Task.isCancelled`, which can
     /// lag a cancellation by a couple of seconds while a fetch is in flight.
     private var activeLeases: [String: String] = [:]
+    /// The in-flight lease release started by `cancelRefreshes()`. Releasing is
+    /// `async` (the flock must stay off the main thread), and `clearSavedAuth`
+    /// cancels and then immediately requests a fresh refresh — so without this
+    /// handle the new refresh can reach `claimLease` before the old lease row
+    /// is gone and lose its own claim for the lease's full lifetime. Awaited
+    /// before any claim, which makes the ordering deterministic.
+    private var pendingLeaseRelease: Task<Void, Never>?
     var onRefreshComplete: (() -> Void)?
 
     init(store: ProfileStore) {
@@ -29,10 +36,22 @@ final class UsageProvider {
         self.refreshTask = nil
         self.refreshGeneration = nil
         self.isRefreshing = false
-        for (profileID, token) in self.activeLeases {
-            Self.removeLease(profileIDs: [profileID], expectedToken: token)
-        }
+        // removeLease is `async` (it holds the flock, which must stay off the
+        // main thread) and this method's callers are synchronous, so the
+        // releases start here and are awaited at the next claim rather than
+        // blocking this main-actor call. Chained onto any previous release so
+        // two cancels in a row cannot reorder.
+        let leasesToRelease = self.activeLeases
         self.activeLeases.removeAll()
+        if !leasesToRelease.isEmpty {
+            let previous = self.pendingLeaseRelease
+            self.pendingLeaseRelease = Task {
+                await previous?.value
+                for (profileID, token) in leasesToRelease {
+                    await Self.removeLease(profileIDs: [profileID], expectedToken: token)
+                }
+            }
+        }
         if cancelledActiveRefresh {
             self.store.flushCacheIfDirty()
         }
@@ -130,7 +149,12 @@ final class UsageProvider {
                 loadError = error
             }
             context.credentialFingerprint = authData.flatMap(Self.credentialFingerprint(from:))
-            let key = authData.flatMap { AuthBlob.identityFingerprint(from: $0) } ?? "profile:\(context.id)"
+            // Group by credential fingerprint, not identity: this batches
+            // per-profile usage/health refreshes, and two profiles sharing an
+            // account identity can still hold different credentials. Batching
+            // by identity would fetch one profile's usage and apply it to a
+            // sibling profile with a different refresh token.
+            let key = context.credentialFingerprint ?? "profile:\(context.id)"
             if var group = groups[key] {
                 group.contexts.append(context)
                 groups[key] = group
@@ -228,7 +252,8 @@ final class UsageProvider {
             home: "",
             expiresAt: Date().addingTimeInterval(60),
             createdAt: Date())
-        guard Self.claimLease(
+        await self.pendingLeaseRelease?.value
+        guard await Self.claimLease(
             profileIDs: fetchGroup.contexts.map(\.id), reservation: reservation) else {
             for context in fetchGroup.contexts {
                 await finalize(context, .stale(context.cached), decision: "reserved")
@@ -238,13 +263,12 @@ final class UsageProvider {
         for context in fetchGroup.contexts {
             self.activeLeases[context.id] = reservation.token
         }
-        defer {
-            let profileIDs = fetchGroup.contexts.map(\.id)
-            Self.removeLease(profileIDs: profileIDs, expectedToken: reservation.token)
-            for id in profileIDs where self.activeLeases[id] == reservation.token {
-                self.activeLeases.removeValue(forKey: id)
-            }
-        }
+        // `removeLease` is `async` (F24: it holds `flock` and must stay off
+        // the main thread), and `defer` cannot contain `await`, so the lease
+        // release below is called explicitly on every exit path from this
+        // point instead of via `defer`. There are exactly two: the
+        // `CancellationError` early return, and falling off the end of the
+        // `do`/`catch` below.
 
         do {
             let snapshot = try await CLIUsageFetcher.fetch(
@@ -256,6 +280,7 @@ final class UsageProvider {
                 AppLogger.info("Usage refresh succeeded", metadata: ["profile": context.id])
             }
         } catch is CancellationError {
+            await self.releaseLease(fetchGroup.contexts.map(\.id), expectedToken: reservation.token)
             return
         } catch let error as CodexRPCError where error.isAuthRequired {
             for context in fetchGroup.contexts {
@@ -283,15 +308,43 @@ final class UsageProvider {
                                   metadata: ["profile": context.id, "error": error.localizedDescription])
             }
         }
+        await self.releaseLease(fetchGroup.contexts.map(\.id), expectedToken: reservation.token)
     }
+
+    /// Releases a lease claimed by `refreshGroup` and clears it from
+    /// `activeLeases`. Called explicitly at every exit point of
+    /// `refreshGroup` after the lease is claimed, since `removeLease` is
+    /// `async` and `defer` bodies cannot contain `await`.
+    private func releaseLease(_ profileIDs: [String], expectedToken: String) async {
+        await Self.removeLease(profileIDs: profileIDs, expectedToken: expectedToken)
+        for id in profileIDs where self.activeLeases[id] == expectedToken {
+            self.activeLeases.removeValue(forKey: id)
+        }
+    }
+
+    /// Thrown inside the lock closures below to short-circuit a write when
+    /// `loadCache` reports `.decodeFailed` — the on-disk cache is
+    /// unknown-but-real and must not be clobbered with an empty/partial one.
+    private struct CacheDecodeFailed: Error {}
 
     private nonisolated static func claimLease(
         profileIDs: [String], reservation: LeaseReservation
-    ) -> Bool {
+    ) async -> Bool {
         let paths = AppPaths()
         do {
             try CacheLock.withLock(at: paths.cacheLockURL) {
-                var cache = Self.loadCache(paths: paths)
+                var cache: UsageCache
+                switch Self.loadCache(paths: paths) {
+                case .missing:
+                    cache = UsageCache(snapshots: [:])
+                case .loaded(let loaded):
+                    cache = loaded
+                case .decodeFailed:
+                    AppLogger.warning(
+                        "Usage cache failed to decode; refusing to claim lease over unknown on-disk state",
+                        metadata: ["path": paths.cacheURL.path])
+                    throw CacheDecodeFailed()
+                }
                 for profileID in profileIDs {
                     if let existing = cache.leases[profileID], existing.token != reservation.token {
                         guard existing.isActive() || !existing.home.isEmpty else {
@@ -314,10 +367,21 @@ final class UsageProvider {
 
     private nonisolated static func removeLease(
         profileIDs: [String], expectedToken: String
-    ) {
+    ) async {
         let paths = AppPaths()
         try? CacheLock.withLock(at: paths.cacheLockURL) {
-            var cache = Self.loadCache(paths: paths)
+            var cache: UsageCache
+            switch Self.loadCache(paths: paths) {
+            case .missing:
+                cache = UsageCache(snapshots: [:])
+            case .loaded(let loaded):
+                cache = loaded
+            case .decodeFailed:
+                AppLogger.warning(
+                    "Usage cache failed to decode; refusing to release lease over unknown on-disk state",
+                    metadata: ["path": paths.cacheURL.path])
+                return
+            }
             for profileID in profileIDs where cache.leases[profileID]?.token == expectedToken {
                 cache.leases.removeValue(forKey: profileID)
             }
@@ -325,12 +389,28 @@ final class UsageProvider {
         }
     }
 
-    private nonisolated static func loadCache(paths: AppPaths) -> UsageCache {
+    /// Outcome of attempting to load the on-disk cache. Distinguishes "no file
+    /// yet" (an empty cache is the correct value, safe to write back) from
+    /// "a file exists but didn't decode" (its content is unknown-but-real —
+    /// missing, unreadable, corrupt, or containing a sub-record shape this
+    /// build can't parse — and callers must not overwrite it). See F21.
+    private enum CacheLoadResult {
+        case missing
+        case decodeFailed
+        case loaded(UsageCache)
+    }
+
+    private nonisolated static func loadCache(paths: AppPaths) -> CacheLoadResult {
+        guard FileManager.default.fileExists(atPath: paths.cacheURL.path) else {
+            return .missing
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? Data(contentsOf: paths.cacheURL))
-            .flatMap { try? decoder.decode(UsageCache.self, from: $0) }
-            ?? UsageCache(snapshots: [:])
+        guard let data = try? Data(contentsOf: paths.cacheURL),
+              let cache = try? decoder.decode(UsageCache.self, from: data) else {
+            return .decodeFailed
+        }
+        return .loaded(cache)
     }
 
     private nonisolated static func saveCache(_ cache: UsageCache, paths: AppPaths) throws {

@@ -164,6 +164,7 @@ enum CodexBridge {
             "CODEX_PROFILE_TEST_AUTH_STORE_DIR",
             "CODEX_PROFILE_FILE_AUTH_STORE_DIR",
             "CODEX_PROFILE_FORCE_KEYCHAIN",
+            "CODEX_PROFILE_TEST_TOKEN_ENDPOINT",
         ]
         var childEnvironment = environment
         for key in backendSelectors {
@@ -218,10 +219,17 @@ enum CodexBridge {
         proc.arguments = arguments
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
-        // The same resolved auth backend the login path passes down. Without it
-        // the helper picks its own, and renewal would rotate a credential in a
-        // different vault than the one the app reads — the split this function's
-        // sibling exists to prevent.
+        // The same resolved auth backend the login path passes down.
+        // CODEX_PROFILE_FILE_AUTH_STORE_DIR is what actually pins the helper to
+        // the file dev vault when one is in play; the CLI reads it directly.
+        // The two are mutually exclusive: a stable signing identity sends
+        // CODEX_PROFILE_FORCE_KEYCHAIN and nothing else. Nothing reads that one,
+        // deliberately — the helper selects the Keychain backend from its own
+        // signing-identity check, so an environment variable cannot force it.
+        // Without the file-store override the helper would pick its own backend,
+        // and renewal could rotate a credential in a different vault than the
+        // one the app reads — the split this function's sibling exists to
+        // prevent.
         proc.environment = Self.helperProcessEnvironment(for: ProcessInfo.processInfo.environment)
 
         let stdoutDrain = self.pipeDrain(for: stdoutPipe)

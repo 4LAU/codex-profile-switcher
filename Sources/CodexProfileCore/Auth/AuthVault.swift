@@ -68,7 +68,6 @@ public protocol AuthVault: Sendable {
     func _deleteAuthBlobUnlocked(profileID: String) throws
     func hasAuthBlob(profileID: String) throws -> Bool
     func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability
-    func repairStoredAuthAccess() throws -> AuthVaultRepairResult
     func diagnostics() -> AuthVaultDiagnostics
 }
 
@@ -103,17 +102,6 @@ public extension AuthVault {
 
     func authBlobAvailability(profileID: String) throws -> AuthBlobAvailability {
         try self.hasAuthBlob(profileID: profileID) ? .present : .missing
-    }
-
-    func repairStoredAuthAccess() throws -> AuthVaultRepairResult {
-        let profileIDs = try self.listProfileIDs()
-        var repaired = 0
-        for profileID in profileIDs {
-            guard let data = try? self.loadAuthBlob(profileID: profileID) else { continue }
-            try self.saveAuthBlob(data, profileID: profileID)
-            repaired += 1
-        }
-        return AuthVaultRepairResult(total: profileIDs.count, repaired: repaired)
     }
 
     func diagnostics() -> AuthVaultDiagnostics {

@@ -1251,20 +1251,6 @@ enum CodexProfileCLI {
         let profileIDs: [String]
     }
 
-    private enum RenewalAction: String, Codable {
-        case renewed
-        case skipped
-        case rejected
-        case unreachable
-        case recovered
-        /// The endpoint answered 200 but rotated nothing (empty response, or
-        /// an empty-string token field). Deliberately distinct from
-        /// `.rejected`: unlike a 400/401, this does not indicate the refresh
-        /// token itself is dead, so it must not feed the same "needs
-        /// re-login" cache entry that `.rejected` does.
-        case invalid
-    }
-
     private struct RenewalRecord: Codable {
         let id: String
         let action: RenewalAction
@@ -2012,6 +1998,27 @@ enum CodexProfileCLI {
                 for entry in approved {
                     try self.vault._saveAuthBlobUnlocked(entry.replacement, profileID: entry.profileID)
                 }
+            }
+
+            // A pending keychain-migration checkpoint records the exact bytes
+            // copied to the destination. The rotation above legitimately changes
+            // those bytes, so the checkpoint is refreshed here; without it the
+            // first successful renewal leaves a checkpoint that can never match
+            // again, and that profile's migration can never be completed.
+            do {
+                var refreshed: [String: String] = [:]
+                for profileID in group.profileIDs {
+                    guard let replacement = updatedData[profileID] else { continue }
+                    refreshed[profileID] = SHA256.hash(data: replacement)
+                        .map { String(format: "%02x", $0) }.joined()
+                }
+                try self.configStore.refreshPendingMigrationFingerprints(refreshed)
+            } catch {
+                // The credential rotation itself already succeeded and must not be
+                // reported as a failure. Say so rather than failing silently.
+                FileHandle.standardError.write(Data(
+                    ("[renew] rotated the credential but could not refresh the pending "
+                        + "migration checkpoint: \(error.localizedDescription)\n").utf8))
             }
 
             for profileID in group.profileIDs {
