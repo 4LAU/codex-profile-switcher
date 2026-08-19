@@ -6,7 +6,8 @@ Codex does not refresh a credential while it is being used successfully. It
 reaches for its own refresh after the credential is stale, at roughly eight
 days. Several subsystems can then refresh at nearly the same time with the
 same single-use refresh token. The first request wins. Later requests present
-a spent token.
+a spent token. That sequence is a reading of the code and of upstream reports,
+not something anyone has watched happen.
 
 OAuth refresh-token rotation treats a replay as theft and can revoke the
 token chain. The observed result is an interactive sign-in roughly every
@@ -39,7 +40,9 @@ For each credential group, renewal checks the recorded refresh age. `--force`
 overrides that check. A current lease reserves the group from renewal. This
 also covers an `exec` run, a `lease` session, and a `best-auth --dir` export.
 After a successful request, the command writes the rotated credential back to
-each profile in the group and exits.
+each profile in the group, then moves to the next group. A group that fails
+does not stop the run, so groups handled earlier in the same run stay
+renewed.
 
 The app registers a background LaunchAgent through `SMAppService`. The agent
 calls the helper once each day and exits. The bundled schedule is 03:00. The
@@ -72,14 +75,14 @@ not reserve, renew, stage, commit, or record state.
 
 ## Verification
 
-Unit tests cover the three-day threshold, missing and future refresh dates,
-successful rotation, refresh-token rotation, rejected responses, unreachable
-responses, and preservation of existing credentials on failure. CLI
-verification must check shared-token grouping, one request per group, lease
+Unit tests cover the staleness decision, missing and future refresh dates,
+successful rotation, refresh-token rotation, rejected responses, and
+unreachable responses. CLI verification must check preservation of existing
+credentials on failure, shared-token grouping, one request per group, lease
 exclusion, dry-run side effects, recovery after interruption, concurrent
 writers, and the JSON report.
 
 The packaged plist must contain the helper path, `renew` argument, a daily
 `StartCalendarInterval`, and `RunAtLoad` set to false. The package script must
-build both arm64 and x86_64 by default. The public checks include a clean
-documentation grep for private references and a full build and test run.
+build both arm64 and x86_64 by default. Release checks include a clean documentation grep for
+private references and a full build and test run.

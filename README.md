@@ -151,6 +151,7 @@ codex-profile doctor
 codex-profile best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
 codex-profile exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
 codex-profile import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
+codex-profile renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]
 codex-profile lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
 codex-profile lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
 codex-profile lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]
@@ -283,17 +284,17 @@ Renewal makes one request per credential. Profiles that share a refresh token ar
 Exit code 0 means the command ran. It does not mean every profile was renewed. A profile can be skipped, so automation must inspect the per-profile record. With `--json`, stdout contains one object:
 
 ```json
-{"records":[{"id":"work","action":"renewed","reason":"renewed","age_days":3.0,"credential":"f0f0f0f0f0f0"}],"requests":1}
+{"records":[{"action":"renewed","age_days":3.0421,"credential":"f0f0f0f0f0f0","id":"work","reason":"renewed"}],"requests":1}
 ```
 
-Each record has `id`, `action`, `reason`, `age_days`, and `credential`. `action` is `renewed`, `skipped`, `rejected`, `unreachable`, or `recovered`. `credential` is a short fingerprint, not the token. `requests` counts HTTP requests and is per credential, not per profile. `--timeout` accepts positive seconds up to 3600 and defaults to 120.
+Each record has `id`, `action`, `reason`, `age_days`, and `credential`. `action` is `renewed`, `skipped`, `rejected`, `unreachable`, or `recovered`. `credential` is a short fingerprint, not the token. Match on `action` rather than `reason`: a run that discarded a stale recovery file prefixes `reason` with `stale_stash_discarded;`. `requests` counts HTTP requests and is per credential, not per profile. `--timeout` accepts positive seconds up to 3600 and defaults to 120.
 
 | Code | Meaning |
 |------|---------|
 | 0 | The command ran. Inspect records for skipped profiles. |
 | 1 | Generic failure, including an unknown flag, a missing or invalid value, or a credential that changed underneath the renewal. |
 | 2 | The profile named by `--profile` does not exist. |
-| 5 | A stored credential belongs to a different account than the one that was renewed. Nothing was written. |
+| 5 | A stored credential belongs to a different account than the one that was renewed. That credential was left unchanged; other credential groups in the same run may already have been renewed. |
 | 6 | Keychain interaction required. Run the command once from a terminal to grant access. |
 | 7 | Watchdog timeout. |
 | 8 | The server rejected a credential. An interactive login is required. |
@@ -330,7 +331,9 @@ For headless use, install the app and register a LaunchAgent of your own:
 </plist>
 ```
 
-Use `StartCalendarInterval` for this daily job. If the calendar time arrives while the Mac sleeps, macOS runs the job when the Mac wakes. A Mac that stays powered off for more than ten days comes back with credentials that are already dead. Nothing running locally can prevent that; an interactive sign-in is required.
+Save that as `~/Library/LaunchAgents/com.example.codex-profile-renew.plist` and load it with `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.codex-profile-renew.plist`. If the app is installed and has been launched at least once, it registers the same daily job itself, so a hand written agent is a second 03:00 run. That is harmless: whichever run starts second finds the credential reserved and reports `skipped`.
+
+Use `StartCalendarInterval` for this daily job. If the calendar time arrives while the Mac sleeps, macOS runs the job when the Mac wakes. A LaunchAgent runs only inside a logged-in user session, so a Mac sitting at the login window does not renew. A Mac that stays powered off for more than ten days can come back with credentials that are already dead. Nothing running locally can prevent that; an interactive sign-in is required.
 
 ## How It Works
 
