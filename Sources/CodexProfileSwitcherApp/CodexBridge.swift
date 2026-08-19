@@ -72,7 +72,7 @@ enum CodexBridgeError: LocalizedError {
 }
 
 enum CodexBridge {
-    private struct CommandResult {
+    struct CommandResult {
         let status: Int32
         let stdout: String
         let stderr: String
@@ -112,7 +112,7 @@ enum CodexBridge {
         return (start, awaitOutput)
     }
 
-    private static func codexProfilePath() -> String? {
+    static func codexProfilePath() -> String? {
         if Bundle.main.bundleURL.pathExtension == "app" {
             let bundledHelper = Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Helpers/codex-profile").path
@@ -204,7 +204,7 @@ enum CodexBridge {
         return true
     }
 
-    private static func runCommand(
+    static func runCommand(
         path: String,
         arguments: [String],
         completion: @escaping (Result<CommandResult, CodexBridgeError>) -> Void
@@ -218,6 +218,11 @@ enum CodexBridge {
         proc.arguments = arguments
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
+        // The same resolved auth backend the login path passes down. Without it
+        // the helper picks its own, and renewal would rotate a credential in a
+        // different vault than the one the app reads — the split this function's
+        // sibling exists to prevent.
+        proc.environment = Self.helperProcessEnvironment(for: ProcessInfo.processInfo.environment)
 
         let stdoutDrain = self.pipeDrain(for: stdoutPipe)
         let stderrDrain = self.pipeDrain(for: stderrPipe)

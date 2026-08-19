@@ -356,12 +356,17 @@ mkdir -p \
   "$APP_BUNDLE/Contents/MacOS" \
   "$HELPER_APP_BUNDLE/Contents/MacOS" \
   "$APP_BUNDLE/Contents/Resources" \
-  "$APP_BUNDLE/Contents/Frameworks"
+  "$APP_BUNDLE/Contents/Frameworks" \
+  "$APP_BUNDLE/Contents/Library/LaunchAgents"
 
 cp "$APP_BINARY" "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 cp "$HELPER_BINARY" "$HELPER_APP_EXECUTABLE"
 ln -s "CodexProfileHelper.app/Contents/MacOS/codex-profile" "$HELPER_COMPAT_LINK"
 chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$HELPER_APP_EXECUTABLE"
+cp "$ROOT_DIR/Resources/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist" \
+  "$APP_BUNDLE/Contents/Library/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist"
+plutil -lint \
+  "$APP_BUNDLE/Contents/Library/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist" >/dev/null
 
 if [[ "$REQUIRE_SIGNING" == "1" ]]; then
   cp "$APP_PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"

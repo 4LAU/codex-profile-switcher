@@ -544,6 +544,7 @@ struct GeneralTab: View {
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
     @State private var launchAtLoginState = LaunchAtLogin.state
+    @State private var renewalAgentState = RenewalAgent.state
     @State private var migrationSheet: KeychainMigrationSheet?
     @State private var migrationError: String?
     @State private var isReviewingMigration = false
@@ -567,6 +568,18 @@ struct GeneralTab: View {
                     .accessibilityValue(self.launchAtLoginAccessibilityValue)
 
                 self.launchAtLoginDescription
+
+                HStack {
+                    Text("Credential renewal")
+                    Spacer()
+                    Text(self.renewalAgentStatus)
+                        .foregroundStyle(.secondary)
+                }
+
+                self.renewalAgentDescription
+                Text("A Mac that stays powered off for more than 10 days comes back needing a manual sign-in, and nothing local prevents that.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
 
             Divider()
@@ -655,9 +668,13 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { self.refreshLaunchAtLoginState() }
+        .onAppear {
+            self.refreshLaunchAtLoginState()
+            self.refreshRenewalAgentState()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             self.refreshLaunchAtLoginState()
+            self.refreshRenewalAgentState()
         }
         .onDisappear { self.cancelLegacyKeychainMigrationReview() }
         .sheet(item: self.migrationSheetBinding) { sheet in
@@ -804,8 +821,48 @@ struct GeneralTab: View {
         }
     }
 
+    @ViewBuilder
+    private var renewalAgentDescription: some View {
+        switch self.renewalAgentState {
+        case .enabled:
+            Text("Runs daily in the background, even when the app is closed.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        case .disabled:
+            Text("Renewal is not scheduled.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case .requiresApproval:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Renewal is not scheduled; macOS is waiting for approval.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("Open Login Items") {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+                .buttonStyle(.link)
+            }
+        case .unavailable:
+            Text("The signed app in /Applications owns renewal scheduling. Isolated development builds cannot change it.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var renewalAgentStatus: String {
+        switch self.renewalAgentState {
+        case .enabled: return "Scheduled"
+        case .disabled, .requiresApproval: return "Not scheduled"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
     private func refreshLaunchAtLoginState() {
         self.launchAtLoginState = LaunchAtLogin.state
+    }
+
+    private func refreshRenewalAgentState() {
+        self.renewalAgentState = RenewalAgent.state
     }
 
     private func setLaunchAtLogin(_ isOn: Bool) {

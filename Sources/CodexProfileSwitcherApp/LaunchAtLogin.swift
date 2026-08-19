@@ -268,3 +268,66 @@ enum LaunchAtLogin {
         url.resolvingSymlinksInPath().standardizedFileURL
     }
 }
+
+enum RenewalAgent {
+    enum State: Equatable {
+        case enabled
+        case disabled
+        case requiresApproval
+        case unavailable
+    }
+
+    enum OperationError: LocalizedError {
+        case unavailable
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable:
+                return "Credential renewal scheduling is unavailable for this app build."
+            case .failed(let message):
+                return message
+            }
+        }
+    }
+
+    private static let plistName = "com.4lau.codex-profile-switcher.renew.plist"
+
+    static var state: State {
+        guard Self.isEligible else { return .unavailable }
+        switch SMAppService.agent(plistName: Self.plistName).status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .disabled
+        case .requiresApproval:
+            return .requiresApproval
+        case .notFound:
+            return .unavailable
+        @unknown default:
+            return .unavailable
+        }
+    }
+
+    static func register() throws {
+        guard Self.isEligible else { throw OperationError.unavailable }
+        let service = SMAppService.agent(plistName: Self.plistName)
+        guard service.status == .notRegistered else { return }
+        do {
+            try service.register()
+        } catch {
+            throw OperationError.failed(error.localizedDescription)
+        }
+    }
+
+    private static var isEligible: Bool {
+        guard ProcessSigningIdentity.hasDataProtectionKeychainAccess else { return false }
+        let bundleURL = Bundle.main.bundleURL.standardizedFileURL
+        let installedURL = StartupIdentityGate.installedBundleURL.standardizedFileURL
+        return bundleURL == installedURL && Self.canonicalURL(bundleURL) == bundleURL
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.resolvingSymlinksInPath().standardizedFileURL
+    }
+}
