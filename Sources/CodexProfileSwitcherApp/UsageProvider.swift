@@ -263,8 +263,8 @@ final class UsageProvider {
         for context in fetchGroup.contexts {
             self.activeLeases[context.id] = reservation.token
         }
-        // `removeLease` is `async` (F24: it holds `flock` and must stay off
-        // the main thread), and `defer` cannot contain `await`, so the lease
+        // `removeLease` is `async` (it holds `flock` and must stay off the
+        // main thread), and `defer` cannot contain `await`, so the lease
         // release below is called explicitly on every exit path from this
         // point instead of via `defer`. There are exactly two: the
         // `CancellationError` early return, and falling off the end of the
@@ -393,7 +393,7 @@ final class UsageProvider {
     /// yet" (an empty cache is the correct value, safe to write back) from
     /// "a file exists but didn't decode" (its content is unknown-but-real —
     /// missing, unreadable, corrupt, or containing a sub-record shape this
-    /// build can't parse — and callers must not overwrite it). See F21.
+    /// build can't parse — and callers must not overwrite it).
     private enum CacheLoadResult {
         case missing
         case decodeFailed

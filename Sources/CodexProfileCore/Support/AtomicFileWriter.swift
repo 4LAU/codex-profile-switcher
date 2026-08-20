@@ -39,6 +39,15 @@ public enum AtomicFileWriter {
         }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         try handle.write(contentsOf: contents)
+        // Force the written bytes to stable storage before the rename that
+        // publishes this temp file over the destination. `replaceItemAt` makes
+        // the RENAME atomic, but without this the data itself can still be
+        // sitting in a page cache: a power loss between the write and the
+        // rename could publish a zero-length or truncated file over a live
+        // credential.
+        guard fsync(fd) == 0 else {
+            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+        }
         try handle.close()
     }
 }
