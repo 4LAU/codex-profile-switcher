@@ -86,15 +86,33 @@ public struct URLSessionTokenRefresher: TokenRefreshing {
     // A rejected refresh here costs the credential, so the shape does not vary.
     private static let scope = "openid profile email"
 
+    /// Caps a SINGLE token request. `renew`'s watchdog bounds the whole run and
+    /// calls `exit()`, so without a per-request cap one endpoint that accepts
+    /// the connection and then never answers takes every other credential
+    /// group's renewal down with it and strands the lease it reserved. The
+    /// default `URLSessionConfiguration` does not supply this: its 60s
+    /// `timeoutIntervalForRequest` measures the gap between packets, which a
+    /// server trickling bytes never trips, and its `timeoutIntervalForResource`
+    /// is seven days. 30s is well past a healthy response from this endpoint
+    /// and well under the 120s run watchdog.
+    public static let defaultRequestTimeout: TimeInterval = 30
+
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
+    public init(
+        session: URLSession = .shared,
+        timeout: TimeInterval = Self.defaultRequestTimeout
+    ) {
         // Wrap the given session's configuration in one that refuses redirects,
         // rather than using `session` directly: a redirect response otherwise
         // makes URLSession silently re-send the POST body — refresh token
-        // included — to whatever host the redirect names.
+        // included — to whatever host the redirect names. `configuration` hands
+        // back a copy, so bounding it here cannot affect the caller's session.
+        let configuration = session.configuration
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
         self.session = URLSession(
-            configuration: session.configuration,
+            configuration: configuration,
             delegate: RedirectRefusingDelegate(),
             delegateQueue: session.delegateQueue)
     }

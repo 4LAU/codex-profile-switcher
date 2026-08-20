@@ -1904,11 +1904,19 @@ enum CodexProfileCLI {
                 return RenewalGroupOutcome(action: .invalid, reason: reasonPrefix + "no_identity")
             }
             let input = RenewalInput(credentials: representative.credentials!)
+            // Never let one group's request reach the run watchdog: the
+            // watchdog exits the process, so a hung endpoint would otherwise
+            // cost every remaining group its renewal AND strand this group's
+            // lease. Half the run budget leaves room to commit and report
+            // after a request that used its whole cap, so a timed-out request
+            // fails only this group (`unreachable`) and the run continues.
+            let requestTimeout = min(
+                options.timeout / 2, URLSessionTokenRefresher.defaultRequestTimeout)
             let result = self.runBlocking { () -> RenewalRequestResult in
                 do {
                     let credentials = try await TokenRenewal.renew(
                         credentials: input.credentials,
-                        using: URLSessionTokenRefresher())
+                        using: URLSessionTokenRefresher(timeout: requestTimeout))
                     return RenewalRequestResult(credentials: credentials, error: nil)
                 } catch let error as TokenRenewalError {
                     return RenewalRequestResult(credentials: nil, error: error)
