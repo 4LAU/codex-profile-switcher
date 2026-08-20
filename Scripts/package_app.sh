@@ -319,9 +319,9 @@ if [[ -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
 fi
 
 # CODEX_PROFILE_ARCHS: optional space-separated target list (e.g. "arm64 x86_64")
-# for a universal build; unset builds the host arch only, as before.
+# for a universal build; unset builds both supported macOS architectures.
 ARCH_ARGS=()
-for arch in ${CODEX_PROFILE_ARCHS:-}; do
+for arch in ${CODEX_PROFILE_ARCHS:-arm64 x86_64}; do
   ARCH_ARGS+=(--arch "$arch")
 done
 
@@ -356,12 +356,32 @@ mkdir -p \
   "$APP_BUNDLE/Contents/MacOS" \
   "$HELPER_APP_BUNDLE/Contents/MacOS" \
   "$APP_BUNDLE/Contents/Resources" \
-  "$APP_BUNDLE/Contents/Frameworks"
+  "$APP_BUNDLE/Contents/Frameworks" \
+  "$APP_BUNDLE/Contents/Library/LaunchAgents"
 
 cp "$APP_BINARY" "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher"
 cp "$HELPER_BINARY" "$HELPER_APP_EXECUTABLE"
 ln -s "CodexProfileHelper.app/Contents/MacOS/codex-profile" "$HELPER_COMPAT_LINK"
 chmod +x "$APP_BUNDLE/Contents/MacOS/CodexProfileSwitcher" "$HELPER_APP_EXECUTABLE"
+cp "$ROOT_DIR/Resources/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist" \
+  "$APP_BUNDLE/Contents/Library/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist"
+RENEW_AGENT_PLIST="$APP_BUNDLE/Contents/Library/LaunchAgents/com.4lau.codex-profile-switcher.renew.plist"
+plutil -lint "$RENEW_AGENT_PLIST" >/dev/null
+
+# SMAppService.agent(plistName:) resolves the LaunchAgent by filename and
+# requires its Label to match (minus ".plist"), and BundleProgram is a path
+# relative to the app bundle that macOS launches directly. Both values are
+# string literals duplicated from this plist into RenewalAgent's Swift source
+# and this script's own bundle layout — assert them against the built bundle
+# so packaging fails loudly instead of shipping a LaunchAgent macOS silently
+# refuses to register or a program macOS can't exec.
+RENEW_AGENT_FILENAME="$(basename "$RENEW_AGENT_PLIST" .plist)"
+require_plist_scalar "$RENEW_AGENT_PLIST" ":Label" "$RENEW_AGENT_FILENAME" "renew LaunchAgent plist"
+
+RENEW_AGENT_BUNDLE_PROGRAM="$(plist_value "$RENEW_AGENT_PLIST" ":BundleProgram")" \
+  || fail "renew LaunchAgent plist is missing BundleProgram."
+[[ -f "$APP_BUNDLE/$RENEW_AGENT_BUNDLE_PROGRAM" && -x "$APP_BUNDLE/$RENEW_AGENT_BUNDLE_PROGRAM" ]] \
+  || fail "renew LaunchAgent BundleProgram does not resolve to an existing executable in the built bundle: $RENEW_AGENT_BUNDLE_PROGRAM"
 
 if [[ "$REQUIRE_SIGNING" == "1" ]]; then
   cp "$APP_PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"

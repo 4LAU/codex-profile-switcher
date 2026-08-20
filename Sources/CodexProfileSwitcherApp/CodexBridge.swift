@@ -72,6 +72,12 @@ enum CodexBridgeError: LocalizedError {
 }
 
 enum CodexBridge {
+    struct CommandResult {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
     private final class ActiveLogin {
         let process: Process
         let startedAt = Date()
@@ -106,7 +112,7 @@ enum CodexBridge {
         return (start, awaitOutput)
     }
 
-    private static func codexProfilePath() -> String? {
+    static func codexProfilePath() -> String? {
         if Bundle.main.bundleURL.pathExtension == "app" {
             let bundledHelper = Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Helpers/codex-profile").path
@@ -158,6 +164,7 @@ enum CodexBridge {
             "CODEX_PROFILE_TEST_AUTH_STORE_DIR",
             "CODEX_PROFILE_FILE_AUTH_STORE_DIR",
             "CODEX_PROFILE_FORCE_KEYCHAIN",
+            "CODEX_PROFILE_TEST_TOKEN_ENDPOINT",
         ]
         var childEnvironment = environment
         for key in backendSelectors {
@@ -198,43 +205,64 @@ enum CodexBridge {
         return true
     }
 
-    private static func runCommand(
+    static func runCommand(
         path: String,
         arguments: [String],
-        completion: @escaping (Result<Void, CodexBridgeError>) -> Void
+        completion: @escaping (Result<CommandResult, CodexBridgeError>) -> Void
     ) {
         AppLogger.info("Running helper command",
                        metadata: ["path": path, "arguments": arguments.joined(separator: " ")])
         let proc = Process()
-        let pipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = arguments
-        proc.standardOutput = pipe
-        proc.standardError = pipe
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
+        // The same resolved auth backend the login path passes down.
+        // CODEX_PROFILE_FILE_AUTH_STORE_DIR is what actually pins the helper to
+        // the file dev vault when one is in play; the CLI reads it directly.
+        // The two are mutually exclusive: a stable signing identity sends
+        // CODEX_PROFILE_FORCE_KEYCHAIN and nothing else. Nothing reads that one,
+        // deliberately — the helper selects the Keychain backend from its own
+        // signing-identity check, so an environment variable cannot force it.
+        // Without the file-store override the helper would pick its own backend,
+        // and renewal could rotate a credential in a different vault than the
+        // one the app reads — the split this function's sibling exists to
+        // prevent.
+        proc.environment = Self.helperProcessEnvironment(for: ProcessInfo.processInfo.environment)
 
-        let drain = self.pipeDrain(for: pipe)
+        let stdoutDrain = self.pipeDrain(for: stdoutPipe)
+        let stderrDrain = self.pipeDrain(for: stderrPipe)
 
         proc.terminationHandler = { p in
-            let output = drain.awaitOutput()
+            let stdout = stdoutDrain.awaitOutput()
+            let stderr = stderrDrain.awaitOutput()
 
             if p.terminationStatus == 0 {
                 AppLogger.info("Helper command succeeded",
                                metadata: ["arguments": arguments.joined(separator: " ")])
-                completion(.success(()))
             } else {
                 AppLogger.error("Helper command failed",
                                 metadata: [
                                     "arguments": arguments.joined(separator: " "),
                                     "status": "\(p.terminationStatus)",
-                                    "output": output,
+                                    "output": stderr,
                                 ])
-                completion(.failure(.commandFailed(p.terminationStatus, output)))
             }
+            // A non-zero exit is a result, not a launch failure: `renew` reports
+            // a rejected credential as exit 8 with the per-profile records on
+            // stdout, and folding that into an error would throw away the very
+            // thing the caller needs. Only a process that never ran fails here.
+            completion(.success(CommandResult(status: p.terminationStatus,
+                                              stdout: stdout,
+                                              stderr: stderr)))
         }
 
         do {
             try proc.run()
-            drain.start()
+            stdoutDrain.start()
+            stderrDrain.start()
         } catch {
             AppLogger.error("Failed to launch helper command",
                             metadata: [

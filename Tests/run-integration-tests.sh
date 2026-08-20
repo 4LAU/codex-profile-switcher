@@ -6,11 +6,16 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-profile-integration.XXXXXX")"
 HELPER="$WORK_DIR/codex-profile"
 FAKE_APP="$WORK_DIR/fake-codex-app"
 FAKE_CODEX="$WORK_DIR/fake-codex"
+FAKE_USAGE_CODEX="$WORK_DIR/fake-usage-codex"
+APP_BIN="$WORK_DIR/CodexProfileSwitcher"
 LAUNCH_LOG="$WORK_DIR/fake-app-launch.log"
 LOGIN_HOME_LOG="$WORK_DIR/fake-codex-login-home.log"
 TEST_HOME="$WORK_DIR/home"
 AUTH_STORE="$WORK_DIR/auth-store"
 BUILD_DIR="$WORK_DIR/build"
+TOKEN_STUB_PID=""
+TOKEN_STUB_ENDPOINT=""
+TOKEN_STUB_COUNT=""
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -18,6 +23,11 @@ fail() {
 }
 
 cleanup() {
+  if [[ -n "$TOKEN_STUB_PID" ]]; then
+    kill "$TOKEN_STUB_PID" 2>/dev/null || true
+    wait "$TOKEN_STUB_PID" 2>/dev/null || true
+  fi
+  chmod 700 "$AUTH_STORE" 2>/dev/null || true
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -35,6 +45,14 @@ swift build \
 BIN_DIR="$(swift build --package-path "$ROOT_DIR" -c release --scratch-path "$BUILD_DIR" --show-bin-path)"
 cp "$BIN_DIR/codex-profile" "$HELPER"
 chmod +x "$HELPER"
+swift build \
+  --package-path "$ROOT_DIR" \
+  -c release \
+  --product CodexProfileSwitcher \
+  --scratch-path "$BUILD_DIR" \
+  >/dev/null
+cp "$BIN_DIR/CodexProfileSwitcher" "$APP_BIN"
+chmod +x "$APP_BIN"
 
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -93,6 +111,16 @@ make_token_only_auth() {
   printf '{\n  "tokens" : {\n    "access_token" : "%s",\n    "refresh_token" : "%s"\n  }\n}\n' "$access_token" "$refresh_token" > "$path"
 }
 
+make_oauth_auth_with_refresh_date() {
+  local path="$1"
+  local access_token="$2"
+  local refresh_token="$3"
+  local account_id="$4"
+  local last_refresh="$5"
+  printf '{\n  "last_refresh" : "%s",\n  "tokens" : {\n    "access_token" : "%s",\n    "refresh_token" : "%s",\n    "account_id" : "%s"\n  }\n}\n' \
+    "$last_refresh" "$access_token" "$refresh_token" "$account_id" > "$path"
+}
+
 save_auth() {
   local profile="$1"
   local path="$2"
@@ -109,11 +137,131 @@ export_auth() {
 run_helper() {
   CODEX_PROFILE_HOME="$TEST_HOME" \
     CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" \
+    CODEX_PROFILE_TEST_TOKEN_ENDPOINT="${TOKEN_STUB_ENDPOINT:-http://127.0.0.1:1}" \
     CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED=1 \
     CODEX_BUNDLED_CLI="$FAKE_APP" \
-    CODEX_CLI="$FAKE_CODEX" \
+    CODEX_CLI="${TEST_CODEX_CLI:-$FAKE_CODEX}" \
     FAKE_CODEX_LOGIN_HOME_LOG="$LOGIN_HOME_LOG" \
     "$HELPER" "$@"
+}
+
+start_token_stub() {
+  local mode="$1"
+  local access_token="${2:-access-refreshed}"
+  local refresh_token="${3:-refresh-refreshed}"
+  local account_id="${4:-acct-renewal}"
+  local release_file="$WORK_DIR/token-stub-release"
+  local endpoint_file="$WORK_DIR/token-stub-endpoint"
+  TOKEN_STUB_COUNT="$WORK_DIR/token-stub-count"
+  rm -f "$release_file" "$endpoint_file"
+  : > "$TOKEN_STUB_COUNT"
+  cat > "$WORK_DIR/token-stub.py" <<'PYTHON'
+import http.server
+import json
+import os
+import sys
+import time
+
+mode, access_token, refresh_token, account_id, endpoint_file, count_file, release_file, auth_store = sys.argv[1:]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        with open(count_file, "a") as count:
+            count.write("1\n")
+        if mode == "close":
+            self.connection.shutdown(2)
+            self.connection.close()
+            return
+        if mode == "wait":
+            while not os.path.exists(release_file):
+                time.sleep(0.01)
+        if mode == "lock":
+            os.chmod(auth_store, 0o500)
+        if mode == "401":
+            body = json.dumps({"error": "invalid_grant"}).encode()
+            self.send_response(401)
+        else:
+            body = json.dumps({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id,
+            }).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(endpoint_file, "w") as endpoint:
+    endpoint.write(str(server.server_port))
+    endpoint.flush()
+server.serve_forever()
+PYTHON
+  python3 -u "$WORK_DIR/token-stub.py" "$mode" "$access_token" "$refresh_token" \
+    "$account_id" "$endpoint_file" "$TOKEN_STUB_COUNT" "$release_file" "$AUTH_STORE" &
+  TOKEN_STUB_PID=$!
+  for _ in {1..100}; do
+    [[ -s "$endpoint_file" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$endpoint_file" ]] || fail "token stub did not publish a port"
+  TOKEN_STUB_ENDPOINT="http://127.0.0.1:$(<"$endpoint_file")"
+}
+
+stop_token_stub() {
+  if [[ -n "$TOKEN_STUB_PID" ]]; then
+    : > "$WORK_DIR/token-stub-release"
+    kill "$TOKEN_STUB_PID" 2>/dev/null || true
+    wait "$TOKEN_STUB_PID" 2>/dev/null || true
+    TOKEN_STUB_PID=""
+  fi
+  TOKEN_STUB_ENDPOINT=""
+}
+
+request_count() {
+  [[ -f "$TOKEN_STUB_COUNT" ]] || { printf '0'; return; }
+  wc -l < "$TOKEN_STUB_COUNT" | tr -d ' '
+}
+
+make_usage_codex() {
+  local path="$1"
+  local count_file="$2"
+  cat > "$path" <<'PYTHON'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+count_file = os.environ["USAGE_RPC_COUNT"]
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except Exception:
+        continue
+    method = message.get("method")
+    if method == "account/rateLimits/read":
+        with open(count_file, "a") as count:
+            count.write("1\n")
+    if "id" not in message:
+        continue
+    if method == "account/rateLimits/read":
+        result = {"rateLimits": {
+            "primary": {"usedPercent": 10, "windowDurationMins": 60, "resetsAt": 2000000000},
+            "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 2000000000},
+            "credits": None,
+            "planType": "team",
+        }}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+PYTHON
+  chmod +x "$path"
+  : > "$count_file"
 }
 
 # Like run_helper but WITHOUT CODEX_PROFILE_TEST_AUTH_STORE_DIR, exercising the
@@ -1364,6 +1512,399 @@ test_lease_end_rejects_mismatched_profile() {
   has_lease RotateA || fail "lease end released the reservation despite rejecting the call"
 }
 
+write_profiles_config() {
+  local active="$1"
+  shift
+  mkdir -p "$TEST_HOME/.codex-switcher"
+  {
+    printf '{"activeProfile":"%s","profiles":[' "$active"
+    local first=1 profile
+    for profile in "$@"; do
+      [[ "$first" == 1 ]] || printf ','
+      printf '{"id":"%s","label":"%s"}' "$profile" "$profile"
+      first=0
+    done
+    printf ']}\n'
+  } > "$TEST_HOME/.codex-switcher/config.json"
+}
+
+auth_refresh() {
+  plutil -extract tokens.refresh_token raw -o - "$AUTH_STORE/$1.json"
+}
+
+test_renew_writes_rotated_credential_and_last_refresh() {
+  reset_home
+  local saved="$WORK_DIR/renew-saved.json"
+  make_oauth_auth_with_refresh_date "$saved" access-old refresh-old acct-renew "2026-01-01T00:00:00Z"
+  save_auth Renew "$saved"
+  write_profiles_config Renew Renew
+  start_token_stub rotate access-new refresh-new acct-renew
+
+  run_helper renew --profile Renew --json > "$WORK_DIR/renew-report.json"
+  [[ "$(auth_refresh Renew)" == refresh-new ]] || fail "renew did not write the rotated refresh token"
+  [[ "$(plutil -extract tokens.access_token raw -o - "$AUTH_STORE/Renew.json")" == access-new ]] \
+    || fail "renew did not write the rotated access token"
+  [[ "$(plutil -extract last_refresh raw -o - "$AUTH_STORE/Renew.json")" != "2026-01-01T00:00:00Z" ]] \
+    || fail "renew did not advance last_refresh"
+  [[ "$(request_count)" == 1 ]] || fail "renew made the wrong number of token requests"
+  stop_token_stub
+}
+
+test_renew_skips_active_and_expired_recorded_leases() {
+  local lease_until
+  for lease_until in 2099-01-01T00:00:00Z 2000-01-01T00:00:00Z; do
+    reset_home
+    local saved="$WORK_DIR/lease-renew.json"
+    make_oauth_auth_with_refresh_date "$saved" access-old refresh-old acct-lease "2026-01-01T00:00:00Z"
+    save_auth LeaseRenew "$saved"
+    write_profiles_config LeaseRenew LeaseRenew
+    cat > "$TEST_HOME/.codex-switcher/cache.json" <<JSON
+{"snapshots":{},"leases":{"LeaseRenew":{"token":"lease-token","home":"$TEST_HOME/.codex-switcher/leases/lease-token","expiresAt":"$lease_until","createdAt":"2026-01-01T00:00:00Z"}}}
+JSON
+    run_helper renew --profile LeaseRenew --json > "$WORK_DIR/lease-renew-report.json"
+    [[ "$(auth_refresh LeaseRenew)" == refresh-old ]] || fail "renew overwrote a $lease_until lease"
+    grep -Fq 'lease_reserved' "$WORK_DIR/lease-renew-report.json" \
+      || fail "renew did not report the recorded lease as reserved"
+  done
+}
+
+test_renew_identity_mismatch_preserves_credential() {
+  reset_home
+  local saved="$WORK_DIR/identity-saved.json"
+  make_oauth_auth_with_refresh_date "$saved" access-old refresh-old acct-identity "2026-01-01T00:00:00Z"
+  save_auth Identity "$saved"
+  write_profiles_config Identity Identity
+  start_token_stub rotate access-new refresh-new acct-other
+
+  local status=0
+  run_helper renew --profile Identity --json > "$WORK_DIR/identity-report.json" || status=$?
+  [[ "$status" == 5 ]] || fail "identity mismatch exited $status instead of 5"
+  [[ "$(auth_refresh Identity)" == refresh-old ]] || fail "identity mismatch changed the credential"
+  grep -Fq 'identity_mismatch' "$WORK_DIR/identity-report.json" \
+    || fail "identity mismatch was not reported"
+  stop_token_stub
+}
+
+test_shared_refresh_token_renews_once() {
+  reset_home
+  local a="$WORK_DIR/shared-a.json" b="$WORK_DIR/shared-b.json"
+  make_oauth_auth_with_refresh_date "$a" access-old refresh-shared acct-shared "2026-01-01T00:00:00Z"
+  make_oauth_auth_with_refresh_date "$b" access-old-b refresh-shared acct-shared "2026-01-01T00:00:00Z"
+  save_auth SharedA "$a"
+  save_auth SharedB "$b"
+  write_profiles_config SharedA SharedA SharedB
+  start_token_stub rotate access-new refresh-rotated acct-shared
+
+  run_helper renew --json > "$WORK_DIR/shared-report.json"
+  [[ "$(auth_refresh SharedA)" == refresh-rotated ]] || fail "first shared profile was not renewed"
+  [[ "$(auth_refresh SharedB)" == refresh-rotated ]] || fail "second shared profile was not renewed"
+  [[ "$(request_count)" == 1 ]] || fail "shared refresh token caused more than one request"
+  stop_token_stub
+}
+
+test_renew_save_failure_leaves_stash_and_next_run_recovers() {
+  reset_home
+  local saved="$WORK_DIR/stash-saved.json"
+  make_oauth_auth_with_refresh_date "$saved" access-old refresh-stash acct-stash "2026-01-01T00:00:00Z"
+  save_auth Stash "$saved"
+  write_profiles_config Stash Stash
+  start_token_stub lock access-new refresh-stash-rotated acct-stash
+
+  run_helper renew --profile Stash --json > "$WORK_DIR/stash-first.json" 2>/dev/null || true
+  [[ -f "$TEST_HOME/.codex-switcher/renew-stash/Stash.json" ]] \
+    || fail "successful rotation did not leave a recovery stash after save failure"
+  [[ "$(auth_refresh Stash)" == refresh-stash ]] || fail "failed save changed the stored credential"
+  chmod 700 "$AUTH_STORE"
+  run_helper renew --profile Stash --json > "$WORK_DIR/stash-second.json"
+  [[ "$(auth_refresh Stash)" == refresh-stash-rotated ]] || fail "next run did not recover the stash"
+  [[ "$(request_count)" == 1 ]] || fail "stash recovery sent another refresh request"
+  [[ ! -f "$TEST_HOME/.codex-switcher/renew-stash/Stash.json" ]] || fail "recovered stash was not removed"
+  stop_token_stub
+}
+
+test_stale_renewal_stash_is_discarded() {
+  reset_home
+  local saved="$WORK_DIR/stale-stash-saved.json"
+  local rotated="$WORK_DIR/stale-stash-rotated.json"
+  make_oauth_auth_with_refresh_date "$saved" access-current refresh-current acct-stale "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+  make_oauth_auth_with_refresh_date "$rotated" access-rotated refresh-rotated acct-stale "2026-01-01T00:00:00Z"
+  save_auth StaleStash "$saved"
+  write_profiles_config StaleStash StaleStash
+  mkdir -p "$TEST_HOME/.codex-switcher/renew-stash"
+  local blob digest
+  blob="$(base64 < "$rotated" | tr -d '\n')"
+  digest="$(printf refresh-predecessor | shasum -a 256 | awk '{print $1}')"
+  printf '{"blob":"%s","predecessor_digest":"%s"}\n' "$blob" "$digest" \
+    > "$TEST_HOME/.codex-switcher/renew-stash/StaleStash.json"
+
+  run_helper renew --profile StaleStash --json > "$WORK_DIR/stale-stash-report.json"
+  [[ "$(auth_refresh StaleStash)" == refresh-current ]] || fail "stale stash was applied"
+  [[ ! -f "$TEST_HOME/.codex-switcher/renew-stash/StaleStash.json" ]] \
+    || fail "stale stash was not discarded"
+  grep -Fq 'stale_stash_discarded' "$WORK_DIR/stale-stash-report.json" \
+    || fail "stale stash discard was not reported"
+}
+
+test_renew_reconciles_live_auth_forward() {
+  reset_home
+  local saved="$WORK_DIR/live-saved.json"
+  local live="$TEST_HOME/.codex/auth.json"
+  make_oauth_auth_with_refresh_date "$saved" access-old refresh-old acct-live "2026-01-01T00:00:00Z"
+  save_auth Live "$saved"
+  write_profiles_config Live Live
+  mkdir -p "$TEST_HOME/.codex"
+  cp "$saved" "$live"
+  start_token_stub rotate access-live-new refresh-live-new acct-live
+
+  run_helper renew --profile Live --json > "$WORK_DIR/live-report.json"
+  [[ "$(plutil -extract tokens.refresh_token raw -o - "$live")" == refresh-live-new ]] \
+    || fail "renew did not reconcile the live auth forward"
+  [[ "$(plutil -extract last_refresh raw -o - "$live")" != "2026-01-01T00:00:00Z" ]] \
+    || fail "live auth retained its older last_refresh"
+  make_oauth_auth_with_refresh_date "$live" access-live-stale refresh-live-stale acct-live "2026-01-01T00:00:00Z"
+  local second_report="$WORK_DIR/live-not-due-report.json"
+  run_helper renew --profile Live --json > "$second_report"
+  grep -Fq '"reason":"not_due"' "$second_report" \
+    || fail "not-due renewal did not report not_due"
+  grep -Fq '"requests":0' "$second_report" \
+    || fail "not-due renewal made a token request"
+  [[ "$(plutil -extract tokens.refresh_token raw -o - "$live")" == refresh-live-new ]] \
+    || fail "not-due renewal did not reconcile the live auth forward"
+  stop_token_stub
+}
+
+test_import_refreshed_auth_obeys_last_refresh_order() {
+  reset_home
+  local existing="$WORK_DIR/import-existing.json"
+  local older="$WORK_DIR/import-older.json"
+  local newer="$WORK_DIR/import-newer.json"
+  local dir="$WORK_DIR/import-order"
+  make_oauth_auth_with_refresh_date "$existing" access-existing refresh-existing acct-import "2026-05-01T00:00:00Z"
+  make_oauth_auth_with_refresh_date "$older" access-older refresh-older acct-import "2026-04-01T00:00:00Z"
+  make_oauth_auth_with_refresh_date "$newer" access-newer refresh-newer acct-import "2026-09-01T00:00:00Z"
+  save_auth ImportOrder "$existing"
+  mkdir -p "$dir"
+  cp "$older" "$dir/auth.json"
+  run_helper import-auth --dir "$dir" --profile ImportOrder
+  [[ "$(auth_refresh ImportOrder)" == refresh-existing ]] || fail "older import overwrote stored auth"
+  cp "$newer" "$dir/auth.json"
+  run_helper import-auth --dir "$dir" --profile ImportOrder
+  [[ "$(auth_refresh ImportOrder)" == refresh-newer ]] || fail "newer import was refused"
+}
+
+test_exec_export_is_skipped_by_renew_while_live() {
+  write_exec_test_state
+  local target="$WORK_DIR/live-exec-target"
+  printf '#!/usr/bin/env bash\nsleep 8\n' > "$target"
+  chmod +x "$target"
+  (run_helper exec --timeout 10 -- "$target" > "$WORK_DIR/live-exec.out" 2>"$WORK_DIR/live-exec.err") &
+  local exec_pid=$!
+  for _ in {1..100}; do
+    has_lease RotateA && break
+    sleep 0.02
+  done
+  has_lease RotateA || { kill "$exec_pid" 2>/dev/null || true; fail "exec did not record its live lease"; }
+  local before="$WORK_DIR/live-exec-before.json"
+  export_auth RotateA "$before"
+  run_helper renew --profile RotateA --json > "$WORK_DIR/live-exec-renew.json"
+  grep -Fq 'lease_reserved' "$WORK_DIR/live-exec-renew.json" \
+    || fail "renew did not skip a profile exported by exec"
+  assert_same_file "$AUTH_STORE/RotateA.json" "$before" "renew changed an exec-owned credential"
+  kill "$exec_pid" 2>/dev/null || true
+  wait "$exec_pid" 2>/dev/null || true
+}
+
+test_self_fetch_usage_groups_shared_credentials() {
+  reset_home
+  local a="$WORK_DIR/usage-a.json" b="$WORK_DIR/usage-b.json"
+  local usage_count="$WORK_DIR/self-usage-count"
+  make_oauth_auth_with_refresh_date "$a" access-a refresh-usage acct-usage "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+  cp "$a" "$b"
+  save_auth UsageA "$a"
+  save_auth UsageB "$b"
+  write_profiles_config UsageA UsageA UsageB
+  make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count"
+  USAGE_RPC_COUNT="$usage_count" TEST_CODEX_CLI="$FAKE_USAGE_CODEX" \
+    run_helper best-auth --dir "$WORK_DIR/self-usage-out" >/dev/null
+  [[ "$(wc -l < "$usage_count" | tr -d ' ')" == 1 ]] \
+    || fail "selfFetchUsage made more than one RPC for one credential"
+}
+
+test_usage_provider_groups_shared_credentials() {
+  reset_home
+  local auth="$WORK_DIR/provider-auth.json"
+  local usage_count="$WORK_DIR/provider-usage-count"
+  local dev_store="$TEST_HOME/.codex-switcher/dev-auth-store"
+  make_oauth_auth_with_refresh_date "$auth" access-provider refresh-provider acct-provider "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+  mkdir -p "$dev_store"
+  cp "$auth" "$dev_store/ProviderA.json"
+  cp "$auth" "$dev_store/ProviderB.json"
+  write_profiles_config ProviderA ProviderA ProviderB
+  make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count"
+  local app_dir="$WORK_DIR/provider-app" app_helper="$WORK_DIR/provider-app/codex-profile"
+  mkdir -p "$app_dir"
+  cp "$APP_BIN" "$app_dir/CodexProfileSwitcher"
+  cat > "$app_helper" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '{"records":[],"requests":0}\n'
+SCRIPT
+  chmod +x "$app_helper"
+  USAGE_RPC_COUNT="$usage_count" CODEX_PROFILE_HOME="$TEST_HOME" \
+    CODEX_PROFILE_TEST_AUTH_STORE_DIR="$AUTH_STORE" CODEX_CLI="$FAKE_USAGE_CODEX" \
+    "$app_dir/CodexProfileSwitcher" > "$WORK_DIR/provider-app.log" 2>&1 &
+  local app_pid=$!
+  for _ in {1..200}; do
+    [[ -s "$usage_count" ]] && break
+    sleep 0.02
+  done
+  [[ -s "$usage_count" ]] || { kill "$app_pid" 2>/dev/null || true; fail "UsageProvider made no RPC"; }
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  [[ "$(wc -l < "$usage_count" | tr -d ' ')" == 1 ]] \
+    || fail "UsageProvider made more than one RPC for one credential"
+}
+
+test_renewal_and_switch_interleavings_keep_newer_credential() {
+  reset_home
+  local old="$WORK_DIR/interleave-old.json" live="$WORK_DIR/interleave-live.json" other="$WORK_DIR/interleave-other.json"
+  make_oauth_auth_with_refresh_date "$old" access-old refresh-interleave acct-interleave "2026-01-01T00:00:00Z"
+  make_oauth_auth_with_refresh_date "$live" access-live refresh-live acct-interleave "2026-09-01T00:00:00Z"
+  make_oauth_auth "$other" access-other refresh-other acct-other
+  save_auth InterleaveA "$old"
+  save_auth InterleaveB "$other"
+  write_profiles_config InterleaveA InterleaveA InterleaveB
+  mkdir -p "$TEST_HOME/.codex"
+  cp "$live" "$TEST_HOME/.codex/auth.json"
+  start_token_stub wait access-renewed refresh-renewed acct-interleave
+  (run_helper renew --profile InterleaveA --json > "$WORK_DIR/interleave-first.json" 2>/dev/null) &
+  local renewal_pid=$!
+  for _ in {1..100}; do [[ "$(request_count)" == 1 ]] && break; sleep 0.02; done
+  [[ "$(request_count)" == 1 ]] || fail "renewal request did not start"
+  run_helper app InterleaveB "$WORK_DIR" >/dev/null
+  : > "$WORK_DIR/token-stub-release"
+  wait "$renewal_pid" 2>/dev/null || true
+  [[ "$(auth_refresh InterleaveA)" == refresh-live ]] || fail "switch-before-renewal lost newer credential"
+  stop_token_stub
+
+  reset_home
+  make_oauth_auth_with_refresh_date "$old" access-old refresh-interleave-2 acct-interleave "2026-01-01T00:00:00Z"
+  make_oauth_auth "$other" access-other refresh-other acct-other
+  save_auth InterleaveA "$old"
+  save_auth InterleaveB "$other"
+  write_profiles_config InterleaveA InterleaveA InterleaveB
+  mkdir -p "$TEST_HOME/.codex"
+  cp "$old" "$TEST_HOME/.codex/auth.json"
+  start_token_stub rotate access-renewed-2 refresh-renewed-2 acct-interleave
+  run_helper renew --profile InterleaveA --json > "$WORK_DIR/interleave-second.json"
+  run_helper app InterleaveB "$WORK_DIR" >/dev/null
+  [[ "$(auth_refresh InterleaveA)" == refresh-renewed-2 ]] || fail "renewal-before-switch lost newer credential"
+  stop_token_stub
+}
+
+test_login_between_request_and_commit_survives() {
+  reset_home
+  local old="$WORK_DIR/login-race-old.json" login="$WORK_DIR/login-race-new.json"
+  make_oauth_auth_with_refresh_date "$old" access-old refresh-login-race acct-login-race "2026-01-01T00:00:00Z"
+  make_oauth_auth_with_refresh_date "$login" access-login refresh-login acct-login-race "2026-09-01T00:00:00Z"
+  save_auth LoginRace "$old"
+  write_profiles_config LoginRace LoginRace
+  start_token_stub wait access-renewed refresh-renewed acct-login-race
+  (run_helper renew --profile LoginRace --json > "$WORK_DIR/login-race-renew.json" 2>/dev/null) &
+  local renewal_pid=$!
+  for _ in {1..100}; do [[ "$(request_count)" == 1 ]] && break; sleep 0.02; done
+  [[ "$(request_count)" == 1 ]] || fail "login race request did not start"
+  FAKE_CODEX_LOGIN_AUTH="$login" run_helper login LoginRace >/dev/null
+  : > "$WORK_DIR/token-stub-release"
+  wait "$renewal_pid" 2>/dev/null || true
+  [[ "$(auth_refresh LoginRace)" == refresh-login ]] || fail "renewal overwrote a fresh login"
+  stop_token_stub
+}
+
+test_renewal_states_survive_cli_and_app_whole_cache_writes() {
+  reset_home
+  local auth="$WORK_DIR/state-auth.json"
+  make_oauth_auth_with_refresh_date "$auth" access-state refresh-state acct-state "2026-01-01T00:00:00Z"
+  save_auth StateProfile "$auth"
+  write_profiles_config StateProfile StateProfile
+  start_token_stub 401
+  local status=0
+  run_helper renew --profile StateProfile --json > "$WORK_DIR/state-cli-report.json" || status=$?
+  [[ "$status" == 8 ]] || fail "rejected renewal exited $status instead of 8"
+  stop_token_stub
+  plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
+    | grep -qx rejected || fail "CLI renewal state was not recorded"
+
+  local app_dir="$WORK_DIR/state-app-cli" app_helper="$WORK_DIR/state-app-cli/codex-profile"
+  mkdir -p "$app_dir"
+  cp "$APP_BIN" "$app_dir/CodexProfileSwitcher"
+  cat > "$app_helper" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '{"records":[],"requests":0}\n'
+SCRIPT
+  chmod +x "$app_helper"
+  local usage_count="$WORK_DIR/state-app-cli-usage"
+  mkdir -p "$TEST_HOME/.codex-switcher/dev-auth-store"
+  cp "$auth" "$TEST_HOME/.codex-switcher/dev-auth-store/StateProfile.json"
+  make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count"
+  USAGE_RPC_COUNT="$usage_count" CODEX_PROFILE_HOME="$TEST_HOME" CODEX_CLI="$FAKE_USAGE_CODEX" \
+    "$app_dir/CodexProfileSwitcher" > "$WORK_DIR/state-app-cli.log" 2>&1 &
+  local app_pid=$!
+  for _ in {1..200}; do [[ -s "$usage_count" ]] && break; sleep 0.02; done
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
+    | grep -qx rejected || fail "app cache write clobbered CLI renewal state"
+
+  reset_home
+  mkdir -p "$TEST_HOME/.codex-switcher/dev-auth-store"
+  cp "$auth" "$AUTH_STORE/StateProfile.json"
+  cp "$auth" "$TEST_HOME/.codex-switcher/dev-auth-store/StateProfile.json"
+  write_profiles_config StateProfile StateProfile
+  local app_dir_two="$WORK_DIR/state-app-app" helper_two="$WORK_DIR/state-app-app/codex-profile"
+  mkdir -p "$app_dir_two"
+  cp "$APP_BIN" "$app_dir_two/CodexProfileSwitcher"
+  # "3aef959d3f8a" is the real renewal-credential fingerprint (first 12 hex
+  # chars of SHA-256) of the "refresh-state" token this test's StateProfile
+  # credential carries — the same value the app independently computes when
+  # it checks whether the rejected credential has since been replaced. A
+  # placeholder that doesn't match would look, to that check, exactly like a
+  # credential rotation and clear the rejection this test is asserting on.
+  cat > "$helper_two" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '{"records":[{"id":"StateProfile","action":"rejected","reason":"HTTP 401: invalid_grant","age_days":1,"credential":"3aef959d3f8a"}],"requests":0}\n'
+exit 8
+SCRIPT
+  chmod +x "$helper_two"
+  local usage_count_two="$WORK_DIR/state-app-app-usage"
+  make_usage_codex "$FAKE_USAGE_CODEX" "$usage_count_two"
+  USAGE_RPC_COUNT="$usage_count_two" CODEX_PROFILE_HOME="$TEST_HOME" CODEX_CLI="$FAKE_USAGE_CODEX" \
+    "$app_dir_two/CodexProfileSwitcher" > "$WORK_DIR/state-app-app.log" 2>&1 &
+  app_pid=$!
+  for _ in {1..200}; do
+    if plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" 2>/dev/null | grep -qx rejected; then break; fi
+    sleep 0.02
+  done
+  # The renewal completion also kicks off the app's own usage refresh, which
+  # briefly claims a lease on StateProfile around its live fetch. Wait for
+  # that fetch to actually start (evidence the claim landed), then for the
+  # lease to clear, before killing the app — otherwise the best-auth call
+  # below can collide with a still-active lease the killed process never got
+  # to release.
+  for _ in {1..200}; do [[ -s "$usage_count_two" ]] && break; sleep 0.02; done
+  for _ in {1..100}; do
+    has_lease StateProfile || break
+    sleep 0.02
+  done
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
+    | grep -qx rejected || fail "app renewal state was not recorded"
+  USAGE_RPC_COUNT="$usage_count_two" TEST_CODEX_CLI="$FAKE_USAGE_CODEX" \
+    run_helper best-auth --dir "$WORK_DIR/state-best-auth" >/dev/null
+  plutil -extract renewalStates.StateProfile.action raw -o - "$TEST_HOME/.codex-switcher/cache.json" \
+    | grep -qx rejected || fail "CLI whole-cache write clobbered app renewal state"
+}
+
 test_switch_preserves_outgoing_auth
 test_switch_current_chatgpt_layout_stops_running_desktop
 test_switch_invalid_app_with_cli_override_preserves_state
@@ -1403,5 +1944,19 @@ test_lease_gc_preserves_expired_lease_with_recoverable_writeback
 test_lease_end_exits_nonzero_on_recoverable_writeback_failure
 test_lease_end_is_idempotent_zero_exit_when_no_lease
 test_lease_end_rejects_mismatched_profile
+test_renew_writes_rotated_credential_and_last_refresh
+test_renew_skips_active_and_expired_recorded_leases
+test_renew_identity_mismatch_preserves_credential
+test_shared_refresh_token_renews_once
+test_renew_save_failure_leaves_stash_and_next_run_recovers
+test_stale_renewal_stash_is_discarded
+test_renew_reconciles_live_auth_forward
+test_import_refreshed_auth_obeys_last_refresh_order
+test_exec_export_is_skipped_by_renew_while_live
+test_self_fetch_usage_groups_shared_credentials
+test_usage_provider_groups_shared_credentials
+test_renewal_and_switch_interleavings_keep_newer_credential
+test_login_between_request_and_commit_survives
+test_renewal_states_survive_cli_and_app_whole_cache_writes
 
 printf 'Integration tests: all tests passed\n'

@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if decision == .production {
             guard !self.terminateIfInstalledInstanceIsRunning() else { return }
             LaunchAtLogin.migrateLegacyLaunchAgentIfNeeded()
+            do {
+                try RenewalAgent.register()
+            } catch {
+                AppLogger.warning("Failed to register renewal agent",
+                                  metadata: ["error": error.localizedDescription])
+            }
         }
 
         let environment = ProcessInfo.processInfo.environment
@@ -84,8 +90,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.usageProvider.onRefreshComplete = { [weak self] in
             self?.handleRefreshComplete()
         }
-        self.requestRefresh()
         self.startPeriodicRefreshTimer()
+        // Renewal and the first usage refresh both touch the shared lease/auth
+        // state; requestRefresh() only schedules a Task while startRenewal()
+        // spawns its subprocess synchronously, so firing both here would race
+        // with no coordination between them. Sequence instead: the first usage
+        // refresh fires from the renewal's completion handler.
+        self.startRenewal()
 
         self.sparkleUpdater.startIfBundledApp()
         if self.canHandleRecoveryNotices {
@@ -191,6 +202,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.requestRefresh()
             }
         }
+    }
+
+    /// Exit codes `renew --json` can report. 0 and 3 are non-failure outcomes;
+    /// everything else is a real problem the app should surface instead of
+    /// logging at INFO as if nothing happened. 7 (watchdog timeout) is not
+    /// reachable here: the watchdog's exit() preempts the JSON print, so that
+    /// path already lands in the CodexBridgeError.failure branch below.
+    private static let renewalOkExitStatuses: Set<Int32> = [0, 3]
+
+    private func startRenewal() {
+        guard let path = CodexBridge.codexProfilePath() else {
+            AppLogger.warning("Skipping renewal; codex-profile helper not found")
+            self.requestRefresh()
+            return
+        }
+
+        CodexBridge.runCommand(path: path, arguments: ["renew", "--json"]) { [weak self] result in
+            DispatchQueue.main.async {
+                self?.handleRenewalResult(result)
+            }
+        }
+    }
+
+    private func handleRenewalResult(
+        _ result: Result<CodexBridge.CommandResult, CodexBridgeError>
+    ) {
+        defer { self.requestRefresh() }
+        switch result {
+        case let .success(command):
+            do {
+                let report = try JSONDecoder().decode(
+                    RenewalReport.self,
+                    from: Data(command.stdout.utf8))
+                for record in report.records {
+                    self.store.recordRenewalState(
+                        RenewalState(
+                            action: record.action,
+                            reason: record.reason,
+                            timestamp: Date(),
+                            credentialFingerprint: record.credential),
+                        for: record.id)
+                }
+                self.store.recordRenewalRun(
+                    LastRenewalRun(timestamp: Date(), exitStatus: command.status, recordCount: report.records.count))
+                if Self.renewalOkExitStatuses.contains(command.status) {
+                    AppLogger.info("Credential renewal completed",
+                                   metadata: [
+                                       "status": "\(command.status)",
+                                       "records": "\(report.records.count)",
+                                   ])
+                } else {
+                    AppLogger.warning("Credential renewal reported a failure",
+                                       metadata: [
+                                           "status": "\(command.status)",
+                                           "records": "\(report.records.count)",
+                                       ])
+                }
+            } catch {
+                self.store.recordRenewalRun(
+                    LastRenewalRun(timestamp: Date(), exitStatus: command.status, recordCount: nil))
+                AppLogger.warning("Could not parse credential renewal output",
+                                  metadata: ["error": error.localizedDescription])
+            }
+        case let .failure(error):
+            self.store.recordRenewalRun(
+                LastRenewalRun(timestamp: Date(), exitStatus: nil, recordCount: nil))
+            AppLogger.warning("Could not run credential renewal",
+                              metadata: ["error": error.localizedDescription])
+        }
+    }
+
+    private struct RenewalReport: Decodable {
+        let records: [RenewalRecord]
+    }
+
+    private struct RenewalRecord: Decodable {
+        let id: String
+        let action: String
+        let reason: String
+        let credential: String?
     }
 
     private func registerWorkspaceObservers() {
@@ -754,6 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch result {
             case .success:
                 AppLogger.info("Login succeeded", metadata: ["profile": profileId])
+                self.store.clearRenewalState(for: profileId)
                 if self.store.liveProfileId == profileId {
                     do {
                         try self.store.syncSavedAuthToLive(for: profileId)

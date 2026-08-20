@@ -268,3 +268,79 @@ enum LaunchAtLogin {
         url.resolvingSymlinksInPath().standardizedFileURL
     }
 }
+
+enum RenewalAgent {
+    enum State: Equatable {
+        case enabled
+        case disabled
+        case requiresApproval
+        case unavailable
+    }
+
+    enum OperationError: LocalizedError {
+        case unavailable
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable:
+                return "Credential renewal scheduling is unavailable for this app build."
+            case .failed(let message):
+                return message
+            }
+        }
+    }
+
+    private static let plistName = "com.4lau.codex-profile-switcher.renew.plist"
+
+    static var state: State {
+        guard Self.isEligible else { return .unavailable }
+        switch SMAppService.agent(plistName: Self.plistName).status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .disabled
+        case .requiresApproval:
+            return .requiresApproval
+        case .notFound:
+            return .unavailable
+        @unknown default:
+            return .unavailable
+        }
+    }
+
+    static func register() throws {
+        guard Self.isEligible else { throw OperationError.unavailable }
+        let service = SMAppService.agent(plistName: Self.plistName)
+        switch service.status {
+        case .enabled, .requiresApproval:
+            return
+        case .notRegistered:
+            do {
+                try service.register()
+            } catch {
+                throw OperationError.failed(error.localizedDescription)
+            }
+        case .notFound:
+            // Only reachable in a genuinely installed signed build (isEligible
+            // already filters out isolated dev builds): the renewal LaunchAgent
+            // plist is missing from the app bundle. This is a real failure, not
+            // "nothing to do" — treating it as success left renewal silently
+            // unscheduled with no error ever logged.
+            throw OperationError.failed("The renewal LaunchAgent plist was not found in the app bundle.")
+        @unknown default:
+            throw OperationError.failed("Unexpected renewal LaunchAgent status.")
+        }
+    }
+
+    private static var isEligible: Bool {
+        guard ProcessSigningIdentity.hasDataProtectionKeychainAccess else { return false }
+        let bundleURL = Bundle.main.bundleURL.standardizedFileURL
+        let installedURL = StartupIdentityGate.installedBundleURL.standardizedFileURL
+        return bundleURL == installedURL && Self.canonicalURL(bundleURL) == bundleURL
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.resolvingSymlinksInPath().standardizedFileURL
+    }
+}

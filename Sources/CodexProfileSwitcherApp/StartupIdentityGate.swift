@@ -81,7 +81,8 @@ enum StartupIdentityGate {
     }
 
     static func makeIsolatedAuthVault(environment: [String: String]) -> FileAuthVault {
-        FileAuthVault(root: AppPaths(environment: environment).devAuthStoreURL)
+        let paths = AppPaths(environment: environment)
+        return FileAuthVault(root: paths.devAuthStoreURL, authLockURL: paths.authLockURL)
     }
 
     static func canHandleRecoveryNotice(decision: Decision) -> Bool {

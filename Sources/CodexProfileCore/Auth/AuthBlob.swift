@@ -104,6 +104,36 @@ public enum AuthBlob {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Compares two blobs' identities by VALUE rather than by the shape of the
+    /// whole identity dictionary. A refresh response that merely ADDS an
+    /// identifying field (e.g. an `id_token` the stored blob never had) is not
+    /// treated as an account change: only a differing value for a field present
+    /// on BOTH sides counts as a mismatch. `identityFingerprint` hashes the
+    /// entire dictionary and so cannot make this distinction — it flags any
+    /// shape change as a different account, including a same-account rotation
+    /// that only adds a field. At least one non-`kind` claim must match on both
+    /// sides, or the comparison is inconclusive and returns false: `kind` alone
+    /// (e.g. `"oauth"`) is shared by every OAuth blob, so a replacement that has
+    /// dropped every distinguishing claim would otherwise vacuously match any
+    /// other account's blob.
+    public static func identityMatches(_ current: Data, _ replacement: Data) -> Bool {
+        guard let currentJSON = try? parseTopLevelObject(from: current),
+              let replacementJSON = try? parseTopLevelObject(from: replacement),
+              let currentIdentity = authIdentity(from: currentJSON),
+              let replacementIdentity = authIdentity(from: replacementJSON) else {
+            return false
+        }
+        var matchedNonKindClaims = 0
+        for (key, value) in currentIdentity {
+            guard let replacementValue = replacementIdentity[key] else { continue }
+            guard "\(value)" == "\(replacementValue)" else { return false }
+            if key != "kind" {
+                matchedNonKindClaims += 1
+            }
+        }
+        return matchedNonKindClaims > 0
+    }
+
     private static func parseTopLevelObject(from data: Data) throws -> [String: Any] {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AuthError.decodeFailed

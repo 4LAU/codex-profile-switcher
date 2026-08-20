@@ -544,6 +544,12 @@ struct GeneralTab: View {
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
     @State private var launchAtLoginState = LaunchAtLogin.state
+    /// Nil until `.onAppear` runs the `SMAppService` query. Deliberately not
+    /// seeded with `.disabled`: that renders "Renewal is not scheduled" on the
+    /// first paint for a user whose renewal IS scheduled, and a security-relevant
+    /// background job is the last thing to be wrong about, even briefly.
+    @State private var renewalAgentState: RenewalAgent.State?
+    @State private var lastRenewalRun: LastRenewalRun?
     @State private var migrationSheet: KeychainMigrationSheet?
     @State private var migrationError: String?
     @State private var isReviewingMigration = false
@@ -567,6 +573,26 @@ struct GeneralTab: View {
                     .accessibilityValue(self.launchAtLoginAccessibilityValue)
 
                 self.launchAtLoginDescription
+
+                HStack {
+                    Text("Credential renewal")
+                    Spacer()
+                    Text(self.renewalAgentStatus)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Credential renewal")
+                .accessibilityValue(self.renewalAgentStatus)
+
+                self.renewalAgentDescription
+                if let summary = self.lastRenewalRunSummary {
+                    Text(summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(self.lastRenewalRunIsHealthy ? Color.secondary : Palette.warning)
+                }
+                Text("Renewal refreshes credentials before they're 3 days old. A Mac that stays powered off long enough to miss that window can come back needing a manual sign-in, and nothing local prevents that.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
 
             Divider()
@@ -655,9 +681,15 @@ struct GeneralTab: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { self.refreshLaunchAtLoginState() }
+        .onAppear {
+            self.refreshLaunchAtLoginState()
+            self.refreshRenewalAgentState()
+            self.refreshLastRenewalRun()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             self.refreshLaunchAtLoginState()
+            self.refreshRenewalAgentState()
+            self.refreshLastRenewalRun()
         }
         .onDisappear { self.cancelLegacyKeychainMigrationReview() }
         .sheet(item: self.migrationSheetBinding) { sheet in
@@ -804,8 +836,83 @@ struct GeneralTab: View {
         }
     }
 
+    @ViewBuilder
+    private var renewalAgentDescription: some View {
+        switch self.renewalAgentState {
+        case .enabled:
+            Text("Runs daily in the background, even when the app is closed.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        case .disabled:
+            Text("Renewal is not scheduled.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case .requiresApproval:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Renewal is not scheduled; macOS is waiting for approval.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("Open Login Items") {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+                .buttonStyle(.link)
+            }
+        case .unavailable:
+            Text("The signed app in /Applications owns renewal scheduling. Isolated development builds cannot change it.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private var renewalAgentStatus: String {
+        switch self.renewalAgentState {
+        case .enabled: return "Scheduled"
+        case .disabled, .requiresApproval: return "Not scheduled"
+        case .unavailable: return "Unavailable"
+        case nil: return "Checking\u{2026}"
+        }
+    }
+
+    private static let lastRenewalRunFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
+    /// Whether the most recent renewal run this app observed is a non-failure
+    /// outcome (exit 0 "ok" or 3 "nothing to do"). Mirrors AppDelegate's
+    /// `renewalOkExitStatuses`.
+    private var lastRenewalRunIsHealthy: Bool {
+        guard let status = self.lastRenewalRun?.exitStatus else { return false }
+        return status == 0 || status == 3
+    }
+
+    private var lastRenewalRunSummary: String? {
+        guard let run = self.lastRenewalRun else { return nil }
+        let relative = Self.lastRenewalRunFormatter.localizedString(for: run.timestamp, relativeTo: Date())
+        let outcome: String
+        switch run.exitStatus {
+        case 0: outcome = "ok"
+        case 3: outcome = "nothing to do"
+        case nil: outcome = "could not start"
+        case let status?: outcome = "failed (exit \(status))"
+        }
+        return "Last renewal run \(relative) \u{2014} \(outcome)"
+    }
+
     private func refreshLaunchAtLoginState() {
         self.launchAtLoginState = LaunchAtLogin.state
+    }
+
+    private func refreshRenewalAgentState() {
+        self.renewalAgentState = RenewalAgent.state
+    }
+
+    private func refreshLastRenewalRun() {
+        self.store.reloadLastRenewalRunFromDisk()
+        self.lastRenewalRun = self.store.cache.lastRenewalRun
     }
 
     private func setLaunchAtLogin(_ isOn: Bool) {

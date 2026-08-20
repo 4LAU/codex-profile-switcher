@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- Credential renewal now provides the `codex-profile renew` command, a daily background agent, and a Settings row that reports whether renewal is scheduled.
+
+### Fixed
+
+- Release packaging now builds the app and helper for arm64 and x86_64 by default. Releases since 0.5.16 had built only for arm64 unless an environment variable was exported, so they did not run on Intel Macs.
+
+### Deprecated
+
+- `best-auth --dir` remains supported with its existing behaviour, exit codes, and stdout, and now records a 24-hour lease for the exported credential. It prints a deprecation notice on stderr and points new scripts to `lease begin`; it will be removed in a future release.
+
 ## 0.5.18 -- 2026-08-05
 
 ### Fixed

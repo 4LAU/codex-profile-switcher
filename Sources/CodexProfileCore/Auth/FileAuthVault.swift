@@ -2,13 +2,15 @@ import Foundation
 
 public struct FileAuthVault: AuthVault {
     public let root: URL
+    public let authLockURL: URL
     // Computed rather than stored: `FileManager` is a non-Sendable reference
     // type, and storing it would make this `Sendable` vault non-Sendable.
     // `FileManager.default` is documented thread-safe.
     private var fileManager: FileManager { .default }
 
-    public init(root: URL) {
+    public init(root: URL, authLockURL: URL = AppPaths().authLockURL) {
         self.root = root
+        self.authLockURL = authLockURL
     }
 
     public func listProfileIDs() throws -> [String] {
@@ -37,25 +39,16 @@ public struct FileAuthVault: AuthVault {
         return try Data(contentsOf: url)
     }
 
-    public func saveAuthBlob(_ data: Data, profileID: String) throws {
-        try self.ensureRoot()
+    public func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         let url = try self.authURL(profileID: profileID)
-        let temp = self.root.appendingPathComponent(".\(profileID).json.tmp-\(UUID().uuidString)")
-        try data.write(to: temp, options: .withoutOverwriting)
-        do {
-            try self.fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
-            if self.fileManager.fileExists(atPath: url.path) {
-                _ = try self.fileManager.replaceItemAt(url, withItemAt: temp)
-            } else {
-                try self.fileManager.moveItem(at: temp, to: url)
-            }
-        } catch {
-            try? self.fileManager.removeItem(at: temp)
-            throw error
-        }
+        // Creates the root directory (0700) and writes the temp file at 0600
+        // from the moment it exists, rather than narrowing permissions after a
+        // default-mode write — see AtomicFileWriter for why that window matters
+        // for a credential.
+        try AtomicFileWriter.write(data, to: url, fileManager: self.fileManager)
     }
 
-    public func deleteAuthBlob(profileID: String) throws {
+    public func _deleteAuthBlobUnlocked(profileID: String) throws {
         let url = try self.authURL(profileID: profileID)
         if self.fileManager.fileExists(atPath: url.path) {
             try self.fileManager.removeItem(at: url)
@@ -79,12 +72,5 @@ public struct FileAuthVault: AuthVault {
             throw AuthError.notFound
         }
         return self.root.appendingPathComponent("\(profileID).json")
-    }
-
-    private func ensureRoot() throws {
-        try self.fileManager.createDirectory(
-            at: self.root,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
     }
 }

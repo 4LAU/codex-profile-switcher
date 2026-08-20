@@ -5,7 +5,6 @@ public struct PreparedProfileSwitch {
     public let outgoingProfileID: String?
     public let alreadyActive: Bool
 
-    private let targetData: Data
     private let outgoingLiveData: Data?
     private let vault: AuthVault
     private let paths: AppPaths
@@ -15,7 +14,6 @@ public struct PreparedProfileSwitch {
         profileID: String,
         outgoingProfileID: String?,
         alreadyActive: Bool,
-        targetData: Data,
         outgoingLiveData: Data?,
         vault: AuthVault,
         paths: AppPaths,
@@ -24,7 +22,6 @@ public struct PreparedProfileSwitch {
         self.profileID = profileID
         self.outgoingProfileID = outgoingProfileID
         self.alreadyActive = alreadyActive
-        self.targetData = targetData
         self.outgoingLiveData = outgoingLiveData
         self.vault = vault
         self.paths = paths
@@ -41,12 +38,40 @@ public struct PreparedProfileSwitch {
         var didSaveOutgoingVaultBlob = false
         var preSaveOutgoingVaultBlob: Data?
         if let outgoingProfileID, let outgoingLiveData {
-            preSaveOutgoingVaultBlob = try? self.vault.loadAuthBlob(profileID: outgoingProfileID)
-            try self.vault.saveAuthBlob(outgoingLiveData, profileID: outgoingProfileID)
+            try self.vault.transact {
+                // A read that THROWS is not a read that found nothing. `try?`
+                // used to collapse both into the same nil, and every branch
+                // downstream then guessed: the write-back below would fall
+                // through to `default: canWriteBack = true` and overwrite a
+                // credential a concurrent renewal may have just rotated in,
+                // and a rollback seeing nil would DELETE a real entry. Neither
+                // is recoverable, and nothing here can learn the prior state
+                // after the fact — so abort the switch instead of guessing.
+                do {
+                    preSaveOutgoingVaultBlob = try self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                } catch {
+                    throw ProfileTransactionError.priorVaultReadFailed(outgoingProfileID)
+                }
+                let existingLastRefresh = preSaveOutgoingVaultBlob
+                    .flatMap { (try? AuthBlob.load(from: $0))?.lastRefresh }
+                let outgoingLastRefresh = (try? AuthBlob.load(from: outgoingLiveData))?.lastRefresh
+                let canWriteBack: Bool
+                switch (existingLastRefresh, outgoingLastRefresh) {
+                case let (existing?, outgoing?): canWriteBack = outgoing >= existing
+                case (.some, .none): canWriteBack = false
+                default: canWriteBack = true
+                }
+                if canWriteBack {
+                    try self.vault._saveAuthBlobUnlocked(outgoingLiveData, profileID: outgoingProfileID)
+                }
+            }
             didSaveOutgoingVaultBlob = true
         }
         do {
-            try AtomicFileWriter.write(self.targetData, to: self.paths.liveAuthURL, fileManager: self.fileManager)
+            guard let targetData = try self.vault.loadAuthBlob(profileID: self.profileID) else {
+                throw ProfileTransactionError.missingSavedAuth(self.profileID)
+            }
+            try AtomicFileWriter.write(targetData, to: self.paths.liveAuthURL, fileManager: self.fileManager)
         } catch {
             throw self.rollbackWriteFailure(
                 error,
@@ -79,8 +104,27 @@ public struct PreparedProfileSwitch {
         if didSaveOutgoingVaultBlob, let outgoingProfileID {
             do {
                 if let preSaveOutgoingVaultBlob {
-                    try self.vault.saveAuthBlob(preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
+                    try self.vault.transact {
+                        let currentData = try self.vault.loadAuthBlob(profileID: outgoingProfileID)
+                        let currentLastRefresh = currentData
+                            .flatMap { (try? AuthBlob.load(from: $0))?.lastRefresh }
+                        let restoreLastRefresh = (try? AuthBlob.load(from: preSaveOutgoingVaultBlob))?.lastRefresh
+                        let canRestore: Bool
+                        switch (currentLastRefresh, restoreLastRefresh) {
+                        case let (current?, restore?): canRestore = restore >= current
+                        case (.some, .none): canRestore = false
+                        default: canRestore = true
+                        }
+                        if canRestore {
+                            try self.vault._saveAuthBlobUnlocked(
+                                preSaveOutgoingVaultBlob, profileID: outgoingProfileID)
+                        }
+                    }
                 } else {
+                    // `preSaveOutgoingVaultBlob` is nil only when the pre-switch
+                    // read SUCCEEDED and found no entry — a read that threw
+                    // aborts the switch before this point — so deleting here
+                    // cannot destroy a credential we merely failed to read.
                     try self.vault.deleteAuthBlob(profileID: outgoingProfileID)
                 }
             } catch {
@@ -196,7 +240,7 @@ public struct ProfileTransactionService {
 
     public func prepareSwitch(to profileID: String) throws -> PreparedProfileSwitch {
         try ProfileValidator.validate(profileID)
-        guard var targetData = try self.vault.loadAuthBlob(profileID: profileID) else {
+        guard try self.vault.loadAuthBlob(profileID: profileID) != nil else {
             throw ProfileTransactionError.missingSavedAuth(profileID)
         }
 
@@ -204,16 +248,12 @@ public struct ProfileTransactionService {
 
         let liveData = try self.readLiveAuthIfPresent()
         let outgoingProfileID = try liveData.flatMap { try self.classifyOutgoingProfile(liveData: $0) }
-        if outgoingProfileID == profileID, let liveData {
-            targetData = liveData
-        }
         let alreadyActive = outgoingProfileID == profileID && self.isCodexDesktopRunning()
 
         return PreparedProfileSwitch(
             profileID: profileID,
             outgoingProfileID: outgoingProfileID,
             alreadyActive: alreadyActive,
-            targetData: targetData,
             outgoingLiveData: liveData,
             vault: self.vault,
             paths: self.paths,
@@ -301,6 +341,35 @@ public struct ProfileConfigStore {
         }
     }
 
+    /// Refreshes the pending-migration integrity checkpoint for profiles whose
+    /// destination copy was just legitimately rewritten. The checkpoint records
+    /// the exact bytes copied during migration; a credential renewal rotates
+    /// those bytes, which would otherwise leave a permanently stale checkpoint
+    /// and block completing that profile's migration forever.
+    ///
+    /// Deliberately narrow: it only updates profiles that are already in
+    /// `.copiedCleanupPending` and already carry a checkpoint. It never creates
+    /// a checkpoint, so it cannot manufacture provenance for a copy migration
+    /// did not make.
+    public func refreshPendingMigrationFingerprints(_ fingerprints: [String: String]) throws {
+        guard !fingerprints.isEmpty,
+              var config = self.loadConfig(),
+              var pending = config.authMigrationPendingFingerprints else { return }
+        var changed = false
+        for (profileID, fingerprint) in fingerprints
+        where config.authMigrationStates?[profileID] == .copiedCleanupPending
+            && pending[profileID] != nil
+            && pending[profileID] != fingerprint {
+            pending[profileID] = fingerprint
+            changed = true
+        }
+        guard changed else { return }
+        config.authMigrationPendingFingerprints = pending
+        try AtomicFileWriter.ensurePrivateDirectory(self.paths.switcherHome, fileManager: self.fileManager)
+        let data = try JSONEncoder.codexProfilePrettySorted.encode(config)
+        try AtomicFileWriter.write(data, to: self.paths.configURL, fileManager: self.fileManager)
+    }
+
     public func saveActiveProfileIfMissing(_ profileID: String) throws {
         if self.loadConfig()?.activeProfile == nil {
             try self.saveActiveProfile(profileID)
@@ -346,6 +415,7 @@ public enum ProfileTransactionError: LocalizedError {
     case unreadableSnapshot(path: String, error: Error)
     case unmanagedLiveAuth
     case ambiguousLiveAuth
+    case priorVaultReadFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -359,6 +429,8 @@ public enum ProfileTransactionError: LocalizedError {
             return "Live auth does not match any saved profile. Refusing to overwrite ~/.codex/auth.json until the current account is saved in the switcher."
         case .ambiguousLiveAuth:
             return "Live auth matches multiple saved profiles and config.activeProfile is not one of them."
+        case .priorVaultReadFailed(let profileID):
+            return "Could not read the saved auth currently on file for profile '\(profileID)' before switching away from it. Refusing to overwrite it until its prior state is known."
         }
     }
 }

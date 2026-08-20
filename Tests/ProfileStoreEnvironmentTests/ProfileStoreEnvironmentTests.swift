@@ -17,10 +17,10 @@ enum ProfileStoreEnvironmentTestFailure: Error, CustomStringConvertible {
 private struct FailingSaveAuthVault: AuthVault {
     func listProfileIDs() throws -> [String] { [] }
     func loadAuthBlob(profileID: String) throws -> Data? { nil }
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         throw ProfileStoreEnvironmentTestFailure.failed("intentional save failure")
     }
-    func deleteAuthBlob(profileID: String) throws {}
+    func _deleteAuthBlobUnlocked(profileID: String) throws {}
     func hasAuthBlob(profileID: String) throws -> Bool { false }
 }
 
@@ -41,11 +41,11 @@ private final class MigrationTestVault: AuthVault, KeychainMigrationDestination,
         self.blobs[profileID]
     }
 
-    func saveAuthBlob(_ data: Data, profileID: String) throws {
+    func _saveAuthBlobUnlocked(_ data: Data, profileID: String) throws {
         self.blobs[profileID] = data
     }
 
-    func deleteAuthBlob(profileID: String) throws {
+    func _deleteAuthBlobUnlocked(profileID: String) throws {
         self.deleteCount += 1
         self.blobs.removeValue(forKey: profileID)
     }
@@ -68,6 +68,13 @@ private final class MigrationTestVault: AuthVault, KeychainMigrationDestination,
         }
         self.blobs[profileID] = data
         return .created
+    }
+
+    func _createAuthBlobIfAbsentForMigrationUnlocked(
+        _ data: Data,
+        profileID: String
+    ) throws -> KeychainMigrationCreateResult {
+        try self.createAuthBlobIfAbsentForMigration(data, profileID: profileID)
     }
 }
 
@@ -240,7 +247,9 @@ final class ProfileStoreEnvironmentTests {
 
         // A file-backed vault stands in for the unsigned dev build's file vault.
         _ = ProfileStore(
-            authVault: FileAuthVault(root: vaultRoot),
+            authVault: FileAuthVault(
+                root: vaultRoot,
+                authLockURL: AppPaths(environment: ["CODEX_PROFILE_HOME": home.path]).authLockURL),
             environment: ["CODEX_PROFILE_HOME": home.path])
 
         let configURL = home.appendingPathComponent(".codex-switcher/config.json")
@@ -275,7 +284,9 @@ final class ProfileStoreEnvironmentTests {
 
         // Two profiles with saved auth so both are discovered. Profile "1" is the
         // default active (live) profile; we clear non-live profile "2".
-        let vault = FileAuthVault(root: vaultRoot)
+        let vault = FileAuthVault(
+            root: vaultRoot,
+            authLockURL: AppPaths(environment: ["CODEX_PROFILE_HOME": home.path]).authLockURL)
         try vault.saveAuthBlob(Data(#"{"OPENAI_API_KEY":"sk-test-profile-1-1111111111"}"#.utf8), profileID: "1")
         try vault.saveAuthBlob(Data(#"{"OPENAI_API_KEY":"sk-test-profile-2-2222222222"}"#.utf8), profileID: "2")
 
@@ -528,9 +539,17 @@ final class ProfileStoreEnvironmentTests {
             keychainMigrationCoordinatorFactory: migrationCoordinatorFactory(
                 source: source,
                 counter: MigrationFactoryCounter()))
-        try expectMigrationError(.destinationReadbackFailed) {
-            _ = try replacementStore.reviewLegacyKeychainMigration()
-        }
+        // A destination copy that no longer matches its checkpoint is expected once a
+        // credential renewal legitimately rewrites the item, so review no longer aborts.
+        // The profile is excluded from completion and reported instead, which preserves
+        // the property this test is named for: completion still requires the recorded copy.
+        let replacementPreview = try replacementStore.reviewLegacyKeychainMigration()
+        try envExpect(replacementPreview.pendingCompletionCount == 0,
+                      "A changed destination copy was offered for completion")
+        try envExpect(
+            replacementPreview.pendingCompletionVerificationFailures["1"] == .stalePendingCompletionCheckpoint,
+            "A changed destination copy was dropped without being reported")
+        replacementStore.cancelLegacyKeychainMigrationReview(replacementPreview)
 
         try vault.saveAuthBlob(auth, profileID: "1")
         let store = ProfileStore(

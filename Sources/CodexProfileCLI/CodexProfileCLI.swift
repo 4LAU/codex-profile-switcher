@@ -37,6 +37,8 @@ private enum ExitCode {
     static let identityMismatch: Int32 = 5
     static let keychainInteractionRequired: Int32 = 6
     static let watchdogTimeout: Int32 = 7
+    static let renewalRejected: Int32 = 8
+    static let endpointUnreachable: Int32 = 9
     // 1 = generic failure (default in main()).
 }
 
@@ -74,6 +76,7 @@ enum CodexProfileCLI {
             case "exec": try self.commandExec(args)
             case "mark-exhausted": try self.commandMarkExhausted(args)
             case "import-auth": try self.commandImportAuth(args)
+            case "renew": try self.commandRenew(args)
             case "lease": try self.commandLease(args)
             case "help", "-h", "--help": self.usage()
             default: throw CLIError.message("Unknown command '\(command)'. See \(self.program) help.")
@@ -104,6 +107,7 @@ enum CodexProfileCLI {
           \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]
           \(self.program) exec [--max-attempts <n>] [--exclude <id1,id2,...>] [--timeout <seconds>] -- <command> [args...]
           \(self.program) import-auth --dir <path> --profile <id> [--non-interactive] [--timeout <seconds>]
+          \(self.program) renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]
           \(self.program) lease begin [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
           \(self.program) lease swap <token> [--exclude <id1,id2,...>] [--ttl <seconds>] [--timeout <seconds>] [--json] [--non-interactive]
           \(self.program) lease end <token> [--profile <id>] [--timeout <seconds>] [--non-interactive]
@@ -583,6 +587,15 @@ enum CodexProfileCLI {
         guard let dir = options.dir else {
             throw CLIError.message("Usage: \(self.program) best-auth --dir <path> [--exclude <id1,id2,...>] [--json] [--non-interactive] [--timeout <seconds>]")
         }
+        fputs("Warning: best-auth --dir is deprecated; use lease begin instead; it will be removed in a future release.\n", stderr)
+
+        // Opportunistic cleanup of expired homes — same reclaim path `lease
+        // begin` runs. `best-auth --dir` has no `lease end` counterpart, so its
+        // 24h reservation below is only ever released by gc; without this call
+        // here too, a caller who only ever uses `best-auth` (never `lease
+        // begin`) could leave that reservation permanently unreclaimed.
+        // Best-effort; never fail best-auth.
+        try? self.commandLeaseGC([])
 
         // Non-interactive whenever stdin is not a TTY or the caller asked.
         let interactive = self.stdinIsTTY && !options.nonInteractive
@@ -594,10 +607,18 @@ enum CodexProfileCLI {
             diagnostic: "best-auth timed out after \(Int(options.timeout))s; the command was unable to complete")
 
         let dirURL = URL(fileURLWithPath: dir).resolvingSymlinksInPath().standardizedFileURL
+        let existingToken = self.loadCache().leases.values
+            .first(where: { $0.home == dirURL.path })?.token
+        let reservation = LeaseReservation(
+            token: existingToken ?? UUID().uuidString,
+            home: dirURL.path,
+            expiresAt: Date().addingTimeInterval(24 * 60 * 60),
+            createdAt: Date())
         let outcome = try self.performBestAuth(
             dirURL: dirURL,
             excludeIDs: self.parseExcludeIDs(options.excludeCSV),
-            interactive: interactive)
+            interactive: interactive,
+            reservation: reservation)
 
         if options.json {
             let report = self.makeBestAuthReport(
@@ -622,6 +643,7 @@ enum CodexProfileCLI {
 
     private struct BestAuthOutcome {
         let result: ProfileSelector.Result
+        let reservationProfileIDs: [String]
         let candidates: [ProfileCandidate]
         let cache: UsageCache
         let fetchedAny: Bool
@@ -635,7 +657,8 @@ enum CodexProfileCLI {
     private static func performBestAuth(
         dirURL: URL,
         excludeIDs: Set<String>,
-        interactive: Bool
+        interactive: Bool,
+        reservation: LeaseReservation? = nil
     ) throws -> BestAuthOutcome {
         let bestAuthVault = self.vault
 
@@ -672,7 +695,8 @@ enum CodexProfileCLI {
             cache: cache,
             vault: bestAuthVault,
             readBound: readBound,
-            interactive: interactive)
+            interactive: interactive,
+            reservationToken: reservation?.token)
         cache = fetchResult.cache
         self.persistCacheMerge(cache)
 
@@ -689,48 +713,105 @@ enum CodexProfileCLI {
         }
 
         let now = Date()
-        let candidates = ProfileSelector.candidates(
-            profiles: eligibleProfiles,
-            cache: cache,
-            excludeIDs: excludeIDs,
-            now: now)
-
-        guard let result = ProfileSelector.selectBest(from: candidates) else {
-            fputs("No eligible profiles available\n", stderr)
-            throw CLIError.exitStatus(ExitCode.noEligibleProfile)
+        var selectionExclusions = excludeIDs
+        let allowedReservationToken = reservation?.token
+        for (profileID, lease) in self.loadCache().leases
+            where (lease.isActive(now: now) || !lease.home.isEmpty)
+                && lease.token != allowedReservationToken {
+            selectionExclusions.insert(profileID)
         }
+        var candidates: [ProfileCandidate] = []
+        var result: ProfileSelector.Result
+        var authData: Data?
+        var reservationProfileIDs: [String]
+        var didClaimReservation = false
+        while true {
+            candidates = ProfileSelector.candidates(
+                profiles: eligibleProfiles,
+                cache: cache,
+                excludeIDs: selectionExclusions,
+                now: now)
 
-        let authData: Data?
-        do {
-            switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
-            case .data(let data):
-                authData = data
-            case .interactionRequired:
-                self.exitKeychainInteractionRequired()
+            guard let selected = ProfileSelector.selectBest(from: candidates) else {
+                fputs("No eligible profiles available\n", stderr)
+                throw CLIError.exitStatus(ExitCode.noEligibleProfile)
             }
-        } catch {
-            if self.isKeychainInteractionRequired(error) {
-                self.exitKeychainInteractionRequired()
+            result = selected
+
+            reservationProfileIDs = fetchResult.credentialGroups.values.first {
+                $0.contains(result.profileID)
+            } ?? [result.profileID]
+
+            do {
+                if let reservation {
+                    try self.claimLease(profileIDs: reservationProfileIDs, reservation: reservation)
+                    didClaimReservation = true
+                }
+
+                // The credential read must happen AFTER the lease is claimed,
+                // not before: `renew` is now a daily concurrent writer to this
+                // exact blob, and a renewal landing in the gap between an
+                // earlier read and the claim would export the just-spent
+                // predecessor token into the lease home instead of the live
+                // successor.
+                do {
+                    switch try self.loadAuthBlobBounded(bestAuthVault, profileID: result.profileID, bound: readBound) {
+                    case .data(let data):
+                        authData = data
+                    case .interactionRequired:
+                        // exitKeychainInteractionRequired() calls exit() and
+                        // never reaches the catch below, so the lease just
+                        // claimed above would otherwise be stranded.
+                        if didClaimReservation, let reservation {
+                            try? self.removeLeases(
+                                profileIDs: reservationProfileIDs, expectedToken: reservation.token)
+                        }
+                        self.exitKeychainInteractionRequired()
+                    }
+                } catch {
+                    if self.isKeychainInteractionRequired(error) {
+                        if didClaimReservation, let reservation {
+                            try? self.removeLeases(
+                                profileIDs: reservationProfileIDs, expectedToken: reservation.token)
+                        }
+                        self.exitKeychainInteractionRequired()
+                    }
+                    throw error
+                }
+                guard let authData else {
+                    fputs("No auth data for profile '\(result.profileID)'\n", stderr)
+                    throw CLIError.exitStatus(1)
+                }
+
+                try self.ensurePrivateDir(dirURL)
+                try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
+
+                let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
+                let destination = dirURL.appendingPathComponent("config.toml")
+                try? self.fileManager.removeItem(at: destination)
+                if self.fileManager.fileExists(atPath: liveConfig.path) {
+                    try self.fileManager.copyItem(at: liveConfig, to: destination)
+                }
+                break
+            } catch is LeaseClaimLost {
+                didClaimReservation = false
+                // Exclude the whole credential group, not just the profile that
+                // lost. The holder may be a sibling that selection would never
+                // have picked, in which case re-selecting would choose the same
+                // profile, claim the same group and lose again, forever.
+                selectionExclusions.formUnion(reservationProfileIDs)
+            } catch {
+                if didClaimReservation, let reservation {
+                    try? self.removeLeases(
+                        profileIDs: reservationProfileIDs, expectedToken: reservation.token)
+                }
+                throw error
             }
-            throw error
-        }
-        guard let authData else {
-            fputs("No auth data for profile '\(result.profileID)'\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
-
-        try self.ensurePrivateDir(dirURL)
-        try AtomicFileWriter.write(authData, to: dirURL.appendingPathComponent("auth.json"))
-
-        let liveConfig = self.paths.liveCodexHome.appendingPathComponent("config.toml")
-        let destination = dirURL.appendingPathComponent("config.toml")
-        try? self.fileManager.removeItem(at: destination)
-        if self.fileManager.fileExists(atPath: liveConfig.path) {
-            try self.fileManager.copyItem(at: liveConfig, to: destination)
         }
 
         return BestAuthOutcome(
             result: result,
+            reservationProfileIDs: reservationProfileIDs,
             candidates: candidates,
             cache: cache,
             fetchedAny: fetchResult.fetchedAny,
@@ -740,8 +821,14 @@ enum CodexProfileCLI {
     private struct SelfFetchResult {
         var cache: UsageCache
         var fetchedAny: Bool
+        var credentialGroups: [String: [String]]
         /// Description of the last per-profile fetch error, if any failed.
         var lastFetchError: String?
+    }
+
+    private struct UsageFetchGroup: Sendable {
+        let profileIDs: [String]
+        let authData: Data
     }
 
     /// Fetches live usage for each eligible profile (bounded concurrency 3) and
@@ -760,9 +847,12 @@ enum CodexProfileCLI {
         cache: UsageCache,
         vault: AuthVault,
         readBound: TimeInterval?,
-        interactive: Bool
+        interactive: Bool,
+        reservationToken: String?
     ) -> SelfFetchResult {
-        guard !profiles.isEmpty else { return SelfFetchResult(cache: cache, fetchedAny: false) }
+        guard !profiles.isEmpty else {
+            return SelfFetchResult(cache: cache, fetchedAny: false, credentialGroups: [:], lastFetchError: nil)
+        }
 
         let configURL = self.paths.liveCodexHome.appendingPathComponent("config.toml")
         let liveAuthURL = self.paths.liveAuthURL
@@ -775,12 +865,15 @@ enum CodexProfileCLI {
             vault: vault,
             bound: readBound)
 
-        let fetchOutcome = self.runBlocking { () -> (snapshots: [String: UsageSnapshot], lastError: String?) in
-            await withTaskGroup(of: (String, UsageSnapshot?, String?).self) { group in
-                var pending = profiles[...]
+        let fetchOutcome = self.runBlocking {
+            () -> (snapshots: [String: UsageSnapshot], lastError: String?, credentialGroups: [String: [String]]) in
+            await withTaskGroup(of: ([String], UsageSnapshot?, String?).self) { group in
                 var inFlight = 0
                 var results: [String: UsageSnapshot] = [:]
                 var lastError: String?
+
+                var groupedProfiles: [String: [String]] = [:]
+                var groupedData: [String: Data] = [:]
 
                 func authData(for id: String) -> Data? {
                     if id == activeProfile,
@@ -794,36 +887,78 @@ enum CodexProfileCLI {
                     }
                 }
 
+                for profile in profiles {
+                    guard let data = authData(for: profile.id) else { continue }
+                    let key = AuthBlob.identityFingerprint(from: data) ?? "profile:\(profile.id)"
+                    groupedProfiles[key, default: []].append(profile.id)
+                    groupedData[key] = data
+                }
+                let groups = groupedProfiles.compactMap { key, profileIDs in
+                    groupedData[key].map { UsageFetchGroup(profileIDs: profileIDs, authData: $0) }
+                }
+                var pending = groups[...]
+
                 func enqueueNext() {
-                    guard let profile = pending.popFirst() else { return }
+                    guard let fetchGroup = pending.popFirst() else { return }
                     inFlight += 1
-                    let id = profile.id
-                    let data = authData(for: id)
                     group.addTask {
-                        guard let data else { return (id, nil, nil) }
+                        var claimedReservation: LeaseReservation?
+                        let leases = self.loadCache().leases
+                        // Already ours only if the caller's token is actually
+                        // recorded on this group; a token that is on no profile
+                        // yet reserves nothing, and treating it as held would
+                        // leave every exec and first-run --dir unreserved.
+                        let alreadyReserved = reservationToken.map { token in
+                            fetchGroup.profileIDs.contains { leases[$0]?.token == token }
+                                && fetchGroup.profileIDs.allSatisfy { profileID in
+                                    leases[profileID]?.token == nil || leases[profileID]?.token == token
+                                }
+                        } ?? false
+                        if !alreadyReserved {
+                            let reservation = LeaseReservation(
+                                token: UUID().uuidString,
+                                home: "",
+                                expiresAt: Date().addingTimeInterval(5 * 60),
+                                createdAt: Date())
+                            do {
+                                try self.claimLease(profileIDs: fetchGroup.profileIDs, reservation: reservation)
+                                claimedReservation = reservation
+                            } catch {
+                                return (fetchGroup.profileIDs, nil, error.localizedDescription)
+                            }
+                        }
+                        defer {
+                            if let claimedReservation {
+                                try? self.removeLeases(
+                                    profileIDs: fetchGroup.profileIDs,
+                                    expectedToken: claimedReservation.token)
+                            }
+                        }
                         do {
                             let snapshot = try await CLIUsageFetcher.fetch(
-                                profileId: id,
-                                authData: data,
+                                profileId: fetchGroup.profileIDs[0],
+                                authData: fetchGroup.authData,
                                 codexConfigURL: configURL,
                                 clientVersion: version)
-                            return (id, snapshot, nil)
+                            return (fetchGroup.profileIDs, snapshot, nil)
                         } catch {
-                            return (id, nil, error.localizedDescription)
+                            return (fetchGroup.profileIDs, nil, error.localizedDescription)
                         }
                     }
                 }
 
-                for _ in 0 ..< min(3, profiles.count) { enqueueNext() }
+                for _ in 0 ..< min(3, groups.count) { enqueueNext() }
                 while inFlight > 0 {
-                    if let (id, snapshot, fetchError) = await group.next() {
+                    if let (profileIDs, snapshot, fetchError) = await group.next() {
                         inFlight -= 1
-                        if let snapshot { results[id] = snapshot }
+                        if let snapshot {
+                            for profileID in profileIDs { results[profileID] = snapshot }
+                        }
                         if let fetchError { lastError = fetchError }
                         enqueueNext()
                     }
                 }
-                return (results, lastError)
+                return (results, lastError, groupedProfiles)
             }
         }
 
@@ -834,6 +969,7 @@ enum CodexProfileCLI {
         return SelfFetchResult(
             cache: merged,
             fetchedAny: !fetchOutcome.snapshots.isEmpty,
+            credentialGroups: fetchOutcome.credentialGroups,
             lastFetchError: fetchOutcome.lastError)
     }
 
@@ -1066,38 +1202,1002 @@ enum CodexProfileCLI {
             fputs("No auth data found at \(authURL.path)\n", stderr)
             throw CLIError.exitStatus(1)
         }
-        guard let existingData = try vault.loadAuthBlob(profileID: profile) else {
-            fputs("No existing auth data for profile '\(profile)'\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
-        guard updatedData != existingData else { return }
-        guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
-            fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
-        }
+        try vault.transact {
+            guard let existingData = try vault.loadAuthBlob(profileID: profile) else {
+                fputs("No existing auth data for profile '\(profile)'\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
+            guard updatedData != existingData else { return }
+            guard AuthBlob.isPlausibleAuthBlob(updatedData) else {
+                fputs("Warning: temp auth.json failed validation - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
 
+            let existingCredentials: AuthCredentials
+            let updatedCredentials: AuthCredentials
+            do {
+                existingCredentials = try AuthBlob.load(from: existingData)
+                updatedCredentials = try AuthBlob.load(from: updatedData)
+            } catch {
+                fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
+
+            let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
+            let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
+            guard let existingFingerprint, let updatedFingerprint else {
+                fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(1)
+            }
+            if existingFingerprint != updatedFingerprint {
+                // Identity mismatch is the one case external rotation tooling must
+                // distinguish: the refreshed credential belongs to a different
+                // account. Exit 5 is reserved exclusively for this.
+                fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
+                throw CLIError.exitStatus(ExitCode.identityMismatch)
+            }
+
+            let canWriteBack: Bool
+            switch (existingCredentials.lastRefresh, updatedCredentials.lastRefresh) {
+            case let (existing?, updated?): canWriteBack = updated >= existing
+            case (.some, .none): canWriteBack = false
+            default: canWriteBack = true
+            }
+            guard canWriteBack else { return }
+
+            try vault._saveAuthBlobUnlocked(updatedData, profileID: profile)
+        }
+    }
+
+    private struct RenewalOptions {
+        var profile: String?
+        var force = false
+        var dryRun = false
+        var json = false
+        var timeout: TimeInterval = 120
+    }
+
+    private struct RenewalProfile {
+        let id: String
+        let data: Data?
+        let credentials: AuthCredentials?
+    }
+
+    private struct RenewalGroup {
+        let refreshToken: String
+        let profileIDs: [String]
+    }
+
+    private struct RenewalRecord: Codable {
+        let id: String
+        let action: RenewalAction
+        let reason: String
+        let ageDays: Double?
+        let credential: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, action, reason
+            case ageDays = "age_days"
+            case credential
+        }
+    }
+
+    private struct RenewalReport: Codable {
+        let records: [RenewalRecord]
+        let requests: Int
+    }
+
+    private struct RenewalStash: Codable {
+        let blob: Data
+        let predecessorDigest: String
+
+        enum CodingKeys: String, CodingKey {
+            case blob
+            case predecessorDigest = "predecessor_digest"
+        }
+    }
+
+    private struct RenewalRequestResult: @unchecked Sendable {
+        let credentials: AuthCredentials?
+        let error: TokenRenewalError?
+    }
+
+    private struct RenewalInput: @unchecked Sendable {
+        let credentials: AuthCredentials
+    }
+
+    private struct RenewalReservationLost: Error {}
+    private struct RenewalCredentialChanged: Error {}
+    private struct RenewalIdentityMismatch: Error {}
+
+    private static func parseRenewalOptions(_ args: [String]) throws -> RenewalOptions {
+        var options = RenewalOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--profile":
+                guard i + 1 < args.count else {
+                    throw CLIError.message("--profile requires a profile ID")
+                }
+                i += 1
+                options.profile = args[i]
+            case "--force":
+                options.force = true
+            case "--dry-run":
+                options.dryRun = true
+            case "--json":
+                options.json = true
+            case "--timeout":
+                guard i + 1 < args.count,
+                      let value = Double(args[i + 1]),
+                      value.isFinite && value > 0 && value <= 3600 else {
+                    throw CLIError.message("--timeout requires a positive number of seconds (max 3600)")
+                }
+                i += 1
+                options.timeout = value
+            default:
+                throw CLIError.message(
+                    "Unknown argument: \(args[i]). Usage: \(self.program) renew [--profile <id>] [--force] [--dry-run] [--json] [--timeout <seconds>]")
+            }
+            i += 1
+        }
+        if let profile = options.profile {
+            try self.validateProfile(profile)
+        }
+        return options
+    }
+
+    private static var renewalStashRoot: URL {
+        self.paths.switcherHome.appendingPathComponent("renew-stash", isDirectory: true)
+    }
+
+    private static func renewalCredentialDigest(_ refreshToken: String) -> String {
+        SHA256.hash(data: Data(refreshToken.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func renewalCredentialFingerprint(_ refreshToken: String) -> String {
+        String(self.renewalCredentialDigest(refreshToken).prefix(12))
+    }
+
+    private static func renewalStashURL(profileID: String) -> URL {
+        self.renewalStashRoot.appendingPathComponent(profileID + ".json")
+    }
+
+    /// Stash files are keyed by profile ID and outlive the profile they were
+    /// written for: removing a profile from both the config and the vault
+    /// leaves its stash on disk forever, since nothing else ever visits
+    /// `renewalStashRoot` for a profile that is no longer in either place.
+    /// A stash holds a rotated credential in cleartext, so this durable
+    /// leftover is a real exposure, not just clutter — sweep it here where
+    /// `commandRenew` already has the authoritative set of live profile IDs.
+    private static func sweepOrphanedRenewalStashes(knownProfileIDs: Set<String>) {
+        guard let entries = try? self.fileManager.contentsOfDirectory(
+            at: self.renewalStashRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]) else { return }
+        for entry in entries {
+            guard entry.pathExtension == "json" else { continue }
+            let profileID = entry.deletingPathExtension().lastPathComponent
+            guard !knownProfileIDs.contains(profileID) else { continue }
+            try? self.fileManager.removeItem(at: entry)
+        }
+    }
+
+    private static func renewalRecord(
+        _ profile: RenewalProfile,
+        action: RenewalAction,
+        reason: String,
+        now: Date
+    ) -> RenewalRecord {
+        let ageDays = profile.credentials?.lastRefresh.map {
+            now.timeIntervalSince($0) / (24 * 60 * 60)
+        }
+        let credential = profile.credentials.flatMap {
+            $0.refreshToken.isEmpty ? nil : self.renewalCredentialFingerprint($0.refreshToken)
+        }
+        return RenewalRecord(
+            id: profile.id,
+            action: action,
+            reason: reason,
+            ageDays: ageDays,
+            credential: credential)
+    }
+
+    /// Precedence for `commandRenew`'s terminal exit status when a run
+    /// produces more than one candidate over its groups: the highest rank
+    /// here wins, and `raiseTerminalStatus` below only ever replaces the
+    /// current status with a STRICTLY higher-ranked one, so a later group's
+    /// status can never silently downgrade an earlier one.
+    ///
+    /// - `identityMismatch` (5) ranks highest: it signals a possible account
+    ///   mix-up, which must never be masked by a status that merely blocks
+    ///   completion or classifies a routine failure.
+    /// - `keychainInteractionRequired` (6) ranks next: it means the run
+    ///   could not even attempt the remaining work without a manual gesture.
+    /// - `renewalRejected` (8) ranks above `endpointUnreachable` (9): a dead
+    ///   refresh token is actionable (re-login) where "unreachable" is more
+    ///   likely transient.
+    /// - The generic failure code (1) — credential changed, reservation
+    ///   lost, an empty/invalid renewal response, or any other unclassified
+    ///   per-group error — ranks lowest among the non-success statuses:
+    ///   these are local races or malformed responses a retry alone can
+    ///   resolve.
+    private static func exitStatusRank(_ status: Int32) -> Int {
+        switch status {
+        case ExitCode.success: return 0
+        case ExitCode.identityMismatch: return 5
+        case ExitCode.keychainInteractionRequired: return 4
+        case ExitCode.renewalRejected: return 3
+        case ExitCode.endpointUnreachable: return 2
+        default: return 1
+        }
+    }
+
+    private static func raiseTerminalStatus(_ current: inout Int32, to candidate: Int32) {
+        if self.exitStatusRank(candidate) > self.exitStatusRank(current) {
+            current = candidate
+        }
+    }
+
+    /// Runs one group through `renewGroup` and merges the outcome (or a
+    /// thrown failure) into the run's shared state. Pulled out of
+    /// `commandRenew`'s main loop so the FIX 4b in-run recovery pass can
+    /// reuse the exact same catch ladder on a retry instead of duplicating it.
+    private static func processRenewalGroup(
+        _ group: RenewalGroup,
+        profiles: [String: RenewalProfile],
+        options: RenewalOptions,
+        now: Date,
+        requestCount: inout Int,
+        records: inout [String: RenewalRecord],
+        sawRejected: inout Bool,
+        sawUnreachable: inout Bool,
+        sawInvalid: inout Bool,
+        terminalStatus: inout Int32
+    ) {
         do {
-            _ = try AuthBlob.load(from: updatedData)
+            let outcome = try self.renewGroup(
+                group,
+                profiles: profiles,
+                options: options,
+                now: now,
+                requestCount: &requestCount)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: outcome.action,
+                        reason: outcome.reason,
+                        now: now)
+                }
+            }
+            if outcome.action == .rejected {
+                sawRejected = true
+            } else if outcome.action == .unreachable {
+                sawUnreachable = true
+            } else if outcome.action == .invalid {
+                sawInvalid = true
+            }
+        } catch is RenewalIdentityMismatch {
+            self.raiseTerminalStatus(&terminalStatus, to: ExitCode.identityMismatch)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: .skipped,
+                        reason: "identity_mismatch",
+                        now: now)
+                }
+            }
+        } catch is RenewalCredentialChanged {
+            self.raiseTerminalStatus(&terminalStatus, to: 1)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: .skipped,
+                        reason: "credential_changed",
+                        now: now)
+                }
+            }
+        } catch is RenewalReservationLost {
+            self.raiseTerminalStatus(&terminalStatus, to: 1)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: .skipped,
+                        reason: "reservation_lost",
+                        now: now)
+                }
+            }
+        } catch CLIError.exitStatus(let status) where status == ExitCode.keychainInteractionRequired {
+            self.raiseTerminalStatus(&terminalStatus, to: status)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: .skipped,
+                        reason: "keychain_interaction_required",
+                        now: now)
+                }
+            }
         } catch {
-            fputs("Warning: temp auth.json has invalid token structure - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
+            // A group failing here (an unclassified error out of
+            // `renewGroup` — e.g. a filesystem or encoding failure) must
+            // not abort the whole run: the remaining groups still need
+            // their own outcomes, and this run still needs to reach
+            // `reconcileLiveAuth`, `recordRenewalStates` (the only place
+            // a rejection is persisted when the app is closed), and the
+            // final report below. Record the failure against this
+            // group's profiles and move on to the next group instead of
+            // rethrowing.
+            self.raiseTerminalStatus(&terminalStatus, to: 1)
+            let reason = "error: "
+                + TokenRenewal.sanitizedExternalMessage(error.localizedDescription)
+            for profileID in group.profileIDs {
+                if let profile = profiles[profileID] {
+                    records[profileID] = self.renewalRecord(
+                        profile,
+                        action: .skipped,
+                        reason: reason,
+                        now: now)
+                }
+            }
+        }
+    }
+
+    private static func commandRenew(_ args: [String]) throws {
+        let options = try self.parseRenewalOptions(args)
+        let now = Date()
+        let disarmWatchdog = self.armWatchdog(
+            seconds: options.timeout,
+            diagnostic: "renew timed out after \(Int(options.timeout))s")
+        defer { disarmWatchdog() }
+
+        // Reclaim home-less expired leases (e.g. left behind by a killed or
+        // timed-out `renew`) before evaluating groups: the `defer` that would
+        // release a lease this command reserves never fires on the watchdog
+        // path (armWatchdog calls exit()), and `lease gc` otherwise only runs
+        // opportunistically from `lease begin` — so without this, a dead lease
+        // blocks every future renew, including --force, until it happens to be
+        // gc'd elsewhere. Deliberately narrower than `commandLeaseGC`: a lease
+        // that still carries a home may hold the only copy of a refreshed
+        // credential, and reserveRenewal (below) correctly keeps treating such
+        // a lease as reserved rather than due for renewal.
+        // README.md promises --dry-run writes nothing; both reclaim and sweep
+        // delete files and rewrite cache.json, so they must not run under it.
+        if !options.dryRun {
+            self.reclaimHomelessExpiredLeases()
         }
 
-        let existingFingerprint = AuthBlob.identityFingerprint(from: existingData)
-        let updatedFingerprint = AuthBlob.identityFingerprint(from: updatedData)
-        guard let existingFingerprint, let updatedFingerprint else {
-            fputs("Warning: temp auth.json identity could not be verified - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(1)
+        let configuredIDs = self.configStore.loadConfig()?.profiles.map(\.id) ?? []
+        let storedIDs = try self.vault.listProfileIDs().filter(ProfileValidator.isValid)
+        var allIDs = Set(configuredIDs.filter(ProfileValidator.isValid))
+        allIDs.formUnion(storedIDs)
+        if !options.dryRun {
+            self.sweepOrphanedRenewalStashes(knownProfileIDs: allIDs)
         }
-        if existingFingerprint != updatedFingerprint {
-            // Identity mismatch is the one case external rotation tooling must
-            // distinguish: the refreshed credential belongs to a different
-            // account. Exit 5 is reserved exclusively for this.
-            fputs("Warning: temp auth.json has different identity - preserving existing credential\n", stderr)
-            throw CLIError.exitStatus(ExitCode.identityMismatch)
+        if let selected = options.profile, !allIDs.contains(selected) {
+            throw CLIError.exitStatus(ExitCode.noEligibleProfile)
         }
 
-        try vault.saveAuthBlob(updatedData, profileID: profile)
+        let readBound = min(options.timeout, 5)
+        var profiles: [String: RenewalProfile] = [:]
+        for id in allIDs.sorted() {
+            do {
+                let outcome = try self.loadAuthBlobBounded(
+                    self.vault, profileID: id, bound: readBound)
+                switch outcome {
+                case .data(let data):
+                    profiles[id] = RenewalProfile(
+                        id: id,
+                        data: data,
+                        credentials: data.flatMap { try? AuthBlob.load(from: $0) })
+                case .interactionRequired:
+                    throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+                }
+            } catch {
+                if self.isKeychainInteractionRequired(error) {
+                    throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+                }
+                throw error
+            }
+        }
+
+        let selectedIDs: Set<String>
+        if let selected = options.profile,
+           let selectedProfile = profiles[selected],
+           let credentials = selectedProfile.credentials,
+           !credentials.refreshToken.isEmpty {
+            let group = profiles.values.compactMap { profile -> String? in
+                guard let other = profile.credentials,
+                      other.refreshToken == credentials.refreshToken else { return nil }
+                return profile.id
+            }
+            selectedIDs = Set(group)
+        } else if let selected = options.profile {
+            selectedIDs = [selected]
+        } else {
+            selectedIDs = Set(profiles.keys)
+        }
+
+        var records = Dictionary(uniqueKeysWithValues: profiles.values.map {
+            profile in
+            let reason: String
+            if profile.data == nil {
+                reason = "no_stored_auth"
+            } else if profile.credentials == nil {
+                reason = "invalid_auth"
+            } else if profile.credentials?.refreshToken.isEmpty == true {
+                reason = "api_key"
+            } else {
+                reason = "pending"
+            }
+            return (
+                profile.id,
+                self.renewalRecord(profile, action: .skipped, reason: reason, now: now))
+        })
+        records = Dictionary(uniqueKeysWithValues: records.filter {
+            selectedIDs.contains($0.key)
+        })
+
+        var groupsByToken: [String: [String]] = [:]
+        for profileID in selectedIDs {
+            guard let profile = profiles[profileID],
+                  let credentials = profile.credentials,
+                  !credentials.refreshToken.isEmpty else { continue }
+            groupsByToken[credentials.refreshToken, default: []].append(profileID)
+        }
+        let groups = groupsByToken.map {
+            RenewalGroup(refreshToken: $0.key, profileIDs: $0.value.sorted())
+        }.sorted { lhs, rhs in
+            let leftDate = lhs.profileIDs.compactMap { profiles[$0]?.credentials?.lastRefresh }.min()
+            let rightDate = rhs.profileIDs.compactMap { profiles[$0]?.credentials?.lastRefresh }.min()
+            switch (leftDate, rightDate) {
+            case (nil, nil): return lhs.refreshToken < rhs.refreshToken
+            case (nil, _): return true
+            case (_, nil): return false
+            case let (left?, right?): return left < right
+            }
+        }
+
+        var terminalStatus = ExitCode.success
+        var sawRejected = false
+        var sawUnreachable = false
+        var sawInvalid = false
+        var requestCount = 0
+        for group in groups {
+            self.processRenewalGroup(
+                group,
+                profiles: profiles,
+                options: options,
+                now: now,
+                requestCount: &requestCount,
+                records: &records,
+                sawRejected: &sawRejected,
+                sawUnreachable: &sawUnreachable,
+                sawInvalid: &sawInvalid,
+                terminalStatus: &terminalStatus)
+        }
+
+        if sawRejected {
+            self.raiseTerminalStatus(&terminalStatus, to: ExitCode.renewalRejected)
+        }
+        if sawUnreachable {
+            self.raiseTerminalStatus(&terminalStatus, to: ExitCode.endpointUnreachable)
+        }
+        if sawInvalid {
+            self.raiseTerminalStatus(&terminalStatus, to: 1)
+        }
+
+        // commitRenewal saves every approved profile before removing any
+        // group's stash, so a stash surviving to here means that group's
+        // rotation never finished — most likely commitRenewal threw partway
+        // through a multi-profile save. Retry each such group exactly once
+        // (never looped): renewGroup's recovery branch (FIX 4a/proveRenewalWritePath
+        // now treat an already-committed profile as satisfied rather than as
+        // a changed credential) makes no network request, so this cannot
+        // spend a second token.
+        if !options.dryRun {
+            let recoveryGroups = groups.filter { group in
+                group.profileIDs.contains {
+                    self.fileManager.fileExists(atPath: self.renewalStashURL(profileID: $0).path)
+                }
+            }
+            for group in recoveryGroups {
+                self.processRenewalGroup(
+                    group,
+                    profiles: profiles,
+                    options: options,
+                    now: now,
+                    requestCount: &requestCount,
+                    records: &records,
+                    sawRejected: &sawRejected,
+                    sawUnreachable: &sawUnreachable,
+                    sawInvalid: &sawInvalid,
+                    terminalStatus: &terminalStatus)
+            }
+        }
+
+        if !options.dryRun {
+            do {
+                try self.reconcileLiveAuth()
+            } catch {
+                if self.isKeychainInteractionRequired(error) {
+                    self.raiseTerminalStatus(&terminalStatus, to: ExitCode.keychainInteractionRequired)
+                } else {
+                    // Same reasoning as the per-group catch above: rethrowing
+                    // here would skip `recordRenewalStates` and the report,
+                    // losing every outcome the groups just produced along with
+                    // the documented exit code.
+                    self.raiseTerminalStatus(&terminalStatus, to: 1)
+                    FileHandle.standardError.write(Data(
+                        ("reconcile live auth failed: "
+                            + TokenRenewal.sanitizedExternalMessage(error.localizedDescription)
+                            + "\n").utf8))
+                }
+            }
+        }
+
+        let orderedRecords = records.values.sorted { $0.id < $1.id }
+        // The app reads these out of the usage cache to show a dead profile as
+        // needing re-login. Recording them here is what makes the scheduled
+        // agent worth running: when it fires with the app closed, this write is
+        // the only trace of a rejection that survives to the next launch.
+        if !options.dryRun {
+            try self.recordRenewalStates(orderedRecords)
+        }
+        if options.json {
+            let report = RenewalReport(records: orderedRecords, requests: requestCount)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            for record in orderedRecords {
+                print("\(record.id): \(record.action.rawValue) (\(record.reason))")
+            }
+            let counts = Dictionary(grouping: orderedRecords, by: \.action)
+                .mapValues(\.count)
+            print(
+                "Summary: renewed \(counts[.renewed, default: 0]), recovered \(counts[.recovered, default: 0]), skipped \(counts[.skipped, default: 0]), rejected \(counts[.rejected, default: 0]), unreachable \(counts[.unreachable, default: 0]), invalid \(counts[.invalid, default: 0]); requests \(requestCount)")
+        }
+
+        // Record the run itself, not just its per-profile outcomes. The app
+        // records this too for renewals it launches, but the nightly
+        // LaunchAgent run is the one this exists for: without a write here, a
+        // scheduled job failing every night for a month is indistinguishable
+        // from a healthy one. Never fatal — a run that succeeded must not be
+        // reported as failed because its bookkeeping write did not land.
+        if !options.dryRun {
+            let run = LastRenewalRun(
+                timestamp: Date(),
+                exitStatus: terminalStatus,
+                recordCount: orderedRecords.count)
+            try? self.withCacheLock {
+                // Refusing the renewal above is not enough on its own: this
+                // bookkeeping write would still save the empty cache
+                // loadCache() falls back to, erasing the very lease the
+                // refusal was protecting.
+                guard !self.cacheIsUnreadable() else { return }
+                var cache = self.reconciledCache()
+                cache.lastRenewalRun = run
+                try self.saveCache(cache)
+            }
+        }
+
+        if terminalStatus != ExitCode.success {
+            throw CLIError.exitStatus(terminalStatus)
+        }
+    }
+
+    private struct RenewalGroupOutcome {
+        let action: RenewalAction
+        let reason: String
+    }
+
+    private static func renewGroup(
+        _ group: RenewalGroup,
+        profiles: [String: RenewalProfile],
+        options: RenewalOptions,
+        now: Date,
+        requestCount: inout Int
+    ) throws -> RenewalGroupOutcome {
+        var stashByProfile: [String: RenewalStash] = [:]
+        var discardedStash = false
+        for profileID in group.profileIDs {
+            let url = self.renewalStashURL(profileID: profileID)
+            guard self.fileManager.fileExists(atPath: url.path) else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let stash = try? JSONDecoder().decode(RenewalStash.self, from: data),
+                  let profile = profiles[profileID],
+                  let credentials = profile.credentials else {
+                discardedStash = true
+                if !options.dryRun { try? self.fileManager.removeItem(at: url) }
+                continue
+            }
+            let matches = stash.predecessorDigest
+                == self.renewalCredentialDigest(credentials.refreshToken)
+                && AuthBlob.isPlausibleAuthBlob(stash.blob)
+            if matches {
+                stashByProfile[profileID] = stash
+            } else {
+                discardedStash = true
+                if !options.dryRun { try? self.fileManager.removeItem(at: url) }
+            }
+        }
+
+        let hasRecovery = !stashByProfile.isEmpty
+        let reasonPrefix = discardedStash ? "stale_stash_discarded;" : ""
+        let cacheDecision = try self.reserveRenewal(
+            group: group,
+            profiles: profiles,
+            force: options.force || hasRecovery,
+            now: now,
+            timeout: options.timeout,
+            dryRun: options.dryRun)
+        guard let reservation = cacheDecision.reservation else {
+            return RenewalGroupOutcome(
+                action: .skipped,
+                reason: reasonPrefix + cacheDecision.reason)
+        }
+        if options.dryRun {
+            return RenewalGroupOutcome(
+                action: hasRecovery ? .recovered : .renewed,
+                reason: hasRecovery
+                    ? reasonPrefix + "recovery_available"
+                    : reasonPrefix + "would_renew")
+        }
+
+        var reservationOwned = true
+        defer {
+            if reservationOwned {
+                try? self.removeLeases(
+                    profileIDs: group.profileIDs, expectedToken: reservation.token)
+            }
+        }
+
+        try self.proveRenewalWritePath(
+            group: group,
+            knownSuccessors: stashByProfile.mapValues(\.blob))
+
+        var updatedData: [String: Data] = [:]
+        let action: RenewalAction
+        let reason: String
+        if hasRecovery {
+            action = .recovered
+            reason = reasonPrefix + "recovered_stash"
+            // A profile with its own stash gets that blob verbatim. One whose stash
+            // write never landed (a crash mid-loop) is rebuilt from the rotated
+            // CREDENTIALS in a sibling's stash applied to its OWN stored blob —
+            // never from the sibling's blob wholesale, which would carry that
+            // profile's other stored fields across. Sorting picks the donor
+            // deterministically; every stash in a group holds the same tokens.
+            let donorCredentials = stashByProfile
+                .sorted { $0.key < $1.key }
+                .lazy
+                .compactMap { try? AuthBlob.load(from: $0.value.blob) }
+                .first
+            updatedData = Dictionary(uniqueKeysWithValues: try group.profileIDs.compactMap {
+                profileID -> (String, Data)? in
+                if let stash = stashByProfile[profileID] {
+                    return (profileID, stash.blob)
+                }
+                guard let donorCredentials,
+                      let existingData = profiles[profileID]?.data else { return nil }
+                return (profileID, try AuthBlob.updatedData(from: existingData, with: donorCredentials))
+            })
+        } else {
+            // Create the stash directory BEFORE the single-use refresh token is
+            // spent, not after: if creation fails once the request has already
+            // succeeded, the rotation is unrecoverable, since nothing would be
+            // on disk to reconstruct it from.
+            try AtomicFileWriter.ensurePrivateDirectory(self.renewalStashRoot)
+            let representative = profiles[group.profileIDs[0]]!
+            // A blob with no derivable identity can never pass commitRenewal's
+            // identityMatches check, so fail before spending the request
+            // rather than after.
+            guard let representativeData = representative.data,
+                  AuthBlob.identityFingerprint(from: representativeData) != nil else {
+                return RenewalGroupOutcome(action: .invalid, reason: reasonPrefix + "no_identity")
+            }
+            let input = RenewalInput(credentials: representative.credentials!)
+            let result = self.runBlocking { () -> RenewalRequestResult in
+                do {
+                    let credentials = try await TokenRenewal.renew(
+                        credentials: input.credentials,
+                        using: URLSessionTokenRefresher())
+                    return RenewalRequestResult(credentials: credentials, error: nil)
+                } catch let error as TokenRenewalError {
+                    return RenewalRequestResult(credentials: nil, error: error)
+                } catch {
+                    return RenewalRequestResult(
+                        credentials: nil,
+                        error: .unreachable(error.localizedDescription))
+                }
+            }
+            requestCount += 1
+            if let error = result.error {
+                switch error {
+                case .rejected(let message):
+                    return RenewalGroupOutcome(action: .rejected, reason: message)
+                case .unreachable(let message):
+                    return RenewalGroupOutcome(action: .unreachable, reason: message)
+                case .emptyResponse(let message):
+                    return RenewalGroupOutcome(action: .invalid, reason: message)
+                }
+            }
+            guard let renewed = result.credentials else {
+                return RenewalGroupOutcome(
+                    action: .unreachable, reason: "No renewal response")
+            }
+            for profileID in group.profileIDs {
+                guard let existingData = profiles[profileID]?.data else { continue }
+                updatedData[profileID] = try AuthBlob.updatedData(
+                    from: existingData, with: renewed)
+            }
+            action = .renewed
+            reason = reasonPrefix + "renewed"
+
+            let encoder = JSONEncoder()
+            for profileID in group.profileIDs {
+                let stash = RenewalStash(
+                    blob: updatedData[profileID]!,
+                    predecessorDigest: self.renewalCredentialDigest(group.refreshToken))
+                // The stash is only a crash-recovery aid; a write failure here
+                // must not abort before commitRenewal runs, which would lose a
+                // live credential that was already successfully rotated.
+                try? AtomicFileWriter.write(
+                    try encoder.encode(stash),
+                    to: self.renewalStashURL(profileID: profileID))
+            }
+        }
+
+        try self.commitRenewal(
+            group: group,
+            reservation: reservation,
+            expectedRefreshToken: group.refreshToken,
+            updatedData: updatedData)
+        reservationOwned = false
+        return RenewalGroupOutcome(action: action, reason: reason)
+    }
+
+    private static func proveRenewalWritePath(
+        group: RenewalGroup,
+        knownSuccessors: [String: Data]
+    ) throws {
+        do {
+            try self.vault.transact {
+                for profileID in group.profileIDs {
+                    guard let current = try self.vault.loadAuthBlob(profileID: profileID),
+                          let credentials = try? AuthBlob.load(from: current) else {
+                        throw RenewalCredentialChanged()
+                    }
+                    if credentials.refreshToken != group.refreshToken {
+                        // A retry of an already-half-committed group can find
+                        // this profile already holding the successor token
+                        // (recorded in its own recovery stash) rather than the
+                        // one this group started from. That is not a changed
+                        // credential — agree with commitRenewal's widened
+                        // check instead of throwing here first.
+                        guard let successor = knownSuccessors[profileID],
+                              let successorCredentials = try? AuthBlob.load(from: successor),
+                              credentials.refreshToken == successorCredentials.refreshToken else {
+                            throw RenewalCredentialChanged()
+                        }
+                        continue
+                    }
+                    try self.vault._saveAuthBlobUnlocked(current, profileID: profileID)
+                }
+            }
+        } catch {
+            if self.isKeychainInteractionRequired(error) {
+                throw CLIError.exitStatus(ExitCode.keychainInteractionRequired)
+            }
+            throw error
+        }
+    }
+
+    /// Same liveness rule `claimLease` and `performBestAuth` use: a lease only
+    /// blocks renewal while it is active, or while it is expired but still
+    /// carries a home (which may hold the only refreshed copy of a credential).
+    /// A homeless, expired lease (e.g. left behind by a timed-out `renew`) is
+    /// dead weight, not a reservation, so it must not block renewal forever.
+    private static func isLeaseBlocking(_ lease: LeaseReservation?, now: Date) -> Bool {
+        guard let lease else { return false }
+        return lease.isActive(now: now) || !lease.home.isEmpty
+    }
+
+    /// Compare-and-delete every expired lease that carries no home. A lease
+    /// with a home is left untouched here even once expired — it may be the
+    /// only copy of a refreshed credential, and reclaiming that safely is
+    /// `commandLeaseGC`'s job (write-back-or-preserve), not this one's.
+    private static func reclaimHomelessExpiredLeases() {
+        let now = Date()
+        for (profileID, lease) in self.loadCache().leases
+            where lease.home.isEmpty && !lease.isActive(now: now) {
+            try? self.removeLease(profileID: profileID, expectedToken: lease.token)
+        }
+    }
+
+    private static func reserveRenewal(
+        group: RenewalGroup,
+        profiles: [String: RenewalProfile],
+        force: Bool,
+        now: Date,
+        timeout: TimeInterval,
+        dryRun: Bool
+    ) throws -> (reservation: LeaseReservation?, reason: String) {
+        if dryRun {
+            if self.cacheIsUnreadable() {
+                return (reservation: nil as LeaseReservation?, reason: "cache_unreadable")
+            }
+            let cache = self.reconciledCache()
+            if group.profileIDs.contains(where: { self.isLeaseBlocking(cache.leases[$0], now: now) }) {
+                return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
+            }
+            let due = force || group.profileIDs.contains {
+                guard let lastRefresh = profiles[$0]?.credentials?.lastRefresh else { return true }
+                return RenewalPolicy().isDue(lastRefresh: lastRefresh, now: now)
+            }
+            guard due else {
+                return (reservation: nil as LeaseReservation?, reason: "not_due")
+            }
+            return (
+                LeaseReservation(
+                    token: UUID().uuidString,
+                    home: "",
+                    expiresAt: now.addingTimeInterval(timeout + 60),
+                    createdAt: now),
+                "")
+        }
+
+        return try self.withCacheLock {
+            // Same refusal as the dry-run branch above, so --dry-run reports
+            // the same outcome a real run would hit.
+            if self.cacheIsUnreadable() {
+                return (reservation: nil as LeaseReservation?, reason: "cache_unreadable")
+            }
+            let cache = self.reconciledCache()
+            if group.profileIDs.contains(where: { self.isLeaseBlocking(cache.leases[$0], now: now) }) {
+                return (reservation: nil as LeaseReservation?, reason: "lease_reserved")
+            }
+            let policy = RenewalPolicy()
+            let due = force || group.profileIDs.contains {
+                guard let lastRefresh = profiles[$0]?.credentials?.lastRefresh else { return true }
+                return policy.isDue(lastRefresh: lastRefresh, now: now)
+            }
+            guard due else {
+                return (reservation: nil as LeaseReservation?, reason: "not_due")
+            }
+
+            let reservation = LeaseReservation(
+                token: UUID().uuidString,
+                home: "",
+                expiresAt: now.addingTimeInterval(timeout + 60),
+                createdAt: now)
+            var updated = cache
+            for profileID in group.profileIDs {
+                updated.leases[profileID] = reservation
+            }
+            try self.saveCache(updated)
+            return (reservation, "")
+        }
+    }
+
+    private static func commitRenewal(
+        group: RenewalGroup,
+        reservation: LeaseReservation,
+        expectedRefreshToken: String,
+        updatedData: [String: Data]
+    ) throws {
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            guard group.profileIDs.allSatisfy({
+                cache.leases[$0]?.token == reservation.token
+            }) else {
+                throw RenewalReservationLost()
+            }
+
+            // Check EVERY profile before saving ANY. Interleaving check and save
+            // would leave a group half-rotated when a later profile fails: the
+            // saved ones carry the new token while the rest still store the one
+            // we just spent, which is the replay this command exists to prevent.
+            try self.vault.transact {
+                var approved: [(profileID: String, replacement: Data)] = []
+                for profileID in group.profileIDs {
+                    guard let current = try self.vault.loadAuthBlob(profileID: profileID),
+                          let currentCredentials = try? AuthBlob.load(from: current) else {
+                        throw RenewalCredentialChanged()
+                    }
+                    if currentCredentials.refreshToken != expectedRefreshToken {
+                        // A prior partial commit can have already saved this
+                        // profile's successor token before throwing on a
+                        // sibling. That is not a changed credential — it is
+                        // already correct, so skip re-saving it instead of
+                        // getting the whole group permanently stuck.
+                        guard let replacement = updatedData[profileID],
+                              let successorCredentials = try? AuthBlob.load(from: replacement),
+                              currentCredentials.refreshToken == successorCredentials.refreshToken else {
+                            throw RenewalCredentialChanged()
+                        }
+                        continue
+                    }
+                    guard let replacement = updatedData[profileID],
+                          AuthBlob.identityMatches(current, replacement) else {
+                        throw RenewalIdentityMismatch()
+                    }
+                    approved.append((profileID, replacement))
+                }
+                for entry in approved {
+                    try self.vault._saveAuthBlobUnlocked(entry.replacement, profileID: entry.profileID)
+                }
+            }
+
+            // A pending keychain-migration checkpoint records the exact bytes
+            // copied to the destination. The rotation above legitimately changes
+            // those bytes, so the checkpoint is refreshed here; without it the
+            // first successful renewal leaves a checkpoint that can never match
+            // again, and that profile's migration can never be completed.
+            do {
+                var refreshed: [String: String] = [:]
+                for profileID in group.profileIDs {
+                    guard let replacement = updatedData[profileID] else { continue }
+                    refreshed[profileID] = SHA256.hash(data: replacement)
+                        .map { String(format: "%02x", $0) }.joined()
+                }
+                try self.configStore.refreshPendingMigrationFingerprints(refreshed)
+            } catch {
+                // The credential rotation itself already succeeded and must not be
+                // reported as a failure. Say so rather than failing silently.
+                FileHandle.standardError.write(Data(
+                    ("[renew] rotated the credential but could not refresh the pending "
+                        + "migration checkpoint: \(error.localizedDescription)\n").utf8))
+            }
+
+            for profileID in group.profileIDs {
+                try? self.fileManager.removeItem(at: self.renewalStashURL(profileID: profileID))
+                cache.leases.removeValue(forKey: profileID)
+            }
+            try self.saveCache(cache)
+        }
+    }
+
+    private static func reconcileLiveAuth() throws {
+        try self.vault.transact {
+            guard let liveData = try? Data(contentsOf: self.paths.liveAuthURL),
+                  let liveCredentials = try? AuthBlob.load(from: liveData) else {
+                return
+            }
+
+            // Reconcile from the ACTIVE profile only, never a scan over every
+            // profile. A scan needs a tolerant match (identityMatches) to
+            // avoid missing a refresh response that merely adds an identity
+            // field, but a tolerant match plus newest-wins would let two
+            // profiles for the same account on different credential chains
+            // both match, silently swapping the user onto the wrong chain.
+            // The active profile is the only one this command has any
+            // business writing back to live auth.json.
+            guard let activeProfile = self.configStore.loadConfig()?.activeProfile,
+                  ProfileValidator.isValid(activeProfile),
+                  let storedData = try self.vault.loadAuthBlob(profileID: activeProfile),
+                  let storedCredentials = try? AuthBlob.load(from: storedData) else {
+                return
+            }
+            guard AuthBlob.identityMatches(liveData, storedData) else { return }
+
+            let liveIsOlder: Bool
+            switch (liveCredentials.lastRefresh, storedCredentials.lastRefresh) {
+            case (nil, .some): liveIsOlder = true
+            case let (.some(live), .some(stored)): liveIsOlder = live < stored
+            default: liveIsOlder = false
+            }
+            if liveIsOlder {
+                try AtomicFileWriter.write(storedData, to: self.paths.liveAuthURL)
+            }
+        }
     }
 
     private struct ExecOptions {
@@ -1171,10 +2271,18 @@ enum CodexProfileCLI {
         var attempt = 1
         while true {
             let tempHome = try self.makeTempHome(profile: "exec")
+            var reservedProfileIDs: [String] = []
+            var reservationToken: String?
             // Per-iteration defer: the temp home holds a live credential, so it
             // must be removed on EVERY exit from this iteration — success,
             // rotation, or any throw (including runChild failures).
-            defer { try? self.fileManager.removeItem(at: tempHome) }
+            defer {
+                if !reservedProfileIDs.isEmpty, let reservationToken {
+                    try? self.removeLeases(
+                        profileIDs: reservedProfileIDs, expectedToken: reservationToken)
+                }
+                try? self.fileManager.removeItem(at: tempHome)
+            }
             let profile: String
             do {
                 // The watchdog only covers profile selection; it is disarmed
@@ -1183,10 +2291,19 @@ enum CodexProfileCLI {
                     seconds: options.timeout,
                     diagnostic: "exec: profile selection timed out after \(Int(options.timeout))s")
                 defer { disarm() }
-                profile = try self.performBestAuth(
+                let reservation = LeaseReservation(
+                    token: UUID().uuidString,
+                    home: tempHome.path,
+                    expiresAt: Date().addingTimeInterval(24 * 60 * 60),
+                    createdAt: Date())
+                let outcome = try self.performBestAuth(
                     dirURL: tempHome,
                     excludeIDs: excludeIDs,
-                    interactive: interactive).result.profileID
+                    interactive: interactive,
+                    reservation: reservation)
+                profile = outcome.result.profileID
+                reservedProfileIDs = outcome.reservationProfileIDs
+                reservationToken = reservation.token
             } catch {
                 if attempt > 1 {
                     fputs("[codex-profile] no further profiles available after \(attempt - 1) usage-limited attempt(s)\n", stderr)
@@ -1484,6 +2601,18 @@ enum CodexProfileCLI {
         try self.fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
     }
 
+    /// True when `cache.json` is PRESENT but does not decode. `loadCache()`
+    /// falls back to an empty cache in that case, which is harmless for a read
+    /// but destructive for a write: saving that empty cache back erases the
+    /// leases and renewal states this process could not see, including a live
+    /// reservation another process is holding right now. Renewal refuses
+    /// instead. A genuinely absent file is not unreadable — it is empty.
+    private static func cacheIsUnreadable() -> Bool {
+        guard self.fileManager.fileExists(atPath: self.paths.cacheURL.path) else { return false }
+        return (try? Data(contentsOf: self.paths.cacheURL))
+            .flatMap { try? JSONDecoder.iso8601Decoder().decode(UsageCache.self, from: $0) } == nil
+    }
+
     private static func loadCache() -> UsageCache {
         let decoder = JSONDecoder.iso8601Decoder()
         return (try? Data(contentsOf: self.paths.cacheURL))
@@ -1546,6 +2675,44 @@ enum CodexProfileCLI {
             decoder: JSONDecoder.iso8601Decoder())
     }
 
+    /// Persists what renewal just learned about each profile, on top of the
+    /// disk-authoritative map so a concurrent writer's states are not lost.
+    /// Only a rejection and its clearance are recorded: `skipped` says nothing
+    /// happened and `unreachable` says we never reached the server, and neither
+    /// is evidence that an earlier rejection is resolved.
+    private static func recordRenewalStates(_ records: [RenewalRecord]) throws {
+        let now = Date()
+        var rejected: [String: RenewalState] = [:]
+        var cleared: Set<String> = []
+        for record in records {
+            switch record.action {
+            case .rejected:
+                // Carry the condemned credential's fingerprint so the app can
+                // tell a stale rejection from a live one. Without it a
+                // rejection written by the nightly LaunchAgent — the path that
+                // exists precisely because the app is closed — can never be
+                // cleared, since a replacement credential is not due for
+                // renewal and so is never reported on again.
+                rejected[record.id] = RenewalState(
+                    action: record.action.rawValue,
+                    reason: record.reason,
+                    timestamp: now,
+                    credentialFingerprint: record.credential)
+            case .renewed, .recovered:
+                cleared.insert(record.id)
+            case .skipped, .unreachable, .invalid:
+                break
+            }
+        }
+        guard !rejected.isEmpty || !cleared.isEmpty else { return }
+        try self.withCacheLock {
+            var cache = self.reconciledCache()
+            for (profileID, state) in rejected { cache.renewalStates[profileID] = state }
+            for profileID in cleared { cache.renewalStates.removeValue(forKey: profileID) }
+            try self.saveCache(cache)
+        }
+    }
+
     /// Records (or replaces) the reservation for `profileID` on top of the
     /// disk-authoritative lease map, so no concurrently-written lease is lost.
     private static func upsertLease(profileID: String, reservation: LeaseReservation) throws {
@@ -1564,25 +2731,40 @@ enum CodexProfileCLI {
     /// re-checks UNDER the lock: if a DIFFERENT lease still HOLDS the profile,
     /// the claim loses and throws — the caller deletes its seeded home.
     ///
-    /// We refuse on ANY recorded different-token lease, not just an *active* one.
-    /// An expired-but-still-recorded lease means `gc` could not clear it — which
-    /// for a lease only happens when its write-back FAILED and `gc`/`end`
-    /// deliberately preserved its home pending credential recovery. Overwriting
-    /// that reservation would orphan the home and lose the preserved credential.
-    /// `begin` runs an opportunistic `gc` first, so a cleanly-removable expired
-    /// lease is already gone by the time we get here; anything left is protected.
-    /// A lease already carrying our own token (a retry) or an absent slot is fine.
+    /// We refuse active different-token leases and expired different-token leases
+    /// that carry a home, because those homes may hold the only refreshed copy of
+    /// a credential. An expired home-less lease must be stealable: it carries no
+    /// credential, and otherwise a killed usage fetch could block renewal forever
+    /// until the account dies at day 10. A lease already carrying our own token
+    /// (a retry) or an absent slot is fine.
     ///
     /// Losing the claim throws `LeaseClaimLost` rather than `CLIError` so `begin`
     /// can retry on a different account without swallowing unrelated failures.
     private static func claimLease(profileID: String, reservation: LeaseReservation) throws {
+        try self.claimLease(profileIDs: [profileID], reservation: reservation)
+    }
+
+    private static func claimLease(profileIDs: [String], reservation: LeaseReservation) throws {
         try self.withCacheLock {
             var cache = self.reconciledCache()
-            if let existing = cache.leases[profileID],
-               existing.token != reservation.token {
-                throw LeaseClaimLost(profileID: profileID)
+            for profileID in profileIDs {
+                if let existing = cache.leases[profileID], existing.token != reservation.token {
+                    guard existing.isActive() || !existing.home.isEmpty else {
+                        cache.leases.removeValue(forKey: profileID)
+                        continue
+                    }
+                    throw LeaseClaimLost(profileID: profileID)
+                }
             }
-            cache.leases[profileID] = reservation
+            let existingProfileIDs = cache.leases.compactMap { profileID, existing in
+                existing.token == reservation.token ? profileID : nil
+            }
+            for profileID in existingProfileIDs {
+                cache.leases.removeValue(forKey: profileID)
+            }
+            for profileID in profileIDs {
+                cache.leases[profileID] = reservation
+            }
             try self.saveCache(cache)
         }
     }
@@ -1592,12 +2774,18 @@ enum CodexProfileCLI {
     /// deleting a FRESH lease that a concurrent `begin` placed on the same
     /// profile after the one we meant to remove. `nil` token = unconditional.
     private static func removeLease(profileID: String, expectedToken: String? = nil) throws {
+        try self.removeLeases(profileIDs: [profileID], expectedToken: expectedToken)
+    }
+
+    private static func removeLeases(profileIDs: [String], expectedToken: String? = nil) throws {
         try self.withCacheLock {
             var cache = self.reconciledCache()
-            if let expectedToken, cache.leases[profileID]?.token != expectedToken {
-                return  // a concurrent writer replaced this lease; leave theirs intact
+            for profileID in profileIDs {
+                if let expectedToken, cache.leases[profileID]?.token != expectedToken {
+                    continue  // a concurrent writer replaced this lease; leave theirs intact
+                }
+                cache.leases.removeValue(forKey: profileID)
             }
-            cache.leases.removeValue(forKey: profileID)
             try self.saveCache(cache)
         }
     }
@@ -1851,7 +3039,7 @@ enum CodexProfileCLI {
         let gcVault = self.vault
         for (profileID, lease) in self.loadCache().leases where !lease.isActive(now: now) {
             var writebackFailed = false
-            if self.isLeaseHome(lease.home, token: lease.token) {
+            if !lease.home.isEmpty {
                 do {
                     try self.importRefreshedAuth(
                         dirURL: URL(fileURLWithPath: lease.home),
@@ -1874,7 +3062,13 @@ enum CodexProfileCLI {
                     }
                 }
                 if !writebackFailed {
-                    try? self.fileManager.removeItem(atPath: lease.home)
+                    // isLeaseHome standardizes both paths before comparing, which
+                    // matters because /var and /private/var name the same directory.
+                    // It also already refuses anything outside leasesRoot, so an
+                    // exported --dir home is left for its owner.
+                    if self.isLeaseHome(lease.home, token: lease.token) {
+                        try? self.fileManager.removeItem(atPath: lease.home)
+                    }
                 }
             }
             if !writebackFailed {
@@ -2287,11 +3481,13 @@ enum CodexProfileCLI {
             }
             return PrimaryAuthVaultSelector.makeVault(
                 hasDataProtectionKeychainAccess: false,
-                fileVaultRoot: root)
+                fileVaultRoot: root,
+                authLockURL: Self.paths.authLockURL)
         case .dataProtectionKeychain:
             return PrimaryAuthVaultSelector.makeVault(
                 hasDataProtectionKeychainAccess: true,
-                fileVaultRoot: Self.paths.devAuthStoreURL)
+                fileVaultRoot: Self.paths.devAuthStoreURL,
+                authLockURL: Self.paths.authLockURL)
         }
     }
 

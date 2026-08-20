@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.4lau.codex-profile-switcher.renew</string>
+  <key>BundleProgram</key>
+  <string>Contents/Helpers/CodexProfileHelper.app/Contents/MacOS/codex-profile</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>codex-profile</string>
+    <string>renew</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
