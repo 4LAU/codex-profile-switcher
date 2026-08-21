@@ -205,11 +205,17 @@ PYTHON
   python3 -u "$WORK_DIR/token-stub.py" "$mode" "$access_token" "$refresh_token" \
     "$account_id" "$endpoint_file" "$TOKEN_STUB_COUNT" "$release_file" "$AUTH_STORE" &
   TOKEN_STUB_PID=$!
-  for _ in {1..100}; do
-    [[ -s "$endpoint_file" ]] && break
+  # Wait on the stub's own liveness rather than a fixed number of ticks. A
+  # cold python3 interpreter start is well over a second on a loaded CI
+  # runner, which is what a 1s budget here was actually measuring.
+  local waited=0
+  until [[ -s "$endpoint_file" ]]; do
+    kill -0 "$TOKEN_STUB_PID" 2>/dev/null \
+      || fail "token stub exited before publishing a port"
+    (( waited < 3000 )) || fail "token stub did not publish a port within 30s"
     sleep 0.01
+    (( waited += 1 ))
   done
-  [[ -s "$endpoint_file" ]] || fail "token stub did not publish a port"
   TOKEN_STUB_ENDPOINT="http://127.0.0.1:$(<"$endpoint_file")"
 }
 
