@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.5.20 -- 2026-08-21
+
+### Fixed
+
+- The daily renewal agent is now scheduled on install. `SMAppService` reports an
+  agent that has never been registered on the machine as `notFound`, and 0.5.19
+  read that as "the plist is missing from the app bundle" and refused to
+  register. Registration is now attempted from that state, so a genuinely
+  missing plist shows up as the error `register()` throws instead of a guess.
+  Until this fix, renewal ran only when the app launched, which on a Mac that
+  stays logged in is close to never.
+
 ## 0.5.19 -- 2026-08-21
 
 ### Added
