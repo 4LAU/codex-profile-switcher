@@ -4,11 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.5.19 -- 2026-08-21
 
 ### Added
 
-- Credential renewal now provides the `codex-profile renew` command, a daily background agent, and a Settings row that reports whether renewal is scheduled.
+- `codex-profile renew` renews stored credentials before Codex would, together with a daily background agent that runs it at 03:00 and a Settings row reporting whether that agent is scheduled. Codex refreshes a credential only once it has already gone stale, and several parts of the system can then refresh concurrently carrying the same single-use refresh token. Accounts left unused for roughly eight days have been observed losing their login and needing a fresh `codex-profile login`. A replayed refresh token being read as reuse is the most likely explanation, but that has not been confirmed against the server, so treat it as inferred. Renewing early, once per credential rather than once per profile, keeps a credential from reaching that state.
+- Renewal is serialized by a reservation, so two runs cannot refresh the same credential at once, and a run that cannot read `cache.json` refuses rather than overwriting the reservations it cannot see. `--dry-run` reports what would happen without making a request or writing anything. A single token request is capped well below the run deadline, so one unresponsive endpoint fails only its own credential instead of ending the run and stranding a reservation.
 
 ### Fixed
 
