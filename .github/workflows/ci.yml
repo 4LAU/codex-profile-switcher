@@ -49,8 +49,10 @@ jobs:
           set -euo pipefail
           # The Data-only FileHandle.write(_:) overload raises an uncatchable
           # ObjC exception on a broken pipe (crashes the process). Use the
-          # throwing write(contentsOf:) instead.
-          if grep -rnE '\.write\([a-zA-Z_][a-zA-Z0-9_.]*\)' Sources/ Tests/; then
+          # throwing write(contentsOf:) instead. Swift files only: the rule is
+          # about a Swift API, and scanning every file made the test scripts'
+          # embedded Python (`self.wfile.write(body)`) look like a violation.
+          if grep -rnE --include='*.swift' '\.write\([a-zA-Z_][a-zA-Z0-9_.]*\)' Sources/ Tests/; then
             echo "ERROR: Found FileHandle.write(_:) — use write(contentsOf:) (throwing) instead."
             exit 1
           fi
