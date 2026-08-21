@@ -315,19 +315,19 @@ enum RenewalAgent {
         switch service.status {
         case .enabled, .requiresApproval:
             return
-        case .notRegistered:
+        case .notRegistered, .notFound:
+            // .notFound is what SMAppService reports for an agent that has never
+            // been registered on this machine — it does not mean the plist is
+            // absent from the bundle. Treating it as a missing plist meant every
+            // fresh install threw here and never called register(), so the daily
+            // renewal was never scheduled. register() is the only thing that can
+            // tell the two cases apart: a genuinely missing plist makes it throw,
+            // and that error is what gets reported.
             do {
                 try service.register()
             } catch {
                 throw OperationError.failed(error.localizedDescription)
             }
-        case .notFound:
-            // Only reachable in a genuinely installed signed build (isEligible
-            // already filters out isolated dev builds): the renewal LaunchAgent
-            // plist is missing from the app bundle. This is a real failure, not
-            // "nothing to do" — treating it as success left renewal silently
-            // unscheduled with no error ever logged.
-            throw OperationError.failed("The renewal LaunchAgent plist was not found in the app bundle.")
         @unknown default:
             throw OperationError.failed("Unexpected renewal LaunchAgent status.")
         }
