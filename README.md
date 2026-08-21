@@ -22,13 +22,16 @@ Tiny macOS 14+ menu bar app that manages **multiple OpenAI Codex accounts** and 
 - Show credit balance when Codex exposes it
 - Switch accounts without logging in every time
 - Refresh inactive OAuth profiles so usage data stays current
+- Renew stored credentials on a daily background schedule, before Codex reaches for its own refresh
 - Keep the last known usage snapshot in the menu
 - Launch at login
 - Copy redacted debug info, open the log file, and jump to the GitHub issue form
 
 ## Privacy
 
-The app reads and writes macOS Keychain items it creates, `~/.codex/auth.json`, and its own config at `~/.codex-switcher/config.json`. It does not read browser data, does not access files outside those paths, and does not send telemetry or phone home. All data stays on your machine.
+The app reads and writes macOS Keychain items it creates, `~/.codex/auth.json`, and its own config at `~/.codex-switcher/config.json`. It does not read browser data, does not access files outside those paths, and does not send telemetry or phone home.
+
+It makes one kind of outbound request: credential renewal posts your stored refresh token to `https://auth.openai.com/oauth/token`, the same endpoint Codex itself uses, and stores the rotated token back in the Keychain. Nothing else leaves your machine.
 
 ## Install
 
@@ -303,6 +306,8 @@ Each record has `id`, `action`, `reason`, `age_days`, and `credential`. `action`
 The signed app registers a background launchd agent through `SMAppService`. The agent launches `codex-profile renew` once a day and exits. It is not a resident process, and it runs while the menu bar app is closed. The bundled plist is at `Contents/Library/LaunchAgents/` and is named `com.4lau.codex-profile-switcher.renew.plist`. Its schedule is 03:00 every day.
 
 Open **Settings...** > **General** and check **Credential renewal**. It should say **Scheduled**. If it says **Not scheduled** because macOS is waiting for approval, open **System Settings** > **General** > **Login Items** and approve the background item. An unapproved agent does not run.
+
+If it says **Unavailable**, update to 0.5.20 or later. Releases 0.5.19 and earlier misread the "never registered on this Mac" state as a missing plist and refused to register, so the daily job was never scheduled and renewal ran only when the app was launched. Approving a Login Item does not fix that one.
 
 For headless use, install the app and register a LaunchAgent of your own:
 
