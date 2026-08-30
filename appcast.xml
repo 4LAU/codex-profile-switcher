@@ -3,6 +3,14 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.5.21</title>
+            <pubDate>Sat, 29 Aug 2026 22:12:50 -0700</pubDate>
+            <sparkle:version>40</sparkle:version>
+            <sparkle:shortVersionString>0.5.21</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.21/CodexProfileSwitcher-0.5.21.dmg" length="6138786" type="application/octet-stream" sparkle:edSignature="se7gn9IHUQwt+NdnXtlz3W5ZIbtS1saYB/sW2KrHDKmybvhY7aSkmoerbhwFoX3YhzUE3Kln6sig696+vrzeAQ=="/>
+        </item>
+        <item>
             <title>0.5.20</title>
             <pubDate>Fri, 21 Aug 2026 12:06:30 -0700</pubDate>
             <sparkle:version>39</sparkle:version>
