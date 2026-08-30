@@ -307,7 +307,12 @@ private final class CodexRPCClient {
         self.stdoutLineIterator = self.stdoutLineStream.makeAsyncIterator()
 
         self.process.executableURL = URL(fileURLWithPath: executablePath)
-        self.process.arguments = ["-s", "read-only", "-a", "untrusted", "app-server"]
+        // No `--ask-for-approval`: this app-server only answers
+        // `account/rateLimits/read`, so an approval policy has nothing to
+        // govern, and its accepted values change between Codex CLI releases
+        // (0.151 dropped `untrusted`, which made every fetch die at argv
+        // parsing and left the menu showing week-old cached usage).
+        self.process.arguments = ["-s", "read-only", "app-server"]
         self.process.environment = environment
         self.process.standardInput = self.stdinPipe
         self.process.standardOutput = self.stdoutPipe

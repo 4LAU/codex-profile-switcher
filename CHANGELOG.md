@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.5.21 -- 2026-08-29
+
+### Fixed
+
+- Usage percentages stopped updating on Macs where the Codex CLI bundled inside
+  ChatGPT.app had reached 0.151. That release removed `untrusted` from the
+  accepted `--ask-for-approval` values, and the app passed it on every
+  `codex app-server` spawn, so the process exited at argument parsing and every
+  refresh failed. The menu kept showing the last cached numbers, which could be
+  a week or more old. The flag is gone: this app-server only answers
+  `account/rateLimits/read` and never runs a command, so there was nothing for
+  an approval policy to govern.
+- The menu now says so when a refresh fails. Previously a failing refresh left
+  the last cached percentages on screen looking exactly like fresh ones, and
+  the only clue was the small grey age line under the title. The header now
+  carries a red warning naming how many profiles could not refresh, so week-old
+  numbers no longer read as current ones.
+
 ## 0.5.20 -- 2026-08-21
 
 ### Fixed

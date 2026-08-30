@@ -220,6 +220,11 @@ struct UsageRow: View {
 struct UsageHeaderView: View {
     let isRefreshing: Bool
     let updatedAt: Date?
+    let failingProfiles: Int
+    let trackedProfiles: Int
+
+    static let baseHeight: CGFloat = 42
+    static let failureHeight: CGFloat = 57
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -229,6 +234,13 @@ struct UsageHeaderView: View {
             Text(self.statusLabel)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+
+            if self.showsFailure {
+                Label(self.failureLabel, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Palette.danger)
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -236,10 +248,21 @@ struct UsageHeaderView: View {
         .accessibilityElement(children: .combine)
     }
 
+    var showsFailure: Bool {
+        !self.isRefreshing && self.failingProfiles > 0
+    }
+
     private var statusLabel: String {
         if self.isRefreshing { return "Refreshing..." }
         guard let updatedAt else { return "No usage data" }
         return updatedLabel(from: updatedAt)
+    }
+
+    private var failureLabel: String {
+        if self.failingProfiles == self.trackedProfiles {
+            return "Refresh failing - numbers are out of date"
+        }
+        return "Refresh failing for \(self.failingProfiles) of \(self.trackedProfiles)"
     }
 }
 
