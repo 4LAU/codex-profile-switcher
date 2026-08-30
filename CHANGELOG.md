@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.5.21 -- 2026-08-29
 
 ### Fixed
 
@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   a week or more old. The flag is gone: this app-server only answers
   `account/rateLimits/read` and never runs a command, so there was nothing for
   an approval policy to govern.
+- The menu now says so when a refresh fails. Previously a failing refresh left
+  the last cached percentages on screen looking exactly like fresh ones, and
+  the only clue was the small grey age line under the title. The header now
+  carries a red warning naming how many profiles could not refresh, so week-old
+  numbers no longer read as current ones.
 
 ## 0.5.20 -- 2026-08-21
 

@@ -538,11 +538,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let updatedAt = self.store.statuses.values
             .compactMap { $0.snapshot?.fetchedAt }
             .max()
+        // The age line alone reports the newest snapshot, so one healthy
+        // profile hides every broken one. Count the profiles whose last
+        // refresh recorded an error and say so outright.
+        let tracked = self.store.config.profiles.filter { profile in
+            switch self.store.statuses[profile.id] ?? .notSetUp {
+            case .notSetUp: return false
+            default: return true
+            }
+        }
+        let failing = tracked.filter { self.store.refreshDiagnostics[$0.id]?.lastError != nil }
         let header = UsageHeaderView(
             isRefreshing: self.usageProvider.isRefreshing,
-            updatedAt: updatedAt)
+            updatedAt: updatedAt,
+            failingProfiles: failing.count,
+            trackedProfiles: tracked.count)
         let hostView = NSHostingView(rootView: header)
-        hostView.frame = NSRect(x: 0, y: 0, width: 290, height: 42)
+        let height = header.showsFailure ? UsageHeaderView.failureHeight : UsageHeaderView.baseHeight
+        hostView.frame = NSRect(x: 0, y: 0, width: 290, height: height)
 
         let menuItem = NSMenuItem()
         menuItem.view = hostView
