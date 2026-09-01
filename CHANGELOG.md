@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- Auto Switch: when enabled in Settings, an exhausted active account (100%
+  usage) switches to another profile with remaining quota and relaunches Codex.
+
 ## 0.5.21 -- 2026-08-29
 
 ### Fixed

@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasPendingRecoveryNotice = false
     private var hasShownRecoveryNotice = false
     private var canHandleRecoveryNotices = false
+    private var lastAutoSwitchAttempt: Date?
     private let refreshPreferences = RefreshPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
@@ -315,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.refreshMenuItem?.setEnabled(true)
         }
         self.updateIcon()
+        self.maybeAutoSwitch()
         guard self.isMenuOpen else { return }
         self.rebuildMenu()
     }
@@ -666,12 +668,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Actions
 
+    private func maybeAutoSwitch() {
+        guard self.refreshPreferences.autoSwitch else { return }
+        guard !self.store.isAuthMutationInProgress() else { return }
+        if let last = self.lastAutoSwitchAttempt,
+           Date().timeIntervalSince(last) < 90 {
+            return
+        }
+
+        let records = ProfileHealth.build(
+            profiles: self.store.config.profiles,
+            statuses: self.store.statuses,
+            activeProfileId: self.store.liveProfileId,
+            canActivateAuth: { self.store.authCanBeActivated(for: $0) })
+        guard let target = ProfileHealth.autoSwitchTarget(from: records) else { return }
+
+        self.lastAutoSwitchAttempt = Date()
+        AppLogger.info("Auto Switch moving off an exhausted account",
+                       metadata: ["to": target.profile.id])
+        self.switchToProfile(target.profile.id, confirm: false)
+    }
+
     @objc private func switchToRecommendedProfile(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         self.switchToProfile(id)
     }
 
-    private func switchToProfile(_ id: String) {
+    private func switchToProfile(_ id: String, confirm: Bool = true) {
         self.menu.cancelTracking()
         AppLogger.info("Profile selected", metadata: ["profile": id])
 
@@ -705,18 +728,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let profileLabel = self.store.config.profiles.first { $0.id == id }?.label ?? "Profile \(id)"
-        let alert = NSAlert()
-        alert.messageText = "Switch to \(profileLabel)?"
-        alert.informativeText = "This will quit the current Codex instance and relaunch with the selected profile."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Switch")
-        alert.addButton(withTitle: "Cancel")
+        if confirm {
+            let alert = NSAlert()
+            alert.messageText = "Switch to \(profileLabel)?"
+            alert.informativeText = "This will quit the current Codex instance and relaunch with the selected profile."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Switch")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
 
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        self.commitProfileSwitch(to: id, confirm: confirm)
+    }
 
+    private func commitProfileSwitch(to id: String, confirm: Bool) {
         let storeRef = self.store!
-        let workspacePath = self.store.relaunchWorkspacePath()
+        let workspacePath = storeRef.relaunchWorkspacePath()
         storeRef.beginAuthMutation()
         Task { @MainActor [weak self] in
             let result = await CodexBridge.switchToProfile(id, workspacePath: workspacePath) {
@@ -738,6 +766,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .failure(let error):
                 self.syncActiveProfile(force: true)
                 self.updateIcon()
+                guard confirm else {
+                    AppLogger.warning("Auto Switch failed",
+                                      metadata: ["profile": id, "error": error.localizedDescription])
+                    return
+                }
                 switch error {
                 case .switchCommittedButLaunchFailed:
                     self.presentBridgeError(title: "Profile switched", message: error.localizedDescription)

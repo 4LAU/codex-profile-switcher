@@ -55,8 +55,15 @@ final class RefreshPreferences: ObservableObject {
         }
     }
 
+    @Published var autoSwitch: Bool {
+        didSet {
+            self.defaults.set(self.autoSwitch, forKey: Self.autoSwitchKey)
+        }
+    }
+
     private static let intervalKey = "refreshInterval"
     private static let menuOpenKey = "refreshWhenMenuOpens"
+    private static let autoSwitchKey = "autoSwitch"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -64,5 +71,6 @@ final class RefreshPreferences: ObservableObject {
         self.interval = RefreshInterval(
             rawValue: defaults.string(forKey: Self.intervalKey) ?? "") ?? .fiveMinutes
         self.refreshWhenMenuOpens = defaults.bool(forKey: Self.menuOpenKey)
+        self.autoSwitch = defaults.bool(forKey: Self.autoSwitchKey)
     }
 }
