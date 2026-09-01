@@ -616,6 +616,14 @@ struct GeneralTab: View {
                     "Refresh when the menu opens",
                     isOn: self.$refreshPreferences.refreshWhenMenuOpens)
 
+                Toggle(
+                    "Auto Switch",
+                    isOn: self.$refreshPreferences.autoSwitch)
+
+                Text("When the active account hits 100% usage, switch to another account with remaining quota and relaunch Codex.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+
                 if self.refreshPreferences.interval == .manual {
                     Text("Automatic background refresh is off. Refresh from the menu or press Command-R.")
                         .font(.system(size: 11))
