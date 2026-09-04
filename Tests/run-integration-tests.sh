@@ -256,12 +256,15 @@ for line in sys.stdin:
     if "id" not in message:
         continue
     if method == "account/rateLimits/read":
-        result = {"rateLimits": {
-            "primary": {"usedPercent": 10, "windowDurationMins": 60, "resetsAt": 2000000000},
-            "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 2000000000},
-            "credits": None,
-            "planType": "team",
-        }}
+        result = {
+            "rateLimits": {
+                "primary": {"usedPercent": 10, "windowDurationMins": 60, "resetsAt": 2000000000},
+                "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 2000000000},
+                "credits": None,
+                "planType": "team",
+            },
+            "rateLimitResetCredits": {"availableCount": 0, "credits": []},
+        }
     else:
         result = {}
     print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)

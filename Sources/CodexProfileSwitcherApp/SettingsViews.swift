@@ -8,6 +8,7 @@ struct SettingsActions {
     let cancelLogin: (String) -> Bool
     let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
     let refreshScheduleChanged: () -> Void
+    let usageDisplayChanged: () -> Void
     let reviewLegacyKeychainMigration: () -> Result<KeychainMigrationPreview, SettingsActionError>
     let confirmLegacyKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
     let completePendingKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
@@ -22,6 +23,7 @@ enum SettingsWindow {
     static func show(
         store: ProfileStore,
         refreshPreferences: RefreshPreferences,
+        usageDisplayPreferences: UsageDisplayPreferences,
         actions: SettingsActions
     ) {
         Self.cancelActiveMigrationReview()
@@ -33,6 +35,7 @@ enum SettingsWindow {
                 rootView: SettingsView(
                     store: store,
                     refreshPreferences: refreshPreferences,
+                    usageDisplayPreferences: usageDisplayPreferences,
                     actions: actions,
                     migrationLifecycle: lifecycle))
             wc.showWindow(nil)
@@ -56,6 +59,7 @@ enum SettingsWindow {
         let view = SettingsView(
             store: store,
             refreshPreferences: refreshPreferences,
+            usageDisplayPreferences: usageDisplayPreferences,
             actions: actions,
             migrationLifecycle: lifecycle)
         window.contentView = NSHostingView(rootView: view)
@@ -118,6 +122,7 @@ final class SettingsMigrationLifecycle {
 struct SettingsView: View {
     @ObservedObject var store: ProfileStore
     @ObservedObject var refreshPreferences: RefreshPreferences
+    @ObservedObject var usageDisplayPreferences: UsageDisplayPreferences
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
     @State private var selectedTab = 0
@@ -144,6 +149,7 @@ struct SettingsView: View {
                     GeneralTab(
                         store: self.store,
                         refreshPreferences: self.refreshPreferences,
+                        usageDisplayPreferences: self.usageDisplayPreferences,
                         actions: self.actions,
                         migrationLifecycle: self.migrationLifecycle,
                         toast: self.toast)
@@ -540,6 +546,7 @@ struct ProfilesTab: View {
 struct GeneralTab: View {
     let store: ProfileStore
     @ObservedObject var refreshPreferences: RefreshPreferences
+    @ObservedObject var usageDisplayPreferences: UsageDisplayPreferences
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
@@ -597,19 +604,47 @@ struct GeneralTab: View {
 
             Divider()
 
+            HStack(spacing: 12) {
+                Text("Usage display")
+
+                Picker("Usage display", selection: self.$usageDisplayPreferences.mode) {
+                    ForEach(UsageDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                .onChange(of: self.usageDisplayPreferences.mode) { _, _ in
+                    self.actions.usageDisplayChanged()
+                }
+
+                Spacer()
+            }
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 10) {
                 Text("REFRESHING")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                Picker("Refresh interval", selection: self.$refreshPreferences.interval) {
-                    ForEach(RefreshInterval.allCases) { interval in
-                        Text(self.refreshIntervalLabel(interval)).tag(interval)
+                HStack(spacing: 12) {
+                    Text("Refresh interval")
+
+                    Picker("Refresh interval", selection: self.$refreshPreferences.interval) {
+                        ForEach(RefreshInterval.allCases) { interval in
+                            Text(self.refreshIntervalLabel(interval)).tag(interval)
+                        }
                     }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: self.refreshPreferences.interval) { _, _ in
-                    self.actions.refreshScheduleChanged()
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 180)
+                    .onChange(of: self.refreshPreferences.interval) { _, _ in
+                        self.actions.refreshScheduleChanged()
+                    }
+
+                    Spacer()
                 }
 
                 Toggle(

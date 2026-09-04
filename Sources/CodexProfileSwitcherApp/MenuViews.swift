@@ -22,10 +22,12 @@ enum Palette {
     static let mid = Color(red: 0.70, green: 0.55, blue: 0.35)
 }
 
-func progressColor(for percent: Int) -> Color {
-    if percent >= 90 { return Palette.danger }
-    if percent >= 70 { return Palette.mid }
-    return Palette.success
+func progressColor(for percent: Int, mode: UsageDisplayMode) -> Color {
+    switch mode.level(forDisplayedPercent: percent) {
+    case .normal: return Palette.success
+    case .warning: return Palette.mid
+    case .critical: return Palette.danger
+    }
 }
 
 func usageWindowLabel(durationMins: Int?, legacyLabel: String) -> String {
@@ -72,6 +74,10 @@ func creditsDisplayName(_ value: Double?) -> String? {
     formatter.minimumFractionDigits = 0
     guard let formatted = formatter.string(from: NSNumber(value: clamped)) else { return nil }
     return "\(formatted) cr"
+}
+
+func resetCountDisplayName(_ value: Int) -> String {
+    return "\(max(0, value)) re"
 }
 
 // MARK: - Toast
@@ -192,6 +198,7 @@ struct UsageBar: View {
 struct UsageRow: View {
     let label: String
     let percent: Int
+    let mode: UsageDisplayMode
     let resetAt: Date?
     let isHighlighted: Bool
 
@@ -202,7 +209,9 @@ struct UsageRow: View {
                 .foregroundStyle(self.isHighlighted ? .secondary : .tertiary)
                 .frame(width: 16, alignment: .leading)
 
-            UsageBar(percent: Double(self.percent), tint: progressColor(for: self.percent))
+            UsageBar(
+                percent: Double(self.percent),
+                tint: progressColor(for: self.percent, mode: self.mode))
 
             Text("\(self.percent)%")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -214,6 +223,15 @@ struct UsageRow: View {
                 .foregroundStyle(self.isHighlighted ? .secondary : .tertiary)
                 .frame(width: 42, alignment: .trailing)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(self.label) usage")
+        .accessibilityValue(self.accessibilityValue)
+    }
+
+    private var accessibilityValue: String {
+        let reset = resetCountdown(from: self.resetAt)
+        let value = "\(self.percent) percent \(self.mode.title.lowercased())"
+        return reset.isEmpty ? value : "\(value), resets in \(reset)"
     }
 }
 
@@ -271,6 +289,7 @@ struct ProfileCardView: View {
     let status: ProfileStatus
     let isActive: Bool
     let duplicateLine: String?
+    let usageDisplayMode: UsageDisplayMode
     let onSwitch: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -313,6 +332,14 @@ struct ProfileCardView: View {
             Spacer()
 
             HStack(spacing: 5) {
+                if let resetCount = self.resetCount {
+                    Text(resetCountDisplayName(resetCount))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(self.metadataColor)
+                        .accessibilityLabel("Available resets")
+                        .accessibilityValue("\(resetCount)")
+                }
+
                 if let credits = self.credits {
                     Text(credits)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -368,7 +395,9 @@ struct ProfileCardView: View {
                     label: usageWindowLabel(
                         durationMins: snap.primaryWindowDurationMins,
                         legacyLabel: "5h"),
-                    percent: snap.primaryUsedPercent,
+                    percent: self.usageDisplayMode.displayPercent(
+                        fromUsedPercent: snap.primaryUsedPercent),
+                    mode: self.usageDisplayMode,
                     resetAt: snap.primaryResetAt,
                     isHighlighted: self.isActive || self.isHovered)
             }
@@ -377,7 +406,9 @@ struct ProfileCardView: View {
                     label: usageWindowLabel(
                         durationMins: snap.secondaryWindowDurationMins,
                         legacyLabel: "Wk"),
-                    percent: snap.secondaryUsedPercent,
+                    percent: self.usageDisplayMode.displayPercent(
+                        fromUsedPercent: snap.secondaryUsedPercent),
+                    mode: self.usageDisplayMode,
                     resetAt: snap.secondaryResetAt,
                     isHighlighted: self.isActive || self.isHovered)
             }
@@ -400,6 +431,10 @@ struct ProfileCardView: View {
     private var credits: String? {
         guard let snap = self.status.snapshot else { return nil }
         return creditsDisplayName(snap.creditsRemaining)
+    }
+
+    private var resetCount: Int? {
+        self.status.snapshot?.availableResetCount
     }
 
     private var titleColor: Color {

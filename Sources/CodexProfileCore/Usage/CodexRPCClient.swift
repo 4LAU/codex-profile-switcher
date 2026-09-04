@@ -54,6 +54,11 @@ public enum CLIUsageError: LocalizedError {
 
 struct RPCRateLimitsResponse: Decodable {
     let rateLimits: RPCRateLimitSnapshot
+    let rateLimitResetCredits: RPCRateLimitResetCredits?
+}
+
+struct RPCRateLimitResetCredits: Decodable {
+    let availableCount: Int
 }
 
 struct RPCRateLimitSnapshot: Decodable {
@@ -528,7 +533,7 @@ public enum CLIUsageFetcher {
 
         try await rpc.initialize(clientName: clientName, clientVersion: clientVersion)
         let response = try await rpc.fetchRateLimits()
-        return try self.makeSnapshot(from: response.rateLimits)
+        return try self.makeSnapshot(from: response)
     }
 
     private static func makeTemporaryCodexHome(profileId: String) throws -> URL {
@@ -546,7 +551,8 @@ public enum CLIUsageFetcher {
         try AtomicFileWriter.write(data, to: destination)
     }
 
-    static func makeSnapshot(from rateLimits: RPCRateLimitSnapshot) throws -> UsageSnapshot {
+    static func makeSnapshot(from response: RPCRateLimitsResponse) throws -> UsageSnapshot {
+        let rateLimits = response.rateLimits
         let creditsRemaining = rateLimits.credits.flatMap { credits -> Double? in
             guard let balance = credits.balance else { return nil }
             return Double(balance.replacingOccurrences(of: ",", with: ""))
@@ -570,6 +576,7 @@ public enum CLIUsageFetcher {
             secondaryResetAt: secondaryResetAt,
             fetchedAt: Date(),
             primaryWindowDurationMins: rateLimits.primary?.windowDurationMins,
-            secondaryWindowDurationMins: rateLimits.secondary?.windowDurationMins)
+            secondaryWindowDurationMins: rateLimits.secondary?.windowDurationMins,
+            availableResetCount: response.rateLimitResetCredits.map { max(0, $0.availableCount) })
     }
 }

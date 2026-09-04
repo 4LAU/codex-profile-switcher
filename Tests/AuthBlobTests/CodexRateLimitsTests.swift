@@ -22,17 +22,22 @@ struct CodexRateLimitsTests {
               "balance": null
             },
             "planType": "team"
+          },
+          "rateLimitResetCredits": {
+            "availableCount": 1,
+            "credits": []
           }
         }
         """
 
         let response = try JSONDecoder().decode(RPCRateLimitsResponse.self, from: Data(json.utf8))
-        let snapshot = try CLIUsageFetcher.makeSnapshot(from: response.rateLimits)
+        let snapshot = try CLIUsageFetcher.makeSnapshot(from: response)
 
         #expect(snapshot.primaryUsedPercent == 18)
         #expect(snapshot.primaryWindowDurationMins == 10_080)
         #expect(snapshot.secondaryUsedPercent == 0)
         #expect(snapshot.secondaryWindowDurationMins == nil)
+        #expect(snapshot.availableResetCount == 1)
     }
 
     @Test("decodes snapshots cached before window durations were recorded")
@@ -55,5 +60,6 @@ struct CodexRateLimitsTests {
 
         #expect(snapshot.primaryWindowDurationMins == nil)
         #expect(snapshot.secondaryWindowDurationMins == nil)
+        #expect(snapshot.availableResetCount == nil)
     }
 }
