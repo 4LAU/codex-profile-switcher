@@ -12,7 +12,13 @@ enum IconRenderer {
 
     // MARK: - Public
 
-    static func render(primaryPercent: Int, secondaryPercent: Int) -> NSImage {
+    static func render(
+        primaryUsedPercent: Int,
+        secondaryUsedPercent: Int,
+        mode: UsageDisplayMode
+    ) -> NSImage {
+        let primaryPercent = mode.displayPercent(fromUsedPercent: primaryUsedPercent)
+        let secondaryPercent = mode.displayPercent(fromUsedPercent: secondaryUsedPercent)
         let font = NSFont.monospacedDigitSystemFont(ofSize: Self.textFontSize, weight: .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -24,8 +30,8 @@ enum IconRenderer {
         let topSize = topStr.size()
         let bottomSize = bottomStr.size()
 
-        let topUrgency = Urgency(percent: primaryPercent)
-        let bottomUrgency = Urgency(percent: secondaryPercent)
+        let topUrgency = Urgency(level: mode.level(forDisplayedPercent: primaryPercent))
+        let bottomUrgency = Urgency(level: mode.level(forDisplayedPercent: secondaryPercent))
 
         let contentWidth = max(
             Self.rowWidth(textSize: topSize, urgency: topUrgency),
@@ -60,10 +66,12 @@ enum IconRenderer {
     private enum Urgency {
         case normal, warning, critical
 
-        init(percent: Int) {
-            if percent >= 90 { self = .critical }
-            else if percent >= 70 { self = .warning }
-            else { self = .normal }
+        init(level: UsageLevel) {
+            switch level {
+            case .normal: self = .normal
+            case .warning: self = .warning
+            case .critical: self = .critical
+            }
         }
 
         var boxHorizontalPadding: CGFloat? {

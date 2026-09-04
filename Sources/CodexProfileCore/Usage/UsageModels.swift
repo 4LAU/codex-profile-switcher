@@ -10,6 +10,7 @@ public struct UsageSnapshot: Codable, Equatable {
     public let fetchedAt: Date
     public let primaryWindowDurationMins: Int?
     public let secondaryWindowDurationMins: Int?
+    public let availableResetCount: Int?
 
     public init(
         planType: String?,
@@ -20,7 +21,8 @@ public struct UsageSnapshot: Codable, Equatable {
         secondaryResetAt: Date?,
         fetchedAt: Date,
         primaryWindowDurationMins: Int? = nil,
-        secondaryWindowDurationMins: Int? = nil
+        secondaryWindowDurationMins: Int? = nil,
+        availableResetCount: Int? = nil
     ) {
         self.planType = planType
         self.creditsRemaining = creditsRemaining
@@ -31,6 +33,7 @@ public struct UsageSnapshot: Codable, Equatable {
         self.fetchedAt = fetchedAt
         self.primaryWindowDurationMins = primaryWindowDurationMins
         self.secondaryWindowDurationMins = secondaryWindowDurationMins
+        self.availableResetCount = availableResetCount
     }
 }
 

@@ -135,6 +135,13 @@ change refreshes still run.
 **Refresh when the menu opens** is off by default. Turn it on if opening the
 menu should also request fresh usage.
 
+**Usage display** controls whether profile bars, menu-bar numbers, and switch
+recommendations show used or remaining percentages. The choice is persisted;
+existing behavior remains the default until you select **Remaining**.
+
+When Codex reports them, profile headers show available rate-limit resets as
+`re` and the separate credit balance as `cr`.
+
 Choose **Refresh** or press Command-R to update the open menu in place. The
 menu stays open and the Refresh row is disabled until the work finishes. If a
 refresh cannot get a current reading, the last successful reading stays visible

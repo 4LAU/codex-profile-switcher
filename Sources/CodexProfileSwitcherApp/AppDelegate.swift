@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasShownRecoveryNotice = false
     private var canHandleRecoveryNotices = false
     private let refreshPreferences = RefreshPreferences()
+    private let usageDisplayPreferences = UsageDisplayPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -355,8 +356,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let snap = self.store.statuses[activeId]?.snapshot {
             self.statusItem.button?.image = IconRenderer.render(
-                primaryPercent: snap.primaryUsedPercent,
-                secondaryPercent: snap.secondaryUsedPercent)
+                primaryUsedPercent: snap.primaryUsedPercent,
+                secondaryUsedPercent: snap.secondaryUsedPercent,
+                mode: self.usageDisplayPreferences.mode)
         } else {
             self.statusItem.button?.image = IconRenderer.renderEmpty()
         }
@@ -520,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status: health.status,
             isActive: health.isActive,
             duplicateLine: duplicateLine,
+            usageDisplayMode: self.usageDisplayPreferences.mode,
             onSwitch: { [weak self] in self?.switchToProfile(health.profile.id) })
 
         let hostView = NSHostingView(rootView: cardView)
@@ -576,7 +579,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addRecommendationItem(for health: ProfileHealth) {
         let score = health.score ?? 0
-        let title = "⚡ Switch to \"\(health.profile.label)\" — \(score)% used"
+        let usage = self.usageDisplayPreferences.mode.displayText(fromUsedPercent: score)
+        let title = "⚡ Switch to \"\(health.profile.label)\" — \(usage)"
         let item = NSMenuItem(title: title, action: #selector(self.switchToRecommendedProfile(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = health.profile.id
@@ -774,6 +778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         SettingsWindow.show(
             store: self.store,
             refreshPreferences: self.refreshPreferences,
+            usageDisplayPreferences: self.usageDisplayPreferences,
             actions: SettingsActions(
                 reauthenticateProfile: { [weak self] (id: String, completion: @escaping (Result<Void, SettingsActionError>) -> Void) in
                     self?.startLogin(for: id, presentFailureAlert: false) { result in
@@ -791,6 +796,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 },
                 refreshScheduleChanged: { [weak self] in
                     self?.startPeriodicRefreshTimer()
+                },
+                usageDisplayChanged: { [weak self] in
+                    guard let self else { return }
+                    self.updateIcon()
+                    if self.isMenuOpen {
+                        self.rebuildMenu()
+                    }
                 },
                 reviewLegacyKeychainMigration: { [weak self] in
                     guard let self else {

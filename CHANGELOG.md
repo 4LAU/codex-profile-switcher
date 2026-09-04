@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- General settings now include a persistent choice to show remaining or used
+  quota percentages in the menu and menu-bar icon.
+- Profile cards show the available rate-limit reset count separately from the
+  credit balance.
+- Profile-switch recommendations follow the selected remaining/used display
+  mode.
+
+### Changed
+
+- The refresh-interval picker uses a compact fixed-width control instead of
+  stretching across the General settings window.
+
 ## 0.5.21 -- 2026-08-29
 
 ### Fixed
