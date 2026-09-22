@@ -8,6 +8,7 @@ struct SettingsActions {
     let cancelLogin: (String) -> Bool
     let clearSavedAuth: (String) -> Result<Void, SettingsActionError>
     let refreshScheduleChanged: () -> Void
+    let limitDisplayModeChanged: () -> Void
     let reviewLegacyKeychainMigration: () -> Result<KeychainMigrationPreview, SettingsActionError>
     let confirmLegacyKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
     let completePendingKeychainMigration: (KeychainMigrationPreview, Int) -> Result<Void, SettingsActionError>
@@ -22,6 +23,7 @@ enum SettingsWindow {
     static func show(
         store: ProfileStore,
         refreshPreferences: RefreshPreferences,
+        limitDisplayPreferences: LimitDisplayPreferences,
         actions: SettingsActions
     ) {
         Self.cancelActiveMigrationReview()
@@ -33,6 +35,7 @@ enum SettingsWindow {
                 rootView: SettingsView(
                     store: store,
                     refreshPreferences: refreshPreferences,
+                    limitDisplayPreferences: limitDisplayPreferences,
                     actions: actions,
                     migrationLifecycle: lifecycle))
             wc.showWindow(nil)
@@ -56,6 +59,7 @@ enum SettingsWindow {
         let view = SettingsView(
             store: store,
             refreshPreferences: refreshPreferences,
+            limitDisplayPreferences: limitDisplayPreferences,
             actions: actions,
             migrationLifecycle: lifecycle)
         window.contentView = NSHostingView(rootView: view)
@@ -118,6 +122,7 @@ final class SettingsMigrationLifecycle {
 struct SettingsView: View {
     @ObservedObject var store: ProfileStore
     @ObservedObject var refreshPreferences: RefreshPreferences
+    @ObservedObject var limitDisplayPreferences: LimitDisplayPreferences
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
     @State private var selectedTab = 0
@@ -144,6 +149,7 @@ struct SettingsView: View {
                     GeneralTab(
                         store: self.store,
                         refreshPreferences: self.refreshPreferences,
+                        limitDisplayPreferences: self.limitDisplayPreferences,
                         actions: self.actions,
                         migrationLifecycle: self.migrationLifecycle,
                         toast: self.toast)
@@ -540,6 +546,7 @@ struct ProfilesTab: View {
 struct GeneralTab: View {
     let store: ProfileStore
     @ObservedObject var refreshPreferences: RefreshPreferences
+    @ObservedObject var limitDisplayPreferences: LimitDisplayPreferences
     let actions: SettingsActions
     let migrationLifecycle: SettingsMigrationLifecycle
     @ObservedObject var toast: ToastState
@@ -621,6 +628,28 @@ struct GeneralTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("DISPLAY")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Picker("Limit display", selection: self.$limitDisplayPreferences.mode) {
+                    ForEach(LimitDisplayMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: self.limitDisplayPreferences.mode) { _, _ in
+                    self.actions.limitDisplayModeChanged()
+                }
+
+                Text(self.limitDisplayPreferences.mode.settingsDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
 
             if self.store.shouldShowKeychainMigration {
