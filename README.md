@@ -135,6 +135,11 @@ change refreshes still run.
 **Refresh when the menu opens** is off by default. Turn it on if opening the
 menu should also request fresh usage.
 
+**Limit display** chooses what the percentages mean. **Used** (the default)
+shows 0% for a full limit and 100% for an exhausted one; **Remaining**
+reverses this, so 100% is a full limit and 0% is exhausted. It applies to the
+menu bar icon and the per-profile usage bars.
+
 Choose **Refresh** or press Command-R to update the open menu in place. The
 menu stays open and the Refresh row is disabled until the work finishes. If a
 refresh cannot get a current reading, the last successful reading stays visible

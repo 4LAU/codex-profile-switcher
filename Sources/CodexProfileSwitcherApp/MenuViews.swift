@@ -194,6 +194,11 @@ struct UsageRow: View {
     let percent: Int
     let resetAt: Date?
     let isHighlighted: Bool
+    let displayMode: LimitDisplayMode
+
+    private var displayedPercent: Int {
+        self.displayMode.displayedPercent(forUsedPercent: self.percent)
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -202,9 +207,11 @@ struct UsageRow: View {
                 .foregroundStyle(self.isHighlighted ? .secondary : .tertiary)
                 .frame(width: 16, alignment: .leading)
 
-            UsageBar(percent: Double(self.percent), tint: progressColor(for: self.percent))
+            // The tint keeps keying off the used percent: a nearly exhausted
+            // limit stays red whether the number shown is used or remaining.
+            UsageBar(percent: Double(self.displayedPercent), tint: progressColor(for: self.percent))
 
-            Text("\(self.percent)%")
+            Text("\(self.displayedPercent)%")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(self.isHighlighted ? .primary : .secondary)
                 .frame(width: 30, alignment: .trailing)
@@ -271,6 +278,7 @@ struct ProfileCardView: View {
     let status: ProfileStatus
     let isActive: Bool
     let duplicateLine: String?
+    let displayMode: LimitDisplayMode
     let onSwitch: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -370,7 +378,8 @@ struct ProfileCardView: View {
                         legacyLabel: "5h"),
                     percent: snap.primaryUsedPercent,
                     resetAt: snap.primaryResetAt,
-                    isHighlighted: self.isActive || self.isHovered)
+                    isHighlighted: self.isActive || self.isHovered,
+                    displayMode: self.displayMode)
             }
             if self.hasSecondaryWindow(snap) {
                 UsageRow(
@@ -379,7 +388,8 @@ struct ProfileCardView: View {
                         legacyLabel: "Wk"),
                     percent: snap.secondaryUsedPercent,
                     resetAt: snap.secondaryResetAt,
-                    isHighlighted: self.isActive || self.isHovered)
+                    isHighlighted: self.isActive || self.isHovered,
+                    displayMode: self.displayMode)
             }
         }
     }

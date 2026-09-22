@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasShownRecoveryNotice = false
     private var canHandleRecoveryNotices = false
     private let refreshPreferences = RefreshPreferences()
+    private let limitDisplayPreferences = LimitDisplayPreferences()
     private let sparkleUpdater = SparkleUpdater()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -356,7 +357,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let snap = self.store.statuses[activeId]?.snapshot {
             self.statusItem.button?.image = IconRenderer.render(
                 primaryPercent: snap.primaryUsedPercent,
-                secondaryPercent: snap.secondaryUsedPercent)
+                secondaryPercent: snap.secondaryUsedPercent,
+                displayMode: self.limitDisplayPreferences.mode)
         } else {
             self.statusItem.button?.image = IconRenderer.renderEmpty()
         }
@@ -520,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status: health.status,
             isActive: health.isActive,
             duplicateLine: duplicateLine,
+            displayMode: self.limitDisplayPreferences.mode,
             onSwitch: { [weak self] in self?.switchToProfile(health.profile.id) })
 
         let hostView = NSHostingView(rootView: cardView)
@@ -774,6 +777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         SettingsWindow.show(
             store: self.store,
             refreshPreferences: self.refreshPreferences,
+            limitDisplayPreferences: self.limitDisplayPreferences,
             actions: SettingsActions(
                 reauthenticateProfile: { [weak self] (id: String, completion: @escaping (Result<Void, SettingsActionError>) -> Void) in
                     self?.startLogin(for: id, presentFailureAlert: false) { result in
@@ -791,6 +795,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 },
                 refreshScheduleChanged: { [weak self] in
                     self?.startPeriodicRefreshTimer()
+                },
+                limitDisplayModeChanged: { [weak self] in
+                    guard let self else { return }
+                    self.updateIcon()
+                    if self.isMenuOpen {
+                        self.rebuildMenu()
+                    }
                 },
                 reviewLegacyKeychainMigration: { [weak self] in
                     guard let self else {

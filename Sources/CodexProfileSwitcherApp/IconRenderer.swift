@@ -12,18 +12,24 @@ enum IconRenderer {
 
     // MARK: - Public
 
-    static func render(primaryPercent: Int, secondaryPercent: Int) -> NSImage {
+    static func render(primaryPercent: Int, secondaryPercent: Int, displayMode: LimitDisplayMode) -> NSImage {
         let font = NSFont.monospacedDigitSystemFont(ofSize: Self.textFontSize, weight: .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.black,
         ]
 
-        let topStr = NSAttributedString(string: String(format: "%02d", primaryPercent), attributes: attrs)
-        let bottomStr = NSAttributedString(string: String(format: "%02d", secondaryPercent), attributes: attrs)
+        let topStr = NSAttributedString(
+            string: String(format: "%02d", displayMode.displayedPercent(forUsedPercent: primaryPercent)),
+            attributes: attrs)
+        let bottomStr = NSAttributedString(
+            string: String(format: "%02d", displayMode.displayedPercent(forUsedPercent: secondaryPercent)),
+            attributes: attrs)
         let topSize = topStr.size()
         let bottomSize = bottomStr.size()
 
+        // Urgency keeps keying off the used percent: a nearly exhausted limit
+        // gets the alert box whether the digits shown are used or remaining.
         let topUrgency = Urgency(percent: primaryPercent)
         let bottomUrgency = Urgency(percent: secondaryPercent)
 

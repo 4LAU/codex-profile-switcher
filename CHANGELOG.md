@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- Settings now include a **Limit display** preference for showing usage as
+  either the percentage used or the percentage remaining. The choice applies
+  to both the menu bar icon and per-profile usage bars.
+
 ## 0.5.21 -- 2026-08-29
 
 ### Fixed

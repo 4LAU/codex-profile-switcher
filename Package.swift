@@ -55,6 +55,13 @@ let package = Package(
                 .define("TESTING"),
             ]),
         .testTarget(
+            name: "LimitDisplayTests",
+            dependencies: ["CodexProfileSwitcherApp"],
+            path: "Tests/LimitDisplayTests",
+            swiftSettings: [
+                .define("TESTING"),
+            ]),
+        .testTarget(
             name: "ProfileStoreEnvironmentTests",
             dependencies: ["CodexProfileSwitcherApp", "CodexProfileCore"],
             path: "Tests/ProfileStoreEnvironmentTests",
