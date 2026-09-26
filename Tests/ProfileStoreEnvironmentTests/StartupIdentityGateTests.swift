@@ -83,15 +83,20 @@ struct StartupIdentityGateTests {
     }
 
     @Test
-    func installedBuildWithoutProductionCapabilityRequiresRecovery() throws {
+    func installedBuildWithoutProductionCapabilityUsesLocalFileVault() throws {
         let result = StartupIdentityGate.classify(
             bundleURL: self.installedBundle,
             environment: [:],
             realHome: self.realHome,
             hasDataProtectionKeychainAccess: false)
 
-        try envExpect(result == .recovery,
-                      "The installed bundle without the production capability must recover")
+        try envExpect(result == .local,
+                      "The installed local build must use its file vault")
+        try envExpect(StartupIdentityGate.canHandleRecoveryNotice(decision: result),
+                      "The installed local build must handle recovery notices")
+        let vault = StartupIdentityGate.makeIsolatedAuthVault(environment: [:])
+        try envExpect(vault.diagnostics().activeBackend == .file,
+                      "The installed local build selected a non-file auth vault")
     }
 
     @Test

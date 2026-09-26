@@ -57,6 +57,16 @@ struct ProfileHealth {
         }
     }
 
+    static func autoSwitchTarget(from records: [ProfileHealth]) -> ProfileHealth? {
+        guard let active = records.first(where: \.isActive),
+              active.tier == .exhausted else {
+            return nil
+        }
+        return self.menuOrderedInactive(records).first {
+            $0.tier == .knownSwitchable && $0.isSwitchable
+        }
+    }
+
     static func recommendation(
         from records: [ProfileHealth],
         activeMinimumScore: Int = 70,

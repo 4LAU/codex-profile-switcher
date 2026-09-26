@@ -135,6 +135,11 @@ change refreshes still run.
 **Refresh when the menu opens** is off by default. Turn it on if opening the
 menu should also request fresh usage.
 
+**Auto Switch** is off by default. Turn it on to switch automatically to another
+account with remaining quota when the active account hits 100% usage. Codex is
+quit and relaunched the same way as a manual switch, without a confirmation
+dialog. Nothing happens if every saved account is exhausted.
+
 Choose **Refresh** or press Command-R to update the open menu in place. The
 menu stays open and the Refresh row is disabled until the work finishes. If a
 refresh cannot get a current reading, the last successful reading stays visible

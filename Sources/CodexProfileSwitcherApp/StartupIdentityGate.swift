@@ -8,6 +8,7 @@ enum StartupIdentityGate {
 
     enum Decision: Equatable {
         case production
+        case local
         case isolated
         case recovery
     }
@@ -67,17 +68,11 @@ enum StartupIdentityGate {
         let canonicalRealHome = Self.canonicalURL(realHome)
         if let overrideURL = Self.profileHomeOverride(in: environment) {
             guard Self.canonicalURL(overrideURL) == canonicalRealHome else { return .isolated }
-            return hasDataProtectionKeychainAccess
-                && Self.isLiteralInstalledURL(bundleURL, expected: installedBundleURL)
-                ? .production
-                : .recovery
         }
-
-        guard hasDataProtectionKeychainAccess,
-              Self.isLiteralInstalledURL(bundleURL, expected: installedBundleURL) else {
+        guard Self.isLiteralInstalledURL(bundleURL, expected: installedBundleURL) else {
             return .recovery
         }
-        return .production
+        return hasDataProtectionKeychainAccess ? .production : .local
     }
 
     static func makeIsolatedAuthVault(environment: [String: String]) -> FileAuthVault {
@@ -86,7 +81,7 @@ enum StartupIdentityGate {
     }
 
     static func canHandleRecoveryNotice(decision: Decision) -> Bool {
-        decision == .production
+        decision == .production || decision == .local
     }
 
     @MainActor
