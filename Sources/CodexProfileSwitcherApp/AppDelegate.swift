@@ -52,8 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func continueStartup(decision: StartupIdentityGate.Decision) {
         self.canHandleRecoveryNotices = StartupIdentityGate.canHandleRecoveryNotice(
             decision: decision)
-        if decision == .production {
+        if decision == .production || decision == .local {
             guard !self.terminateIfInstalledInstanceIsRunning() else { return }
+        }
+        if decision == .production {
             LaunchAtLogin.migrateLegacyLaunchAgentIfNeeded()
             do {
                 try RenewalAgent.register()
@@ -64,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let environment = ProcessInfo.processInfo.environment
-        if decision == .isolated {
+        if decision == .isolated || decision == .local {
             self.store = ProfileStore(
                 authVault: StartupIdentityGate.makeIsolatedAuthVault(environment: environment),
                 environment: environment)

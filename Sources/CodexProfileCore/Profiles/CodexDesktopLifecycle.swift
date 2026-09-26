@@ -184,10 +184,9 @@ public struct CodexDesktopLifecycle {
             if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
                 return LaunchTarget(installation: nil, bundledCLIPath: canonicalCLI)
             }
-            let appPath = URL(fileURLWithPath: canonicalCLI)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent().path
+            guard let appPath = self.parentAppPath(for: canonicalCLI) else {
+                throw CodexDesktopLifecycleError.invalidInstallation(canonicalCLI)
+            }
             let installation = try self.validatedInstallation(at: appPath)
             guard canonicalCLI == installation.bundledCLIPath else {
                 throw CodexDesktopLifecycleError.launchTargetMismatch(appPath, canonicalCLI)
@@ -232,8 +231,12 @@ public struct CodexDesktopLifecycle {
         let executable = appURL
             .appendingPathComponent("Contents/MacOS")
             .appendingPathComponent(executableName).path
-        let bundledCLI = appURL
-            .appendingPathComponent("Contents/Resources/codex").path
+        let cliPaths = [
+            "Contents/Resources/codex-cli/bin/codex",
+            "Contents/Resources/codex",
+        ].map { appURL.appendingPathComponent($0).path }
+        let bundledCLI = cliPaths.first(where: { self.fileManager.isExecutableFile(atPath: $0) })
+            ?? cliPaths[0]
         guard self.fileManager.isExecutableFile(atPath: executable) else {
             throw CodexDesktopLifecycleError.invalidInstallation(appPath)
         }
@@ -477,6 +480,15 @@ public struct CodexDesktopLifecycle {
 
     private func canonicalPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func parentAppPath(for cliPath: String) -> String? {
+        var directory = URL(fileURLWithPath: cliPath).deletingLastPathComponent()
+        while directory.path != "/" {
+            if directory.pathExtension == "app" { return directory.path }
+            directory.deleteLastPathComponent()
+        }
+        return nil
     }
 
     @discardableResult

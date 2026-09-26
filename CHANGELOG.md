@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- Profile switching and usage refresh find the Codex CLI in the new
+  `ChatGPT.app/Contents/Resources/codex-cli/bin/codex` layout while retaining
+  support for older app bundles.
+- Locally signed installations in `/Applications` start with their existing
+  file-backed profiles when they lack the production Keychain entitlement.
+
 ### Added
 
 - Auto Switch: when enabled in Settings, an exhausted active account (100%
