@@ -3,6 +3,14 @@
     <channel>
         <title>Codex Profile Switcher Changelog</title>
         <item>
+            <title>0.5.22</title>
+            <pubDate>Thu, 01 Oct 2026 02:24:32 -0700</pubDate>
+            <sparkle:version>41</sparkle:version>
+            <sparkle:shortVersionString>0.5.22</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.22/CodexProfileSwitcher-0.5.22.dmg" length="6143671" type="application/octet-stream" sparkle:edSignature="8BD1J2UKDc0JsQA34Yn7HL0Wh7sghtHD0k1NnxpLtckxwXP1jUPM+GSj5FEoS6kWQs9bMKBnhinijD2VPPHLCg=="/>
+        </item>
+        <item>
             <title>0.5.21</title>
             <pubDate>Sat, 29 Aug 2026 22:12:50 -0700</pubDate>
             <sparkle:version>40</sparkle:version>
@@ -17,14 +25,6 @@
             <sparkle:shortVersionString>0.5.20</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.20/CodexProfileSwitcher-0.5.20.dmg" length="6130387" type="application/octet-stream" sparkle:edSignature="iegCfiFAsnRx1OyhJ9cYTkg1sEjbkxupsKgqKxRVtdJVUROV+u290lYOnL+nIgzK55Un9CHwSLtBrsHbyMEfCg=="/>
-        </item>
-        <item>
-            <title>0.5.19</title>
-            <pubDate>Fri, 21 Aug 2026 11:31:44 -0700</pubDate>
-            <sparkle:version>38</sparkle:version>
-            <sparkle:shortVersionString>0.5.19</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/4LAU/codex-profile-switcher/releases/download/v0.5.19/CodexProfileSwitcher-0.5.19.dmg" length="6130360" type="application/octet-stream" sparkle:edSignature="dHZH/d9kwEklZ4nzSIfUwlLgbs/NSw7MMoChXMUMRPmge03g65MV6GXP9EGdPb1ilyFK0MvIxnpGNXI3F7HTAg=="/>
         </item>
         <item>
             <title>0.5.18</title>
