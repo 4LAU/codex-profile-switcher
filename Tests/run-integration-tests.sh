@@ -348,7 +348,7 @@ test_switch_current_chatgpt_layout_stops_running_desktop() {
   reset_home
   local app="$WORK_DIR/ChatGPT.app"
   local desktop="$app/Contents/MacOS/ChatGPT"
-  local bundled="$app/Contents/Resources/codex"
+  local bundled="$app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
   local pid_file="$WORK_DIR/chatgpt.pid"
   local event_log="$WORK_DIR/chatgpt-events.log"
   local launch_marker="$WORK_DIR/current-bundled-cli.launch"

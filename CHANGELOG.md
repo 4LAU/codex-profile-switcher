@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+
+- Switching profiles failed with "Codex CLI not found at
+  /Applications/ChatGPT.app/Contents/Resources/codex" after ChatGPT 26.924.
+  That release moved the bundled Codex CLI to
+  `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`. The app now
+  checks the new location first and falls back to the old one, so older
+  ChatGPT builds still work.
+
 ## 0.5.21 -- 2026-08-29
 
 ### Fixed

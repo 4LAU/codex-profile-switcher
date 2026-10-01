@@ -47,6 +47,10 @@ public enum CodexDesktopLifecycleError: LocalizedError {
 
 public struct CodexDesktopLifecycle {
     public static let bundleIdentifier = "com.openai.codex"
+    private static let bundledCLIRelativePaths = [
+        "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "Contents/Resources/codex",
+    ]
     private let environment: [String: String]
     private let fileManager: FileManager
 
@@ -184,10 +188,9 @@ public struct CodexDesktopLifecycle {
             if self.value("CODEX_PROFILE_TEST_ASSUME_CODEX_STOPPED") == "1" {
                 return LaunchTarget(installation: nil, bundledCLIPath: canonicalCLI)
             }
-            let appPath = URL(fileURLWithPath: canonicalCLI)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent().path
+            let appPath = Self.bundledCLIRelativePaths
+                .first { canonicalCLI.hasSuffix("/" + $0) }
+                .map { String(canonicalCLI.dropLast($0.count + 1)) } ?? canonicalCLI
             let installation = try self.validatedInstallation(at: appPath)
             guard canonicalCLI == installation.bundledCLIPath else {
                 throw CodexDesktopLifecycleError.launchTargetMismatch(appPath, canonicalCLI)
@@ -232,8 +235,8 @@ public struct CodexDesktopLifecycle {
         let executable = appURL
             .appendingPathComponent("Contents/MacOS")
             .appendingPathComponent(executableName).path
-        let bundledCLI = appURL
-            .appendingPathComponent("Contents/Resources/codex").path
+        let bundledCLIs = Self.bundledCLIRelativePaths.map { appURL.appendingPathComponent($0).path }
+        let bundledCLI = bundledCLIs.first { self.fileManager.isExecutableFile(atPath: $0) } ?? bundledCLIs[0]
         guard self.fileManager.isExecutableFile(atPath: executable) else {
             throw CodexDesktopLifecycleError.invalidInstallation(appPath)
         }
