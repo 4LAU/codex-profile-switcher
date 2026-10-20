@@ -17,5 +17,5 @@ Public open-source macOS menu bar app (SwiftUI) plus CLI helper that switches Co
 
 ## Testing
 
-Global policy applies (`~/.claude/testing-policy.md`): default zero tests. Verification tools: `make check`, isolated runs via `CODEX_PROFILE_HOME`, `Scripts/keychain_signed_smoke.sh` (manual). Integration tests are hermetic (temp home, fake binaries, file-backed vault).
+Global policy applies (`~/.claude/testing-policy.md`): tests only for this repo's 1% list. Verification tools: `make check`, isolated runs via `CODEX_PROFILE_HOME`, `Scripts/keychain_signed_smoke.sh` (manual). Integration tests are hermetic (temp home, fake binaries, file-backed vault).
 The 1% list (silent failures): overwriting `~/.codex/auth.json` with the wrong profile, failing to preserve the outgoing live account on a switch, mismatching a saved profile to live auth, usage shown for the wrong account, reporting a profile healthy when it needs re-login, leaking tokens/cookies/emails into logs.
